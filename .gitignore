@@ -1,0 +1,29 @@
+# 실행 데이터 — 저장소에 남기지 않는다
+/data/
+/logs/
+*.jsonl
+*.tsv
+state.json
+config.json
+salt
+
+# 현장 캡처 픽스처는 정제 후 tests/fixtures/ 에만 둔다
+/captures/
+!/tests/fixtures/
+!/tests/fixtures/**
+
+# 비밀
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileconfig
+
+# macOS / 파이썬
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
