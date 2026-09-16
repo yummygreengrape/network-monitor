@@ -141,3 +141,76 @@ class TestLanguageSelection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSummariesNeverEmbedIdentifiers(unittest.TestCase):
+    """판정 요약문에 식별자를 넣지 않는다.
+
+    보고서와 실시간 화면은 요약문만 출력한다(근거는 기록에만 남는다). 요약문이
+    식별자를 담지 않는 덕에 **가리지 않은 보고서도 그대로 공유할 수 있다.**
+    실데이터로 확인한 성질이고, 문구를 고치다 깨지기 쉬우므로 여기서 지킨다.
+    """
+
+    SECRETS = ("192.0.2.", "198.51.100.", "2001:db8:", "00:00:5e:00:53:",
+               "ExampleNet")
+
+    def test_no_summary_contains_a_synthetic_identifier(self):
+        from netmon.detect import (Context, attributions_for, network_key,
+                                   run_all)
+        from tests.helpers import (BSSID, BSSID_ALT, GW_MAC, GW_MAC_ALT, SSID,
+                                   obs, vpn_state)
+        cases = [
+            dict(gw_mac=GW_MAC_ALT), dict(duplicate_ip=3),
+            dict(dhcp_server="192.0.2.99"), dict(dns=("192.0.2.66",)),
+            dict(resolvers=("192.0.2.66",)),
+            dict(proxy={"ProxyAutoDiscoveryEnable": "1"}),
+            dict(default6=(("2001:db8::1", "en0"),)), dict(security="NONE"),
+            dict(ssid=SSID, bssid=BSSID_ALT, gw_mac=GW_MAC_ALT),
+            dict(icmp_ok=False, gw_mac=None), dict(rtt=500.0),
+            dict(vpn=vpn_state("disconnected")),
+            dict(shared_macs={"00:00:5e:00:53:07":
+                              {"count": 5,
+                               "addresses": [{"id": "ipv4", "v": "192.0.2.%d" % i}
+                                             for i in range(5)]}}),
+        ]
+        features = {k: True for k in ("detect.l2", "detect.dhcp", "detect.dns",
+                                      "detect.route", "detect.wifi", "detect.quality",
+                                      "detect.vpn", "detect.evil_twin")}
+        offenders = []
+        for code in messages.available():
+            messages.set_language(code)
+            try:
+                for case in cases:
+                    base = dict(ssid=SSID, bssid=BSSID, vpn=vpn_state("connected"))
+                    prev = obs(ts="2026-01-01T00:00:00Z", **base)
+                    cur = obs(ts="2026-01-01T00:00:05Z", **dict(base, **case))
+                    ctx = Context(elapsed=5.0, interval=5.0, features=features,
+                                  state={"icmp_gw": True, "rtt_ewma": 5.0,
+                                         "arp_reply_rate": 0.8, "gw_fail_streak": 2},
+                                  attributions=attributions_for(prev, cur, 5.0, 5.0),
+                                  network=network_key(cur))
+                    for f in run_all(prev, cur, ctx):
+                        for secret in self.SECRETS:
+                            if secret in f.summary:
+                                offenders.append((code, f.kind, secret))
+            finally:
+                messages.set_language("ko")
+        self.assertEqual(offenders, [],
+                         "요약문에 식별자가 들어갔다: %s" % offenders)
+
+    def test_evidence_is_where_identifiers_belong(self):
+        """식별자는 근거에만, 그것도 감싼 형태로 들어간다."""
+        from netmon.detect import Context, network_key, run_all
+        from netmon.model import ID_KINDS
+        from netmon.redact import tagged_values
+        from tests.helpers import GW_MAC, GW_MAC_ALT, obs
+
+        prev = obs(ts="2026-01-01T00:00:00Z", gw_mac=GW_MAC)
+        cur = obs(ts="2026-01-01T00:00:05Z", gw_mac=GW_MAC_ALT)
+        ctx = Context(elapsed=5.0, interval=5.0, features={"detect.l2": True},
+                      state={"icmp_gw": True}, attributions=[], network=network_key(cur))
+        found = [f for f in run_all(prev, cur, ctx) if f.kind == "GW_MAC_CHANGED"]
+        self.assertTrue(found)
+        tagged = tagged_values(found[0].evidence)
+        self.assertIn("mac", tagged)
+        self.assertIn(GW_MAC_ALT, tagged["mac"])
