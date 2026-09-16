@@ -18,7 +18,7 @@
 |---|---|---|---|
 | `GW_MAC_CHANGED` | 보안 | 확정 | `arp -an -x` |
 | `DUPLICATE_IP` | 보안 | 확정 | `netstat -s -p arp` |
-| `ARP_REPLY_SPIKE` | 보안 | 의심 | `netstat -s -p arp` |
+| `ARP_REPLY_SPIKE` | 보안 | 의심 | `netstat -s -p arp` (초당 건수) |
 | `SHARED_MAC` | 보안 | 가능 | `arp -an -x` |
 | `DHCP_SERVER_CHANGED` | 보안 | 확정 | `ipconfig getpacket` |
 | `DHCP_ROUTER_CHANGED` | 보안 | 확정 | `ipconfig getpacket` |
@@ -32,7 +32,7 @@
 | `WIFI_SECURITY_DOWNGRADE` | 보안 | 확정 | `ipconfig getsummary` |
 | `WIFI_SECURITY_CHANGED` | 보안 | 확정 | `ipconfig getsummary` |
 | `FIRST_HOP_UNREACHABLE` / `FIRST_HOP_RECOVERED` | 품질 | 확정 | ARP 또는 ping |
-| `LATENCY_SPIKE` | 품질 | 의심 | ping |
+| `LATENCY_SPIKE` | 품질 | 의심 | ping (연속 3주기) |
 | `DHCP_LEASE_RENEWED` | 품질 | 확정 | `ipconfig getsummary` |
 | `WIFI_LINK_CHANGED` | 품질 | 확정 | `ipconfig getsummary` |
 | `GATEWAY_ICMP_SILENT` / `GATEWAY_ICMP_OK` | 참고 | 확정 | 보정 결과 |
@@ -152,6 +152,18 @@ Wi-Fi 로밍·해제·인증 이벤트(`log show`), 신뢰 저장소 변화
 ## 3단계 — `external_probes` 동의 필요 (예정)
 
 DNS 응답과 DoH 기준값 비교, 고정 호스트의 TLS 발급자 변화, 공인 IP·ASN 변화.
+
+## 누적 카운터와 주기 간격
+
+`netstat -s -p arp` 같은 누적 카운터는 **반드시 시간으로 나눠서** 씁니다.
+주기 사이의 간격은 일정하지 않습니다 — 잠자기로 939초가 벌어진 구간의
+증가분을 5초 주기의 증가분과 같은 잣대로 비교해 실제로 거짓 경보가 났습니다
+(초당으로 환산하면 오히려 평소의 1/12이었습니다). 측정이 크게 벌어진 주기는
+아예 건너뜁니다. 그 구간의 증가분이 무엇을 뜻하는지 알 수 없기 때문입니다.
+
+같은 이유로 왕복 시간 급변은 **연속 3주기** 높을 때 한 번만 알립니다. 한 주기만
+보고 알리면 무선 구간의 정상적인 흔들림이 전부 사건이 됩니다 — 실측에서 한
+시간에 아홉 번까지 떴습니다.
 
 ## 지금은 할 수 없는 것
 
