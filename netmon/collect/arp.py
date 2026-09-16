@@ -14,6 +14,15 @@ NAME = "arp"
 
 INCOMPLETE = ("(incomplete)", "(none)", "incomplete")
 
+# 한 MAC 이 여러 IP 를 쥔 것은 ARP 스푸핑에서 나타나는 모양이지만, 라우터가
+# 대리 응답하는 정상 구성에서도 같은 모양이 나온다. 판정은 이 개수 이상일
+# 때만 쓴다. 그 아래는 기록해도 판정에 쓰이지 않으면서 자리만 차지한다 —
+# 실측에서 IP 2개짜리 항목 224개가 샘플 하나의 22KB, 하루 기록의 59% 를
+# 먹고 있었다.
+SHARED_MAC_MIN_ADDRESSES = 3
+SHARED_MAC_MAX_ADDRESSES = 8    # 판정 근거로 쓰는 만큼만 남긴다
+SHARED_MAC_MAX_ENTRIES = 20     # 최악의 경우를 묶어 둔다
+
 
 def normalize_mac(raw: str) -> str:
     """MAC 을 두 자리씩 채운 표기로 맞춘다.
@@ -118,7 +127,9 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
     for r in rows:
         if r["mac"] and r["iface"] == iface:
             by_mac.setdefault(r["mac"], []).append(r["ip"])
-    shared = {m: ips for m, ips in by_mac.items() if len(ips) > 1}
+    shared = {m: ips for m, ips in by_mac.items()
+              if len(ips) >= SHARED_MAC_MIN_ADDRESSES}
+    top = sorted(shared.items(), key=lambda kv: -len(kv[1]))[:SHARED_MAC_MAX_ENTRIES]
 
     return {
         "neighbors": len([r for r in rows if r["mac"]]),
@@ -127,8 +138,13 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         "replies_received": stat_like(stats, "arp replies received"),
         "requests_received": stat_like(stats, "arp requests received"),
         "conflict_probe_sent": stat_like(stats, "conflict probe"),
+        # 개수는 따로 남긴다. 주소 목록을 자르면서 "몇 개였는지"까지 잃으면
+        # 판정이 실제보다 작은 수를 말하게 된다.
         "shared_macs": {
-            m: [ident("ipv4", ip) for ip in ips] for m, ips in sorted(shared.items())
+            m: {"count": len(ips),
+                "addresses": [ident("ipv4", ip) for ip in ips[:SHARED_MAC_MAX_ADDRESSES]]}
+            for m, ips in sorted(top)
         },
+        "shared_mac_total": len(shared),
         "stats_keys": len(stats),
     }

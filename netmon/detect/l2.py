@@ -5,9 +5,10 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import messages as msg
+from ..collect.arp import SHARED_MAC_MIN_ADDRESSES
 from ..model import CONFIRMED, HIGH, LOW, MEDIUM, POSSIBLE, SECURITY, SUSPECT, Finding, Observation, unwrap
 
 FEATURE = "detect.l2"
@@ -20,6 +21,20 @@ FEATURE = "detect.l2"
 # 거짓 경보가 났다. 그때 초당 건수는 평소의 12분의 1이었다.
 REPLY_SPIKE_FACTOR = 8.0
 REPLY_SPIKE_MIN_RATE = 10.0
+
+
+def _shared_entry(entry: Any) -> Tuple[int, List[Any]]:
+    """shared_macs 의 한 항목을 (개수, 주소 목록)으로.
+
+    옛 기록은 주소 목록만 들고 있었다. 형식이 바뀌어도 그때 뜬 캡처를
+    재생할 수 있어야 한다.
+    """
+    if isinstance(entry, dict):
+        addresses = entry.get("addresses") or []
+        return int(entry.get("count", len(addresses))), list(addresses)
+    if isinstance(entry, list):
+        return len(entry), list(entry)
+    return 0, []
 
 
 def _gw_mac(obs: Observation) -> Optional[str]:
@@ -91,15 +106,19 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     # 라우터가 대리 응답하는 정상 구성에서도 나온다. 그래서 '가능'에 머문다.
     prev_shared = set((prev.get("arp", "shared_macs") or {}).keys())
     cur_shared = cur.get("arp", "shared_macs") or {}
-    new_shared = {m: v for m, v in cur_shared.items() if m not in prev_shared}
-    for mac, ips in new_shared.items():
-        if len(ips) < 3:
+    for mac, entry in cur_shared.items():
+        if mac in prev_shared:
+            continue
+        count, addresses = _shared_entry(entry)
+        # 수집기가 이미 걸러 내지만, 옛 형식으로 뜬 기록을 재생할 때를 위해
+        # 판정기도 스스로 확인한다.
+        if count < SHARED_MAC_MIN_ADDRESSES:
             continue
         out.append(Finding(
             axis=SECURITY, kind="SHARED_MAC",
             confidence=POSSIBLE, severity=LOW,
-            summary=msg.SHARED_MAC % len(ips),
-            evidence={"mac": {"id": "mac", "v": mac}, "addresses": ips[:8],
+            summary=msg.SHARED_MAC % count,
+            evidence={"mac": {"id": "mac", "v": mac}, "addresses": addresses,
                       "source": "arp -an -x"},
         ))
 

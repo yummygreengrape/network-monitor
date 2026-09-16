@@ -547,3 +547,82 @@ class TestRouteReappearingAfterLinkReturn(unittest.TestCase):
         f = by_kind(run_all(prev, cur, self._ctx(prev, cur)), "DEFAULT_ROUTE_CHANGED")
         self.assertIsNone(f.attribution, "안정화 창 안이라도 덮이면 안 된다")
         self.assertEqual(f.severity, "high")
+
+
+class TestSharedMacsBloat(unittest.TestCase):
+    """shared_macs 한 필드가 하루 기록의 59% 를 먹고 있었다.
+
+    실측: ARP 이웃 4875개인 네트워크에서 샘플 하나가 26KB, 그중 22KB.
+    내용은 IP 를 2개씩만 쥔 항목 224개였는데, 판정기는 3개 미만을 건너뛴다.
+    기록해도 판정에 쓰이지 않으면서 자리만 차지하고 있었다.
+    """
+
+    def _table(self, groups):
+        """groups: [(mac_suffix, ip 개수)] → arp -an -x 출력."""
+        lines = ["Neighbor Linklayer Address Expire(O) Expire(I) Netif"]
+        n = 1
+        for suffix, count in groups:
+            for _ in range(count):
+                lines.append("192.0.2.%d  00:00:5e:00:53:%02x  1m  1m  en0" % (n, suffix))
+                n += 1
+        return "\n".join(lines) + "\n"
+
+    def _shared(self, groups):
+        from netmon.collect.arp import (SHARED_MAC_MAX_ADDRESSES,
+                                        SHARED_MAC_MAX_ENTRIES,
+                                        SHARED_MAC_MIN_ADDRESSES, parse_arp_table)
+        rows = parse_arp_table(self._table(groups))
+        by_mac = {}
+        for r in rows:
+            by_mac.setdefault(r["mac"], []).append(r["ip"])
+        shared = {m: ips for m, ips in by_mac.items()
+                  if len(ips) >= SHARED_MAC_MIN_ADDRESSES}
+        top = sorted(shared.items(), key=lambda kv: -len(kv[1]))[:SHARED_MAC_MAX_ENTRIES]
+        return {m: {"count": len(ips), "addresses": ips[:SHARED_MAC_MAX_ADDRESSES]}
+                for m, ips in top}, len(shared)
+
+    def test_pairs_are_not_recorded_at_all(self):
+        """IP 2개짜리는 판정에 쓰이지 않는다. 기록할 이유가 없다."""
+        recorded, total = self._shared([(i, 2) for i in range(1, 30)])
+        self.assertEqual(recorded, {})
+        self.assertEqual(total, 0)
+
+    def test_the_interesting_ones_survive(self):
+        recorded, total = self._shared([(1, 5), (2, 2), (3, 9)])
+        self.assertEqual(total, 2)
+        self.assertEqual(len(recorded), 2)
+
+    def test_addresses_are_capped_but_the_count_is_kept(self):
+        """주소를 자르면서 개수까지 잃으면 판정이 실제보다 작은 수를 말한다."""
+        from netmon.collect.arp import SHARED_MAC_MAX_ADDRESSES
+        recorded, _ = self._shared([(1, 40)])
+        entry = list(recorded.values())[0]
+        self.assertEqual(entry["count"], 40)
+        self.assertEqual(len(entry["addresses"]), SHARED_MAC_MAX_ADDRESSES)
+
+    def test_entries_are_capped(self):
+        from netmon.collect.arp import SHARED_MAC_MAX_ENTRIES
+        recorded, total = self._shared([(i, 4) for i in range(1, 60)])
+        self.assertEqual(len(recorded), SHARED_MAC_MAX_ENTRIES)
+        self.assertEqual(total, 59, "잘렸다는 사실은 총계로 남는다")
+
+    def test_a_mac_growing_past_the_threshold_is_now_reported(self):
+        """전에는 2개짜리가 이미 키 집합에 있어서, 3개가 돼도 "새로 나타남" 이
+        아니었다. 잠재적 탐지 누락이었다."""
+        prev = obs(ts="2026-01-01T00:00:00Z", shared_macs={})
+        cur = obs(ts="2026-01-01T00:00:05Z", shared_macs={
+            "00:00:5e:00:53:07": {"count": 4,
+                                  "addresses": [{"id": "ipv4", "v": "192.0.2.%d" % i}
+                                                for i in range(4)]}})
+        f = by_kind(judge(prev, cur), "SHARED_MAC")
+        self.assertIsNotNone(f)
+        self.assertIn("4", f.summary)
+
+    def test_old_captures_still_replay(self):
+        """형식이 바뀌어도 그때 뜬 캡처를 재생할 수 있어야 한다."""
+        prev = obs(ts="2026-01-01T00:00:00Z", shared_macs={})
+        cur = obs(ts="2026-01-01T00:00:05Z", shared_macs={
+            "00:00:5e:00:53:07": [{"id": "ipv4", "v": "192.0.2.%d" % i} for i in range(5)]})
+        f = by_kind(judge(prev, cur), "SHARED_MAC")
+        self.assertIsNotNone(f)
+        self.assertIn("5", f.summary)
