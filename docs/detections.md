@@ -51,6 +51,30 @@
 앱 단위라 헬퍼 앱을 거치며, 그 이유와 실측 근거는
 [data-sources.md](data-sources.md)에 적었습니다.
 
+## VPN 감시 (기본 꺼짐)
+
+`setup`에서 켜거나 `vpn.enabled`로 켭니다. 설치된 공급자를 찾아 상태만 봅니다 —
+WARP(`warp-cli`), Tailscale(`tailscale`), WireGuard(`wg`), macOS 내장(`scutil --nc`).
+외부로 나가는 요청은 없고, 기록하는 것은 연결 상태와 사유 문자열뿐입니다.
+Tailscale의 `status --json`에는 기기 이름·주소·계정이 들어 있지만 `BackendState`
+외에는 읽지 않고, `scutil --nc list`의 서비스 이름(사용자가 지은 것)도 읽지 않습니다.
+
+| 판정 | 축 | 확신도 상한 | 비고 |
+|---|---|---|---|
+| `VPN_DISCONNECTED` | 품질 | 확정 | 끊김 자체는 사실. **원인은 단정하지 않는다** |
+| `VPN_PROTECTION_LOST` | 보안 | 확정 | 같은 끊김의 다른 면. 직접 끊었어도 기록된다 |
+| `VPN_RECONNECTED` | 품질 | 확정 | 끊겼던 시각을 함께 남긴다 |
+| `VPN_STATE_UNKNOWN` | 참고 | 확정 | 조회 실패. **끊김으로 세지 않는다** |
+
+원본 스크립트는 끊김 원인을 하나만 골랐습니다(`WIFI` / `WARP_PATH` /
+`NETWORK_CHANGE` / `SLEEP` / `ARP_ANOMALY`). 여기서는 고르지 않습니다. 대신 같은
+주기의 첫 홉 상태와 억제 사유를 **근거로 함께** 남기고, 요약문에 "가장 그럴듯한
+설명"만 덧붙입니다. 원인을 하나 골라 적으면 그 순간 나머지 근거가 사라집니다.
+
+`VPN_PROTECTION_LOST`의 심각도는 지금 붙은 네트워크가 개인별 자격증명
+(Enterprise/EAP)을 쓰는지로 갈립니다. 접미사 없는 `WPA2`도 사실상 공유 비밀번호
+이므로, **개인별 자격증명이라는 근거가 있을 때만** 위험이 낮다고 봅니다.
+
 ## 상시 실행일 때
 
 `service install`로 등록하면 로그인할 때 시작합니다. 측정 간격은 설정을 따르고,

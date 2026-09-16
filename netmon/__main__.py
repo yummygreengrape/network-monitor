@@ -182,6 +182,8 @@ def _install_agent(cfg: configmod.Config, log_dir: str, quiet: bool = False) -> 
         # launchd 아래에서는 stdout 이 파이프라 버퍼링된다. 버퍼를 끄지 않으면
         # 로그가 한참 뒤에야 나타나서 "멈춘 것처럼" 보인다.
         "PYTHONUNBUFFERED": "1",
+        # launchd 기본 PATH 에는 /usr/local/bin 이 없어서 VPN 도구를 못 찾는다
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
     }
     r = service.install(script, log_dir, env=env, interval=cfg.interval)
     if not r["ok"]:

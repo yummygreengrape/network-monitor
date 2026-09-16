@@ -57,6 +57,7 @@ def obs(
     proxy: Optional[Dict[str, str]] = None,
     shared_macs: Optional[Dict[str, Any]] = None,
     link_active: str = "TRUE",
+    vpn: Optional[Dict[str, Any]] = None,
 ) -> Observation:
     o = Observation(ts=ts)
     o.data["iface"] = {
@@ -115,7 +116,14 @@ def obs(
         "gateway_reachable": icmp_ok,
         "gateway_rtt_ms": rtt if icmp_ok else None,
     }
+    if vpn is not None:
+        o.data["vpn"] = vpn
     return o
+
+
+def vpn_state(state="connected", reason=None, provider="warp"):
+    return {provider: {"provider": provider, "state": state,
+                       "reason": reason, "iface": None}}
 
 
 def kinds(findings):

@@ -22,7 +22,7 @@ EWMA_ALPHA = 0.2
 # 적용하면 첫 몇 분이 통째로 오탐이 된다.
 VOLATILE_KEYS = ("rtt_ewma", "arp_reply_rate", "gw_fail_streak", "arp_replies_last",
                  # 게이트웨이가 ICMP 에 응답하는지는 네트워크마다 다르다.
-                 "icmp_gw", "cycles_on_network", "_liveness_decided")
+                 "icmp_gw", "cycles_on_network", "_liveness_decided", "icmp_fail_run")
 
 
 def _ewma(prev: Optional[float], value: float, alpha: float = EWMA_ALPHA) -> float:
@@ -64,6 +64,17 @@ def update_baselines(state: Dict[str, Any], cur: Observation) -> Dict[str, Any]:
     rtt = cur.get("link", "gateway_rtt_ms")
     if rtt is not None and cur.get("link", "gateway_reachable"):  # ICMP 응답이 있을 때만
         new["rtt_ewma"] = round(_ewma(state.get("rtt_ewma"), float(rtt)), 3)
+
+    # VPN 이 끊긴 시각. 재연결 판정이 직전 값을 읽어야 하므로 판정 뒤에 갱신한다.
+    vpn_block = cur.get("vpn")
+    if vpn_block:
+        downs = dict(state.get("vpn_down_since") or {})
+        for name, st in vpn_block.items():
+            if (st or {}).get("state") == "connected":
+                downs.pop(name, None)
+            else:
+                downs.setdefault(name, cur.ts)
+        new["vpn_down_since"] = downs
 
     replies = cur.get("arp", "replies_received")
     if isinstance(replies, int):

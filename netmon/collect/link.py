@@ -31,7 +31,15 @@ def parse_ping(text: str) -> Dict[str, Optional[float]]:
     }
 
 
-def ping(target: str, count: int = 2, wait_ms: int = 1000, timeout: float = 6.0) -> Dict[str, Any]:
+# macOS ping 은 패킷 간격이 1초 고정이다(1초 미만은 root 권한이 필요하다).
+# -c 2 로 재면 한 주기가 최소 2초가 되어 3초 간격 측정이 밀린다. 주기마다
+# 한 번만 쏘고, 손실은 주기 사이의 연속 실패로 본다 (netmon/liveness.py).
+DEFAULT_COUNT = 1
+DEFAULT_WAIT_MS = 800
+
+
+def ping(target: str, count: int = DEFAULT_COUNT, wait_ms: int = DEFAULT_WAIT_MS,
+         timeout: float = 4.0) -> Dict[str, Any]:
     family = ["ping6"] if ":" in target else ["ping"]
     argv = family + ["-n", "-c", str(count), "-W", str(wait_ms), target]
     r = run(argv, timeout=timeout)
@@ -60,7 +68,8 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
 
     results: Dict[str, Any] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as pool:
-        futures = {name: pool.submit(ping, addr) for name, addr in targets.items()}
+        count = int(ctx.get("ping_count", DEFAULT_COUNT))
+        futures = {name: pool.submit(ping, addr, count) for name, addr in targets.items()}
         for name, fut in futures.items():
             try:
                 results[name] = fut.result(timeout=10)

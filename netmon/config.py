@@ -46,6 +46,9 @@ DEFAULTS: Dict[str, Any] = {
     # 위치 헬퍼 앱 호출 간격(초). 한 번에 0.5초쯤 걸려서 매 주기 부르지 않는다.
     # 게이트웨이 MAC·DHCP 가 흔들린 직후에는 이 간격과 무관하게 즉시 다시 읽는다.
     "wifi_helper_interval": 60,
+    # 주기마다 쏘는 ping 개수. macOS 는 패킷 간격이 1초 고정이라 2 이상이면
+    # 한 주기가 그만큼 길어진다.
+    "ping_count": 1,
     "consents": {},
     "features": {
         # VPN 감시는 사람마다 쓰는지조차 다르므로 기본은 꺼짐.

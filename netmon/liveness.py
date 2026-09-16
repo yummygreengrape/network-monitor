@@ -23,6 +23,12 @@ from .model import Observation, unwrap
 # "이 게이트웨이는 ICMP 에 응답하지 않는다"로 결론짓는다.
 CALIBRATION_CYCLES = 5
 
+# ICMP 로 판정하기로 정한 뒤에도, ARP 는 계속 정상인데 ICMP 만 이만큼 연속으로
+# 실패하면 판정 기준을 ARP 로 되돌린다. 게이트웨이가 ICMP 속도 제한을 켜거나
+# 펌웨어가 바뀌면 그런 일이 생기고, 되돌리지 않으면 영원히 거짓 경보가 난다.
+# ARP 까지 함께 죽는 진짜 장애에서는 이 조건이 성립하지 않아 경보가 유지된다.
+REVERT_AFTER_ICMP_FAILURES = 20
+
 ARP = "arp"
 ICMP = "icmp"
 LINK = "link"
@@ -83,6 +89,15 @@ def calibrate(state: Dict[str, Any], obs: Observation) -> Tuple[Dict[str, Any], 
     new["cycles_on_network"] = int(state.get("cycles_on_network", 0)) + 1
 
     if state.get("icmp_gw") is True:
+        if sig["icmp"] is False and sig["arp"]:
+            run_len = int(state.get("icmp_fail_run", 0)) + 1
+            new["icmp_fail_run"] = run_len
+            if run_len >= REVERT_AFTER_ICMP_FAILURES:
+                new["icmp_gw"] = False
+                new["icmp_fail_run"] = 0
+                return new, ARP
+        else:
+            new["icmp_fail_run"] = 0
         return new, None
 
     if sig["icmp"] is True:

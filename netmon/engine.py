@@ -44,6 +44,7 @@ class Engine:
             "allow_external": self.cfg.effective("detect.public_ip"),
             "config_home": os.path.dirname(self.cfg.path),
             "wifi_helper_interval": self.cfg.data.get("wifi_helper_interval", 15),
+            "ping_count": self.cfg.data.get("ping_count", 1),
         }
 
         def step(module, name: str) -> None:

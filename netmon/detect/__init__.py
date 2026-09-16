@@ -22,9 +22,9 @@ from typing import Any, Dict, List, Optional
 
 from ..model import Finding, Observation, unwrap
 from ..util import subnet_of
-from . import dhcp, dns, l2, quality, route, wifi  # noqa: F401
+from . import dhcp, dns, l2, quality, route, vpn, wifi  # noqa: F401
 
-REGISTRY = [l2, dhcp, dns, route, wifi, quality]
+REGISTRY = [l2, dhcp, dns, route, wifi, quality, vpn]
 
 # 억제 사유
 NETWORK_CHANGE = "network_change"

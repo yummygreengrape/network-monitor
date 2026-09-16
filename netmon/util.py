@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -54,8 +55,31 @@ def run(argv: Sequence[str], timeout: float = DEFAULT_TIMEOUT, stdin: str = "") 
     return CmdResult(argv, p.returncode, p.stdout or "", p.stderr or "")
 
 
+# launchd 는 PATH 로 /usr/bin:/bin:/usr/sbin:/sbin 만 준다. 사용자가 설치한
+# 도구는 대부분 여기 있다. PATH 에만 기대면 상시 실행에서 VPN 감시가 조용히
+# 아무것도 못 본다 — 실제로 그렇게 됐다.
+EXTRA_TOOL_DIRS = (
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/opt/local/bin",
+    "/Applications/Tailscale.app/Contents/MacOS",
+)
+
+
+def find_tool(cmd: str) -> Optional[str]:
+    """명령의 절대 경로. PATH 에 없으면 흔한 설치 위치도 찾아본다."""
+    found = shutil.which(cmd)
+    if found:
+        return found
+    for d in EXTRA_TOOL_DIRS:
+        cand = os.path.join(d, cmd)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def have(cmd: str) -> bool:
-    return shutil.which(cmd) is not None
+    return find_tool(cmd) is not None
 
 
 # 탐침 상태. "왜 못 쓰는지"를 반드시 남긴다 — 남의 맥에서 탐지가 조용히

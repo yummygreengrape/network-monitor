@@ -9,7 +9,8 @@ from __future__ import annotations
 import unittest
 
 from netmon import baseline
-from netmon.liveness import ARP, CALIBRATION_CYCLES, ICMP, evaluate
+from netmon.liveness import (ARP, CALIBRATION_CYCLES, ICMP,
+                             REVERT_AFTER_ICMP_FAILURES, evaluate)
 from tests.helpers import GW_MAC, obs
 
 
@@ -62,6 +63,43 @@ class TestIcmpCapableGateway(unittest.TestCase):
             state = baseline.update_counters(state, o)
         self.assertEqual(state["gw_fail_streak"], 2,
                          "ICMP 를 쓰는 네트워크에서는 ICMP 실패가 곧 실패다")
+
+
+class TestIcmpModeCanBeRevoked(unittest.TestCase):
+    """한번 ICMP 로 정하면 영원히 그대로면, 게이트웨이가 ICMP 속도 제한을 켠
+    순간부터 거짓 경보가 끝나지 않는다."""
+
+    def _run(self, state, n, **kw):
+        for i in range(n):
+            o = obs(ts="2026-01-01T01:%02d:00Z" % (i % 60), **kw)
+            state = baseline.update_counters(state, o)
+            decided = state.get("_liveness_decided")
+            state = baseline.update_baselines(state, o)
+            if decided:
+                state["_last_decided"] = decided
+        return state
+
+    def test_reverts_to_arp_when_icmp_stops_but_arp_stays_healthy(self):
+        state, _ = cycles(2, icmp_ok=True)
+        self.assertIs(state["icmp_gw"], True)
+        state = self._run(state, REVERT_AFTER_ICMP_FAILURES, icmp_ok=False, gw_mac=GW_MAC)
+        self.assertIs(state["icmp_gw"], False)
+        self.assertEqual(state.get("_last_decided"), ARP)
+
+    def test_does_not_revert_while_arp_is_also_down(self):
+        """ARP 까지 죽은 것은 진짜 장애다. 기준을 바꿔서 덮으면 안 된다."""
+        state, _ = cycles(2, icmp_ok=True)
+        state = self._run(state, REVERT_AFTER_ICMP_FAILURES + 5,
+                          icmp_ok=False, gw_mac=None)
+        self.assertIs(state["icmp_gw"], True)
+        self.assertGreaterEqual(state["gw_fail_streak"], REVERT_AFTER_ICMP_FAILURES)
+
+    def test_a_single_reply_clears_the_failure_run(self):
+        state, _ = cycles(2, icmp_ok=True)
+        state = self._run(state, REVERT_AFTER_ICMP_FAILURES - 1, icmp_ok=False, gw_mac=GW_MAC)
+        state = self._run(state, 1, icmp_ok=True)
+        self.assertEqual(state.get("icmp_fail_run", 0), 0)
+        self.assertIs(state["icmp_gw"], True)
 
 
 class TestNetworkChangeResetsCalibration(unittest.TestCase):

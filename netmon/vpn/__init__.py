@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from ..util import OK, UNSUPPORTED, Capability, first_line, have, run
+from ..util import OK, UNSUPPORTED, Capability, find_tool, first_line, have, run
 
 # 공통 상태
 CONNECTED = "connected"
@@ -38,13 +38,17 @@ class Provider:
     name = "?"
     cmd = "?"
 
+    def path(self) -> Optional[str]:
+        """실행 파일의 절대 경로. PATH 에 기대지 않는다."""
+        return find_tool(self.cmd)
+
     def installed(self) -> bool:
-        return have(self.cmd)
+        return self.path() is not None
 
     def probe(self) -> Capability:
         if not self.installed():
             return Capability("vpn." + self.name, UNSUPPORTED, "%s 설치되지 않음" % self.cmd)
-        return Capability("vpn." + self.name, OK, "%s 사용 가능" % self.cmd, provides=["vpn_state"])
+        return Capability("vpn." + self.name, OK, "%s" % self.path(), provides=["vpn_state"])
 
     def status(self) -> VpnStatus:
         raise NotImplementedError
@@ -54,7 +58,7 @@ class Warp(Provider):
     name, cmd = "warp", "warp-cli"
 
     def status(self) -> VpnStatus:
-        r = run([self.cmd, "status"], timeout=6)
+        r = run([self.path() or self.cmd, "status"], timeout=6)
         if not r.ok:
             return VpnStatus(self.name, UNKNOWN, reason=(r.err or "조회 실패")[:80])
         text = r.out
@@ -76,7 +80,7 @@ class Tailscale(Provider):
     name, cmd = "tailscale", "tailscale"
 
     def status(self) -> VpnStatus:
-        r = run([self.cmd, "status", "--json"], timeout=8)
+        r = run([self.path() or self.cmd, "status", "--json"], timeout=8)
         if not r.ok:
             return VpnStatus(self.name, UNKNOWN, reason=(r.err or "조회 실패")[:80])
         import json
@@ -95,7 +99,7 @@ class WireGuard(Provider):
     name, cmd = "wireguard", "wg"
 
     def status(self) -> VpnStatus:
-        r = run([self.cmd, "show", "interfaces"], timeout=6)
+        r = run([self.path() or self.cmd, "show", "interfaces"], timeout=6)
         if not r.ok:
             return VpnStatus(self.name, UNKNOWN, reason="wg show 실패(권한 필요할 수 있음)")
         ifaces = r.out.split()
@@ -103,21 +107,70 @@ class WireGuard(Provider):
                          iface=ifaces[0] if ifaces else None)
 
 
+# 서드파티 VPN 앱은 시스템에 NetworkExtension 을 등록해서 `scutil --nc list`
+# 에도 나타난다. 전용 공급자가 이미 보고 있는 것을 여기서 또 세면 같은 VPN 이
+# 두 번 집계된다. 실측에서 Tailscale 이 그렇게 중복됐다.
+HANDLED_BUNDLES = {
+    "io.tailscale.ipn.macsys": "tailscale",
+    "com.cloudflare.1dot1dot1dot1.macos": "warp",
+    "com.cloudflare.cloudflareone.macos": "warp",
+}
+
+
+def parse_nc_list(text: str) -> List[Dict[str, Any]]:
+    """`scutil --nc list` 를 서비스 목록으로. 순수 함수.
+
+    줄 형식:
+      * (Connected)  <UUID> VPN (<번들 id>) "<이름>"  [VPN:<번들 id>]
+
+    따옴표 안의 이름은 사용자가 지은 것이라 소속을 드러낼 수 있다. **읽지 않는다.**
+    """
+    import re
+
+    out: List[Dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("Available network"):
+            continue
+        state_m = re.search(r"\(([A-Za-z ]+)\)", line)
+        tag_m = re.search(r"\[([^\]]+)\]\s*$", line)
+        if not state_m or not tag_m:
+            continue
+        tag = tag_m.group(1)
+        bundle = tag.split(":", 1)[1] if ":" in tag else tag
+        out.append({
+            "enabled": line.startswith("*"),
+            "state": state_m.group(1).strip().lower(),
+            "kind": tag.split(":", 1)[0],
+            "bundle": bundle,
+        })
+    return out
+
+
 class MacOSNative(Provider):
-    """시스템 설정에 등록된 VPN 서비스 (IKEv2 / IPsec / L2TP)."""
+    """시스템 설정에 등록된 VPN 서비스 (IKEv2 / IPsec / L2TP).
+
+    전용 공급자가 따로 있는 서드파티 확장은 제외한다.
+    """
 
     name, cmd = "macos", "scutil"
 
     def status(self) -> VpnStatus:
-        r = run([self.cmd, "--nc", "list"], timeout=6)
+        r = run([self.path() or self.cmd, "--nc", "list"], timeout=6)
         if not r.ok:
             return VpnStatus(self.name, UNKNOWN, reason="scutil --nc list 실패")
-        connected = [l for l in r.out.splitlines() if "(Connected)" in l]
-        configured = [l for l in r.out.splitlines() if l.strip().startswith("*")]
-        if not configured:
-            return VpnStatus(self.name, UNKNOWN, reason="등록된 VPN 서비스 없음")
+        services = [s for s in parse_nc_list(r.out)
+                    if s["bundle"] not in HANDLED_BUNDLES]
+        if not services:
+            return VpnStatus(self.name, UNKNOWN,
+                             reason="직접 담당할 서비스 없음 (전용 공급자가 처리)")
+        enabled = [s for s in services if s["enabled"]]
+        if not enabled:
+            return VpnStatus(self.name, DISCONNECTED,
+                             reason="%d개 등록, 사용 안 함" % len(services))
+        connected = [s for s in enabled if s["state"] == "connected"]
         return VpnStatus(self.name, CONNECTED if connected else DISCONNECTED,
-                         reason="%d개 등록" % len(configured))
+                         reason="%d개 사용 중" % len(enabled))
 
 
 ALL: List[Provider] = [Warp(), Tailscale(), WireGuard(), MacOSNative()]
