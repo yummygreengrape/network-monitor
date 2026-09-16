@@ -322,3 +322,5 @@ WHY_LINK_GONE = "the link itself went away"
 
 # ─────────────────────────────────────────── Day boundary
 DAY_IS_UTC = "Dates are in UTC (local time %s)."
+WHY_WOKE = "waking from sleep"
+WHY_LINK_BACK = "the link had just come back"

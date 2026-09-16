@@ -790,3 +790,50 @@ class TestConclusionDoesNotContradictItself(unittest.TestCase):
         from netmon import messages as msg
         _, found = self._settled(2)
         self.assertIn(msg.INV_VPN_LEG_TUNNEL, found[0].summary)
+
+
+class TestExplanationUsesTheSettlingWindow(unittest.TestCase):
+    """VPN 상태 변화는 깨어난 다음 주기에 나타난다.
+
+    실측: 공백(903초)은 16:48:58, 끊김은 16:49:03. 같은 주기만 보면 잠자기가
+    설명에서 빠지고 "첫 홉은 정상 — 터널 경로 문제" 라고 답한다. 첫 홉이
+    정상인 것은 맞지만 그것이 설명은 아니다.
+    """
+
+    def _ctx(self, settling):
+        state = {"icmp_gw": True}
+        if settling:
+            state.update(settle_left_s=30.0, settle_reason=settling)
+        return Context(elapsed=5.0, interval=5.0, features=ON, state=state,
+                       attributions=[], network="n")
+
+    def _drop(self, settling):
+        prev = obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state("connected"), icmp_ok=True)
+        cur = obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("disconnected"), icmp_ok=True)
+        return by_kind(run_all(prev, cur, self._ctx(settling)), "VPN_DISCONNECTED")
+
+    def test_waking_is_the_explanation_one_cycle_later(self):
+        from netmon import messages as msg
+        f = self._drop("sleep")
+        self.assertIn(msg.WHY_WOKE, f.summary)
+        self.assertEqual(f.attribution, "sleep")
+
+    def test_a_link_that_just_came_back_is_the_explanation(self):
+        from netmon import messages as msg
+        f = self._drop("link_restart")
+        self.assertIn(msg.WHY_LINK_BACK, f.summary)
+
+    def test_without_a_settling_window_it_still_blames_the_tunnel(self):
+        from netmon import messages as msg
+        f = self._drop(None)
+        self.assertIn(msg.WHY_TUNNEL, f.summary)
+        self.assertIsNone(f.attribution)
+
+    def test_protection_loss_is_not_suppressed_by_waking(self):
+        """깨어나는 중이어도 보호가 사라진 사실은 남는다."""
+        prev = obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state("connected"), security="NONE")
+        cur = obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("disconnected"), security="NONE")
+        f = by_kind(run_all(prev, cur, self._ctx("sleep")), "VPN_PROTECTION_LOST")
+        self.assertIsNotNone(f)
+        self.assertIsNone(f.attribution)
+        self.assertEqual(f.severity, "medium")

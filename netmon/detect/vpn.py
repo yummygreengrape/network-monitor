@@ -82,13 +82,25 @@ def _down_reason(cur: Observation, ctx, state: Dict[str, Any]) -> Dict[str, Any]
 
 
 def _likely(cur: Observation, ctx, state: Dict[str, Any]) -> str:
-    """가장 그럴듯한 설명. 판정을 덮어쓰지 않고 요약문에만 쓴다."""
+    """가장 그럴듯한 설명. 판정을 덮어쓰지 않고 요약문에만 쓴다.
+
+    **안정화 창까지 본다.** VPN 상태 변화는 깨어난 그 주기가 아니라 다음
+    주기에 나타난다 — 실측에서 공백은 16:48:58, 끊김은 16:49:03 이었다.
+    같은 주기만 보면 "잠자기에서 깨어나는 중" 대신 "터널 경로 문제" 라고
+    답하게 된다. 첫 홉이 정상인 것은 맞지만, 그것이 설명은 아니다.
+    """
     if _user_action(state.get("reason")):
         return msg.WHY_USER
     if ctx.has("sleep"):
         return msg.WHY_SLEEP
+    if ctx.settling == "sleep":
+        return msg.WHY_WOKE
     if ctx.moved:
         return msg.WHY_MOVED
+    if ctx.settling in ("network_change", "iface_change"):
+        return msg.WHY_MOVED
+    if ctx.settling == "link_restart":
+        return msg.WHY_LINK_BACK
     _, alive = evaluate(cur, ctx.state)
     if alive is False:
         return msg.WHY_LINK
@@ -125,7 +137,10 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
         if was == CONNECTED and now != CONNECTED:
             user = _user_action(cur_st.get("reason"))
-            attribution = "user_action" if user else ctx.quality_attribution()
+            # 억제도 안정화 창까지 본다. 깨어난 직후의 재연결을 장애로 세면
+            # 노트북을 여닫을 때마다 끊김이 쌓인다.
+            attribution = ("user_action" if user
+                           else ctx.quality_attribution() or ctx.settling)
             evidence = _down_reason(cur, ctx, cur_st)
             evidence["provider"] = name
             likely = _likely(cur, ctx, cur_st)
