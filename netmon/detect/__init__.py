@@ -134,6 +134,10 @@ def link_restarted(prev: Observation, cur: Observation) -> bool:
             unwrap(cur.get("iface", "default4_gateway")):
         return True
 
+    # 주 인터페이스가 잠깐 사라졌다 돌아옴
+    if not prev.get("iface", "primary") and cur.get("iface", "primary"):
+        return True
+
     p_link = (prev.get("wifi") or {}).get("link_active")
     c_link = (cur.get("wifi") or {}).get("link_active")
     if p_link and c_link and str(p_link).upper() != "TRUE" and str(c_link).upper() == "TRUE":
@@ -156,7 +160,8 @@ def _first_inet(obs: Observation) -> Optional[str]:
 
 
 def attributions_for(prev: Optional[Observation], cur: Observation,
-                     elapsed: float, interval: float) -> List[str]:
+                     elapsed: float, interval: float,
+                     anchor: Optional[Observation] = None) -> List[str]:
     """이번 주기의 변화 중 사용자 행동·환경으로 설명되는 것."""
     if prev is None:
         return [FIRST_SAMPLE]
@@ -164,10 +169,20 @@ def attributions_for(prev: Optional[Observation], cur: Observation,
     # 측정 간격이 크게 벌어짐 = 잠자기 또는 프로세스 정지
     if elapsed > interval * 3 + 10:
         out.append(SLEEP)
-    if prev.get("iface", "primary") != cur.get("iface", "primary"):
-        out.append(IFACE_CHANGE)
-    elif network_key(prev) != network_key(cur):
-        out.append(NETWORK_CHANGE)
+    # **정체성은 "주 인터페이스가 있던 마지막 관측"과 비교한다.**
+    # 링크가 끊기면 기본 경로가 없어져 주 인터페이스가 None 이 되고, 다시
+    # 붙으면 원래 것으로 돌아온다. 바로 앞 관측과 비교하면 정체성이 두 번
+    # 뒤집히고, 그것이 iface_change 나 network_change 로 읽혀 **SSID 검사를
+    # 건너뛰고 무조건 억제**하게 된다. 같은 SSID 로 다시 붙었는데 게이트웨이가
+    # 바뀐 경우 — evil twin 의 모양 — 까지 덮인다. 실측에서 억제된 보안 판정
+    # 22건 중 18건이 이 경로였다.
+    base = anchor if (anchor is not None and anchor.get("iface", "primary")) else prev
+    b_if, c_if = base.get("iface", "primary"), cur.get("iface", "primary")
+    if b_if and c_if:
+        if b_if != c_if:
+            out.append(IFACE_CHANGE)
+        elif network_key(base) != network_key(cur):
+            out.append(NETWORK_CHANGE)
     # 같은 사설 대역을 쓰는 다른 장소로 옮기면 network_key 가 그대로다.
     # 192.168.0.0/24 에 게이트웨이 .1 은 세상에서 가장 흔한 조합이라, 집과
     # 카페가 같은 네트워크로 보인다. SSID 를 읽을 수 있으면 그것으로 갈리지만,

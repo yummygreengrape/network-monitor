@@ -50,11 +50,17 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     p4, c4 = _routes(prev, "default4"), _routes(cur, "default4")
     route_attribution = attribution
     if route_attribution is None and (ctx.has("vpn_change") or ctx.settling):
-        # VPN 이 오르내리면 터널 경로가 생겼다 사라진다. 그 경로만 달라졌다면
-        # VPN 전환으로 설명된다. 물리 경로가 함께 바뀌었다면 설명되지 않는다.
         changed = (p4 ^ c4)
+        p_phys = {r for r in p4 if not _is_tunnel_route(r)}
+        c_phys = {r for r in c4 if not _is_tunnel_route(r)}
+        # 1) 터널 경로만 달라짐 → VPN 이 오르내린 결과
         if changed and all(_is_tunnel_route(r) for r in changed):
             route_attribution = "vpn_change" if ctx.has("vpn_change") else ctx.settling
+        # 2) 물리 경로가 **없다가 생김** → 링크가 돌아온 결과.
+        #    있던 물리 경로가 **다른 게이트웨이로 바뀐 것**은 설명되지 않는다 —
+        #    그것이 경로를 가로채는 모양이다.
+        elif not p_phys and c_phys:
+            route_attribution = ctx.settling or "vpn_change"
     if p4 and c4 and p4 != c4:
         out.append(Finding(
             axis=SECURITY, kind="DEFAULT_ROUTE_CHANGED",

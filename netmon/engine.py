@@ -34,6 +34,9 @@ class Engine:
         self.store = store
         messages.use_config(cfg.language)
         self.prev: Optional[Observation] = None
+        # 주 인터페이스가 있던 마지막 관측. 정체성 비교의 기준점이다 —
+        # 링크가 끊긴 동안의 빈 관측과 비교하면 정체성이 두 번 뒤집힌다.
+        self.anchor: Optional[Observation] = None
         self.prev_wall: Optional[float] = None
         self.state: Dict[str, Any] = store.load_state()
         self.investigator = investigate.Investigator(cfg.data.get("investigate"))
@@ -100,7 +103,7 @@ class Engine:
     # --- 판정 ---
     def judge(self, obs: Observation, elapsed: float) -> List[Finding]:
         interval = float(self.cfg.interval)
-        attributions = attributions_for(self.prev, obs, elapsed, interval)
+        attributions = attributions_for(self.prev, obs, elapsed, interval, self.anchor)
         # 링크가 새로 붙었으면 다른 장소일 수 있다. 이전 기준선을 그대로 쓰면
         # 새 장소의 첫 몇 분이 통째로 오탐이 된다.
         changed = any(a in attributions for a in
@@ -130,6 +133,8 @@ class Engine:
         self.state = baseline.update_baselines(self.state, obs, elapsed, interval)
         self.state["network"] = ctx.network
         self.state["last_ts"] = obs.ts
+        if obs.get("iface", "primary"):
+            self.anchor = obs
         return findings
 
     # --- 한 주기 ---
@@ -166,6 +171,7 @@ def replay(cfg: Config, observations: List[Observation]) -> List[Tuple[Observati
     eng.cfg = cfg
     eng.store = None
     eng.prev = None
+    eng.anchor = None
     eng.prev_wall = None
     eng.state = {}
     eng.investigator = investigate.Investigator(cfg.data.get("investigate"))

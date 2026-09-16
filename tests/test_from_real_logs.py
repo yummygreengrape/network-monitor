@@ -457,3 +457,93 @@ class TestSamePrivateRangeDifferentPlace(unittest.TestCase):
         self.assertIsNone(fresh.get("rtt_ewma"))
         self.assertIsNone(fresh.get("arp_reply_rate"))
         self.assertIsNone(fresh.get("icmp_gw"))
+
+
+class TestInterfaceVanishIsNotAnInterfaceChange(unittest.TestCase):
+    """실측: 링크가 끊기면 주 인터페이스가 None 이 되고 다시 붙으면 en0 로 돌아온다.
+
+      07:02:35  primary=None
+      07:02:45  primary=en0
+
+    이것을 iface_change 로 읽으면 SSID 검사를 건너뛰고 무조건 억제하게 되어,
+    같은 SSID 로 다시 붙었는데 게이트웨이가 바뀐 경우 — evil twin 의 모양 —
+    까지 덮는다. 오늘 억제된 보안 판정 22건 중 18건이 이 경로였다.
+    """
+
+    def _vanish_return(self, ssid=None, bssid=None, gw_mac=GW_MAC_ALT):
+        gone = obs(ts="2026-01-01T00:00:00Z", gateway=None, gw_mac=None,
+                   ssid=ssid, bssid=bssid)
+        gone.data["iface"]["primary"] = None
+        gone.data["iface"]["primary_kind"] = "unknown"
+        gone.data["iface"]["default4_iface"] = None
+        back = obs(ts="2026-01-01T00:00:05Z", gw_mac=gw_mac, ssid=ssid, bssid=bssid)
+        return gone, back
+
+    def test_vanishing_and_returning_is_not_an_interface_change(self):
+        gone, back = self._vanish_return()
+        self.assertNotIn("iface_change", attributions_for(gone, back, 5.0, 5.0))
+
+    def test_it_counts_as_a_link_restart_when_the_ssid_is_unknown(self):
+        """정체성은 주 인터페이스가 있던 마지막 관측(anchor)과 비교한다."""
+        gone, back = self._vanish_return()
+        anchor = obs(ts="2025-12-31T23:59:55Z", gw_mac=GW_MAC)
+        attrs = attributions_for(gone, back, 5.0, 5.0, anchor=anchor)
+        self.assertIn("link_restart", attrs)
+        self.assertNotIn("iface_change", attrs)
+        self.assertNotIn("network_change", attrs)
+
+    def test_a_same_ssid_gateway_change_survives_the_reconnect(self):
+        """같은 SSID 로 다시 붙었는데 게이트웨이 MAC 이 바뀌었다 — 덮이면 안 된다."""
+        gone, back = self._vanish_return(ssid=SSID, bssid=BSSID_ALT)
+        anchor = obs(ts="2025-12-31T23:59:55Z", gw_mac=GW_MAC, ssid=SSID, bssid=BSSID)
+        attrs = attributions_for(gone, back, 5.0, 5.0, anchor=anchor)
+        self.assertNotIn("iface_change", attrs)
+        self.assertNotIn("link_restart", attrs)
+        self.assertNotIn("network_change", attrs)
+
+    def test_a_real_move_across_a_link_drop_is_still_seen(self):
+        """링크가 끊겼다 다른 SSID 로 붙으면 이동으로 알아봐야 한다."""
+        gone, back = self._vanish_return(ssid="OtherNet", bssid=BSSID_ALT)
+        anchor = obs(ts="2025-12-31T23:59:55Z", gw_mac=GW_MAC, ssid=SSID, bssid=BSSID)
+        self.assertIn("network_change", attributions_for(gone, back, 5.0, 5.0, anchor=anchor))
+
+    def test_a_real_interface_switch_is_still_an_interface_change(self):
+        prev = obs(ts="2026-01-01T00:00:00Z", iface="en0", iface_kind="wifi")
+        cur = obs(ts="2026-01-01T00:00:05Z", iface="en1", iface_kind="ethernet")
+        self.assertIn("iface_change", attributions_for(prev, cur, 5.0, 5.0))
+
+
+class TestRouteReappearingAfterLinkReturn(unittest.TestCase):
+    """링크가 돌아오면서 물리 기본 경로가 다시 생기는 것은 그 복구의 결과다.
+
+    실측 07:02:45 에서 high 로 올라가 엉뚱한 조사까지 열었다.
+    """
+
+    def _routes(self, o, entries):
+        o.data["route"]["default4"] = [
+            {"gateway": ({"id": "ipv4", "v": gw} if not gw.startswith("link#") else gw),
+             "iface": iface, "flags": "UGScg"} for gw, iface in entries]
+        o.data["route"]["default4_count"] = len(entries)
+        return o
+
+    def _ctx(self, prev, cur, settling="link_restart"):
+        state = {"icmp_gw": True, "settle_left_s": 30.0, "settle_reason": settling}
+        return Context(elapsed=5.0, interval=5.0, features=ON, state=state,
+                       attributions=[], network=network_key(cur))
+
+    def test_physical_route_appearing_is_attributed(self):
+        prev = self._routes(obs(ts="2026-01-01T00:00:00Z"), [("link#26", "utun6")])
+        cur = self._routes(obs(ts="2026-01-01T00:00:05Z"),
+                           [("192.0.2.1", "en0"), ("link#26", "utun6")])
+        f = by_kind(run_all(prev, cur, self._ctx(prev, cur)), "DEFAULT_ROUTE_CHANGED")
+        self.assertIsNotNone(f)
+        self.assertEqual(f.attribution, "link_restart")
+        self.assertEqual(f.severity, "low")
+
+    def test_physical_route_switching_gateway_is_not_attributed(self):
+        """있던 물리 경로가 다른 게이트웨이로 바뀌는 것이 가로채기의 모양이다."""
+        prev = self._routes(obs(ts="2026-01-01T00:00:00Z"), [("192.0.2.1", "en0")])
+        cur = self._routes(obs(ts="2026-01-01T00:00:05Z"), [("192.0.2.99", "en0")])
+        f = by_kind(run_all(prev, cur, self._ctx(prev, cur)), "DEFAULT_ROUTE_CHANGED")
+        self.assertIsNone(f.attribution, "안정화 창 안이라도 덮이면 안 된다")
+        self.assertEqual(f.severity, "high")
