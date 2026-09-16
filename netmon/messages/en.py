@@ -120,7 +120,12 @@ INV_PATH_VERDICT = "the changed settings took hold"
 # Playbook: VPN drops
 INV_VPN_WIDEN = "Drops keep repeating. Watching wireless quality as well."
 INV_VPN_REPEATED = "%s dropped %d times. %s."
-INV_VPN_VERDICT_TUNNEL = "repeated drops on the tunnel side — the first hop was healthy each time"
+# Which leg was at fault. Keep the "repeated" framing out of these — reusing
+# them in a single-drop conclusion produces "dropped once … repeated drops".
+INV_VPN_LEG_TUNNEL = "the first hop was healthy each time — a tunnel-side problem"
+INV_VPN_LEG_LINK = "the wireless link was unstable at the same time"
+INV_VPN_LEG_UNKNOWN = "could not tell which leg"
+INV_VPN_VERDICT_TUNNEL = "repeated drops on the tunnel side"
 INV_VPN_VERDICT_LINK = "repeated drops alongside an unstable wireless link"
 INV_VPN_VERDICT_UNKNOWN = "repeated drops — could not tell which leg"
 
@@ -302,8 +307,8 @@ INV_L2_NO_CHANGE = "First hop identity held unchanged for %d cycles. No sign of 
 INV_L2_NO_CHANGE_VERDICT = "first hop identity unchanged"
 
 # ─────────────────────────────────────────── Found in the WARP drop logs
-INV_VPN_SINGLE_RESOLVED = "%s dropped once and has been steady for %d cycles since. %s."
-INV_VPN_VERDICT_SINGLE = "dropped once, then recovered"
+INV_VPN_SETTLED = "%s dropped %d times, then stayed steady for %d cycles. %s."
+INV_VPN_VERDICT_SETTLED = "recovered and settled after %d drop(s)"
 
 # ─────────────────────────────────────────── Ambiguous network identity
 EXPOSURE_IDENTITY_AMBIGUOUS = (

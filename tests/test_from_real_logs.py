@@ -272,7 +272,7 @@ class TestSingleVpnDropConcludes(unittest.TestCase):
         done = [i for i in investigate.Investigator.load(state)
                 if i.kind == "vpn_drop" and not i.open]
         self.assertTrue(done, "한 번 끊겼다 복구된 것도 결론을 내야 한다")
-        self.assertEqual(done[0].verdict, msg.INV_VPN_VERDICT_SINGLE)
+        self.assertEqual(done[0].verdict, msg.INV_VPN_VERDICT_SETTLED % 1)
         self.assertLess(done[0].cycles, VpnDrop.max_cycles,
                         "예산을 다 쓰기 전에 끝나야 한다")
 
@@ -745,3 +745,48 @@ class TestDayBoundaryIsUtc(unittest.TestCase):
         ok = datetime.datetime(2026, 9, 17, 1, 0, tzinfo=datetime.timezone.utc)
         self.assertEqual(ok.strftime("%Y-%m-%d"),
                          ok.astimezone(kst).strftime("%Y-%m-%d"))
+
+
+class TestConclusionDoesNotContradictItself(unittest.TestCase):
+    """실측 17:02:12 의 결론이 자기모순이었다.
+
+      "warp 가 한 번 끊겼다가 복구된 뒤 40주기 동안 안정적임.
+       터널 쪽에서 되풀이되는 끊김 — 무선 구간은 매번 정상."
+
+    실제로는 두 번 끊겼고, "한 번" 과 "되풀이되는" 이 한 문장에 있었다.
+    구간 판별 문구에 횟수의 틀이 박혀 있던 탓이다.
+    """
+
+    def _settled(self, drops):
+        from netmon.investigate.playbooks import VpnDrop
+        from netmon.investigate.model import Investigation
+        from netmon import messages as msg
+
+        pb = VpnDrop()
+        inv = Investigation(id="v1", kind="vpn_drop", trigger="VPN_DISCONNECTED",
+                            opened_at="2026-01-01T00:00:00Z", network="n")
+        inv.criteria = {"provider": "warp", "drops": drops, "reconnects": drops,
+                        "still_down": False, "settled_for": pb.SETTLED_CYCLES,
+                        "first_hop_alive_at_drop": [True] * drops,
+                        "watch_kinds": ["VPN_DISCONNECTED", "VPN_RECONNECTED"]}
+        ctx = Context(elapsed=5.0, interval=5.0, features=ON,
+                      state={"icmp_gw": True}, attributions=[], network="n")
+        found = pb.step(inv, obs(), obs(), ctx, [])
+        concluded = [f for f in found if f.kind == "INVESTIGATION_CONCLUDED"]
+        return inv, concluded
+
+    def test_the_drop_count_is_stated_not_assumed(self):
+        for n in (1, 2):
+            inv, found = self._settled(n)
+            self.assertTrue(found, "%d회일 때 결론이 없다" % n)
+            self.assertIn("%d번" % n, found[0].summary, found[0].summary)
+
+    def test_a_settled_conclusion_does_not_say_repeated(self):
+        for n in (1, 2):
+            _, found = self._settled(n)
+            self.assertNotIn("되풀이", found[0].summary, found[0].summary)
+
+    def test_the_leg_description_is_shared_by_both_conclusions(self):
+        from netmon import messages as msg
+        _, found = self._settled(2)
+        self.assertIn(msg.INV_VPN_LEG_TUNNEL, found[0].summary)

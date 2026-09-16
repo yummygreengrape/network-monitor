@@ -116,7 +116,12 @@ INV_PATH_VERDICT = "바뀐 설정이 자리 잡음"
 # 조사 지침 — VPN 끊김
 INV_VPN_WIDEN = "끊김이 되풀이됨. 무선 구간 품질도 함께 관측함."
 INV_VPN_REPEATED = "%s 가 %d번 끊김. %s."
-INV_VPN_VERDICT_TUNNEL = "터널 쪽에서 되풀이되는 끊김 — 무선 구간은 매번 정상"
+# 어느 구간이 문제였나. **"되풀이" 같은 틀을 여기 넣지 않는다** — 단발 결론에
+# 그대로 쓰면 "한 번 끊겼다 … 되풀이되는 끊김" 같은 자기모순이 된다.
+INV_VPN_LEG_TUNNEL = "끊길 때마다 첫 홉은 정상이었음 — 터널 쪽 문제"
+INV_VPN_LEG_LINK = "끊길 때 무선 구간도 불안정했음"
+INV_VPN_LEG_UNKNOWN = "구간 판별 실패"
+INV_VPN_VERDICT_TUNNEL = "터널 쪽에서 되풀이되는 끊김"
 INV_VPN_VERDICT_LINK = "무선 구간 불안정과 함께 되풀이되는 끊김"
 INV_VPN_VERDICT_UNKNOWN = "되풀이되는 끊김 — 구간 판별 실패"
 
@@ -296,8 +301,8 @@ INV_L2_NO_CHANGE = "첫 홉의 정체는 %d주기 동안 그대로 유지됨. �
 INV_L2_NO_CHANGE_VERDICT = "첫 홉 정체 변화 없음"
 
 # ─────────────────────────────────────────── WARP 끊김 로그에서 드러난 항목
-INV_VPN_SINGLE_RESOLVED = "%s 가 한 번 끊겼다가 복구된 뒤 %d주기 동안 안정적임. %s."
-INV_VPN_VERDICT_SINGLE = "한 번 끊겼다 복구됨"
+INV_VPN_SETTLED = "%s 가 %d번 끊겼다가 복구된 뒤 %d주기 동안 안정적임. %s."
+INV_VPN_VERDICT_SETTLED = "끊긴 뒤 복구되어 안정됨 (%d회)"
 
 # ─────────────────────────────────────────── 네트워크 정체성 모호성
 EXPOSURE_IDENTITY_AMBIGUOUS = (

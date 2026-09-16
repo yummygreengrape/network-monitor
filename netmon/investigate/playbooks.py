@@ -326,21 +326,17 @@ class VpnDrop(Playbook):
 
         drops = int(crit.get("drops", 0))
         if drops < self.REPEAT_THRESHOLD and int(crit.get("settled_for", 0)) >= self.SETTLED_CYCLES:
-            alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
-            leg = (msg.INV_VPN_VERDICT_TUNNEL if alive and all(alive)
-                   else msg.INV_VPN_VERDICT_LINK if alive and not any(alive)
-                   else msg.INV_VPN_VERDICT_UNKNOWN)
-            inv.close(ts, CONCLUDED, msg.INV_VPN_VERDICT_SINGLE, SUSPECT)
+            inv.close(ts, CONCLUDED, msg.INV_VPN_VERDICT_SETTLED % drops, SUSPECT)
             out.append(L2Identity._concluded(
                 inv, QUALITY, INFO_SEV, SUSPECT,
-                msg.INV_VPN_SINGLE_RESOLVED % (provider, crit["settled_for"], leg)))
+                msg.INV_VPN_SETTLED % (provider, drops, crit["settled_for"],
+                                       self._leg(crit))))
             return out
 
         if drops >= self.REPEAT_THRESHOLD:
             link_events = int(crit.get("link_events", 0))
             alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
-            tunnel_side = alive and all(alive)
-            if tunnel_side and not link_events:
+            if alive and all(alive) and not link_events:
                 verdict = msg.INV_VPN_VERDICT_TUNNEL
             elif link_events:
                 verdict = msg.INV_VPN_VERDICT_LINK
@@ -349,8 +345,24 @@ class VpnDrop(Playbook):
             inv.close(ts, CONCLUDED, verdict, SUSPECT)
             out.append(L2Identity._concluded(
                 inv, QUALITY, MEDIUM, SUSPECT,
-                msg.INV_VPN_REPEATED % (provider, drops, verdict)))
+                msg.INV_VPN_REPEATED % (provider, drops, self._leg(crit))))
         return out
+
+    @staticmethod
+    def _leg(crit) -> str:
+        """어느 구간이 문제였나.
+
+        **횟수와 무관한 서술이다.** "되풀이" 같은 틀을 여기 섞으면 단발 결론에
+        재사용할 때 "한 번 끊겼다 … 되풀이되는 끊김" 같은 자기모순이 된다.
+        실제로 그렇게 났다.
+        """
+        alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
+        link_events = int(crit.get("link_events", 0))
+        if alive and all(alive) and not link_events:
+            return msg.INV_VPN_LEG_TUNNEL
+        if link_events or (alive and not any(alive)):
+            return msg.INV_VPN_LEG_LINK
+        return msg.INV_VPN_LEG_UNKNOWN
 
 
 ALL: List[Playbook] = [L2Identity(), PathConfig(), VpnDrop()]
