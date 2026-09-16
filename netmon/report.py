@@ -112,6 +112,8 @@ def exposure_notes(last_sample: Optional[Dict[str, Any]]) -> List[str]:
             out.append(msg.EXPOSURE_SHARED_PSK % (wifi.get("security") or "?"))
         elif sec in ("none", "open", ""):
             out.append(msg.EXPOSURE_OPEN)
+    if wifi.get("applicable") and wifi.get("location") not in ("granted", "granted-via-helper"):
+        out.append(msg.EXPOSURE_IDENTITY_AMBIGUOUS)
     if (data.get("dns") or {}).get("via_loopback"):
         out.append(msg.EXPOSURE_DNS_PROXY)
     return out

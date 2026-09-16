@@ -101,7 +101,10 @@ class Engine:
     def judge(self, obs: Observation, elapsed: float) -> List[Finding]:
         interval = float(self.cfg.interval)
         attributions = attributions_for(self.prev, obs, elapsed, interval)
-        changed = "network_change" in attributions or "iface_change" in attributions
+        # 링크가 새로 붙었으면 다른 장소일 수 있다. 이전 기준선을 그대로 쓰면
+        # 새 장소의 첫 몇 분이 통째로 오탐이 된다.
+        changed = any(a in attributions for a in
+                      ("network_change", "iface_change", "link_restart"))
         if changed:
             self.state = baseline.reset_for_new_network(self.state)
 

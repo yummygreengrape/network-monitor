@@ -29,6 +29,7 @@ REGISTRY = [l2, dhcp, dns, route, wifi, quality, vpn]
 
 # 억제 사유
 NETWORK_CHANGE = "network_change"
+LINK_RESTART = "link_restart"
 VPN_CHANGE = "vpn_change"
 SLEEP = "sleep"
 IFACE_CHANGE = "iface_change"
@@ -54,7 +55,8 @@ class Context:
 
     @property
     def moved(self) -> bool:
-        return self.has(NETWORK_CHANGE) or self.has(IFACE_CHANGE)
+        return (self.has(NETWORK_CHANGE) or self.has(IFACE_CHANGE)
+                or self.has(LINK_RESTART))
 
     @property
     def settling(self) -> Optional[str]:
@@ -70,7 +72,7 @@ class Context:
 
     def quality_attribution(self) -> Optional[str]:
         """품질 판정에 붙일 억제 사유. 잠자기는 품질만 설명한다."""
-        for a in (SLEEP, IFACE_CHANGE, NETWORK_CHANGE):
+        for a in (SLEEP, IFACE_CHANGE, NETWORK_CHANGE, LINK_RESTART):
             if self.has(a):
                 return a
         return None
@@ -81,7 +83,7 @@ class Context:
         잠자기는 여기 없다. 자는 동안 붙은 AP 가 바뀌는 것이야말로
         확인해야 할 일이지 설명이 아니다.
         """
-        for a in (IFACE_CHANGE, NETWORK_CHANGE):
+        for a in (IFACE_CHANGE, NETWORK_CHANGE, LINK_RESTART):
             if self.has(a):
                 return a
         return None
@@ -111,6 +113,40 @@ def network_key(obs: Observation) -> str:
     return "|".join(parts)
 
 
+def ssid_known(obs: Observation) -> bool:
+    """SSID 를 실제로 읽었는가. 위치 권한이 없으면 읽지 못한다."""
+    return bool(unwrap(obs.get("wifi", "ssid")))
+
+
+def link_restarted(prev: Observation, cur: Observation) -> bool:
+    """링크가 한 번 끊겼다 새로 붙었는가.
+
+    **장소를 옮겼다는 것을 알아보는 유일하게 위조하기 어려운 신호다.**
+    경로에 끼어든 공격자는 내 링크를 내렸다 올리지 않는다. 그렇게 하려면
+    deauth 같은 훨씬 시끄러운 짓을 해야 하고, 그것 자체가 링크 사건으로 남는다.
+
+    셋 중 하나면 재시작으로 본다.
+      기본 경로가 사라졌다 돌아옴
+      Wi-Fi 링크가 끊긴 상태에서 붙음
+      임대가 새로 시작되면서 **내 IP 도 바뀜** (단순 갱신은 IP 를 유지한다)
+    """
+    if not unwrap(prev.get("iface", "default4_gateway")) and \
+            unwrap(cur.get("iface", "default4_gateway")):
+        return True
+
+    p_link = (prev.get("wifi") or {}).get("link_active")
+    c_link = (cur.get("wifi") or {}).get("link_active")
+    if p_link and c_link and str(p_link).upper() != "TRUE" and str(c_link).upper() == "TRUE":
+        return True
+
+    p_lease, c_lease = prev.get("dhcp", "lease_start"), cur.get("dhcp", "lease_start")
+    p_ip = unwrap(prev.get("dhcp", "yiaddr"))
+    c_ip = unwrap(cur.get("dhcp", "yiaddr"))
+    if p_lease and c_lease and p_lease != c_lease and p_ip and c_ip and p_ip != c_ip:
+        return True
+    return False
+
+
 def _first_inet(obs: Observation) -> Optional[str]:
     for a in obs.get("iface", "primary_inet") or []:
         v = unwrap(a)
@@ -132,6 +168,14 @@ def attributions_for(prev: Optional[Observation], cur: Observation,
         out.append(IFACE_CHANGE)
     elif network_key(prev) != network_key(cur):
         out.append(NETWORK_CHANGE)
+    # 같은 사설 대역을 쓰는 다른 장소로 옮기면 network_key 가 그대로다.
+    # 192.168.0.0/24 에 게이트웨이 .1 은 세상에서 가장 흔한 조합이라, 집과
+    # 카페가 같은 네트워크로 보인다. SSID 를 읽을 수 있으면 그것으로 갈리지만,
+    # 위치 권한이 없으면 갈 길이 없다. 그때는 링크 재시작을 근거로 쓴다.
+    if (NETWORK_CHANGE not in out and IFACE_CHANGE not in out
+            and not ssid_known(cur) and link_restarted(prev, cur)):
+        out.append(LINK_RESTART)
+
     if vpn_state_changed(prev, cur):
         out.append(VPN_CHANGE)
     return out

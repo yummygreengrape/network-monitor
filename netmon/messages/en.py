@@ -304,3 +304,9 @@ INV_L2_NO_CHANGE_VERDICT = "first hop identity unchanged"
 # ─────────────────────────────────────────── Found in the WARP drop logs
 INV_VPN_SINGLE_RESOLVED = "%s dropped once and has been steady for %d cycles since. %s."
 INV_VPN_VERDICT_SINGLE = "dropped once, then recovered"
+
+# ─────────────────────────────────────────── Ambiguous network identity
+EXPOSURE_IDENTITY_AMBIGUOUS = (
+    "No location permission, so the SSID cannot be read. Two different places using the "
+    "same private range (192.168.0.0/24, say) look identical, which makes a first-hop "
+    "change after moving hard to tell apart from an attack.")

@@ -9,7 +9,8 @@ import unittest
 from netmon import baseline
 from netmon.collect.arp import normalize_mac, parse_arp_table
 from netmon.detect import Context, attributions_for, network_key, run_all
-from tests.helpers import GW_MAC, GW_MAC_ALT, by_kind, kinds, obs, vpn_state
+from tests.helpers import (BSSID, BSSID_ALT, GW_MAC, GW_MAC_ALT, SSID,
+                           by_kind, kinds, obs, vpn_state)
 
 ON = {k: True for k in ("detect.l2", "detect.dhcp", "detect.dns", "detect.route",
                         "detect.wifi", "detect.quality", "detect.vpn")}
@@ -370,3 +371,89 @@ class TestSecurityKnownFromTheCycleBefore(unittest.TestCase):
                   iface="en1", iface_kind="ethernet")
         f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
         self.assertIn("판단 불가", f.summary)
+
+
+class TestSamePrivateRangeDifferentPlace(unittest.TestCase):
+    """같은 사설 대역을 쓰는 다른 장소를 구분하지 못하던 구멍.
+
+    맥북과 맥미니가 물리적으로 멀리 있는데 둘 다 192.168.x.1 을 게이트웨이로
+    쓰고 있었다. network_key 는 (인터페이스, SSID, 서브넷)인데 위치 권한이
+    없으면 SSID 가 비어서 사실상 (인터페이스, 서브넷)만 남는다. 집과 카페가
+    같은 대역이면 도구는 이동을 알아채지 못하고, 당연히 바뀌는 게이트웨이
+    MAC 이 high 로 뜬다.
+
+    링크 재시작을 근거로 쓴다. 경로에 끼어든 공격자는 내 링크를 내렸다
+    올리지 않는다.
+    """
+
+    def _move(self, **cur_kw):
+        """같은 서브넷·다른 장소로 이동 (링크가 끊겼다 붙음, IP 도 바뀜)."""
+        prev = obs(ts="2026-01-01T00:00:00Z", gw_mac=GW_MAC, my_ip="192.0.2.50",
+                   lease_start="2026-01-01 00:00:00", ssid=None, bssid=None)
+        base = dict(gw_mac=GW_MAC_ALT, my_ip="192.0.2.77",
+                    lease_start="2026-01-01 00:10:00", ssid=None, bssid=None)
+        base.update(cur_kw)
+        cur = obs(ts="2026-01-01T00:00:05Z", **base)
+        return prev, cur
+
+    def test_moving_to_a_same_subnet_place_is_recognised(self):
+        prev, cur = self._move()
+        attrs = attributions_for(prev, cur, 5.0, 5.0)
+        self.assertIn("link_restart", attrs,
+                      "임대가 새로 시작되고 IP 도 바뀌면 이동으로 봐야 한다")
+
+    def test_the_mac_change_after_moving_is_not_high(self):
+        prev, cur = self._move()
+        f = by_kind(judge(prev, cur), "GW_MAC_CHANGED")
+        self.assertIsNotNone(f, "판정 자체는 남아야 한다")
+        self.assertEqual(f.attribution, "link_restart")
+        self.assertEqual(f.severity, "low")
+
+    def test_a_mac_change_without_a_link_restart_is_still_high(self):
+        """링크가 멀쩡한데 MAC 만 바뀌는 것이 스푸핑의 모양이다."""
+        prev = obs(ts="2026-01-01T00:00:00Z", gw_mac=GW_MAC, ssid=None, bssid=None)
+        cur = obs(ts="2026-01-01T00:00:05Z", gw_mac=GW_MAC_ALT, ssid=None, bssid=None)
+        f = by_kind(judge(prev, cur), "GW_MAC_CHANGED")
+        self.assertIsNone(f.attribution)
+        self.assertEqual(f.severity, "high")
+
+    def test_a_dhcp_renewal_alone_is_not_a_move(self):
+        """갱신은 IP 를 유지한다. 그것만으로 이동이라고 보면 억제가 헐거워진다."""
+        prev = obs(ts="2026-01-01T00:00:00Z", my_ip="192.0.2.50",
+                   lease_start="2026-01-01 00:00:00", ssid=None, bssid=None)
+        cur = obs(ts="2026-01-01T00:00:05Z", my_ip="192.0.2.50",
+                  lease_start="2026-01-01 01:00:00", ssid=None, bssid=None)
+        self.assertNotIn("link_restart", attributions_for(prev, cur, 5.0, 5.0))
+
+    def test_a_known_ssid_still_decides_on_its_own(self):
+        """SSID 를 읽을 수 있으면 링크 재시작을 근거로 쓰지 않는다.
+
+        같은 SSID 로 다시 붙었는데 게이트웨이 MAC 이 바뀌었다면 그것이야말로
+        evil twin 의 모양이다. 링크 재시작으로 억제하면 그 경우를 덮는다.
+        """
+        prev = obs(ts="2026-01-01T00:00:00Z", gw_mac=GW_MAC, ssid=SSID, bssid=BSSID,
+                   my_ip="192.0.2.50", lease_start="2026-01-01 00:00:00")
+        cur = obs(ts="2026-01-01T00:00:05Z", gw_mac=GW_MAC_ALT, ssid=SSID, bssid=BSSID_ALT,
+                  my_ip="192.0.2.77", lease_start="2026-01-01 00:10:00")
+        attrs = attributions_for(prev, cur, 5.0, 5.0)
+        self.assertNotIn("link_restart", attrs)
+        f = by_kind(judge(prev, cur), "GW_MAC_CHANGED")
+        self.assertIsNone(f.attribution, "같은 SSID 의 MAC 변경은 덮이면 안 된다")
+        self.assertEqual(f.severity, "high")
+
+    def test_moving_to_a_different_ssid_uses_the_ssid_not_the_link(self):
+        prev = obs(ts="2026-01-01T00:00:00Z", gw_mac=GW_MAC, ssid=SSID, bssid=BSSID)
+        cur = obs(ts="2026-01-01T00:00:05Z", gw_mac=GW_MAC_ALT, ssid="OtherNet",
+                  bssid=BSSID_ALT)
+        attrs = attributions_for(prev, cur, 5.0, 5.0)
+        self.assertIn("network_change", attrs)
+        self.assertNotIn("link_restart", attrs)
+
+    def test_baselines_are_dropped_on_a_link_restart(self):
+        """이전 장소의 정상값을 새 장소에 적용하면 첫 몇 분이 통째로 오탐이 된다."""
+        from netmon import baseline
+        state = {"rtt_ewma": 40.0, "arp_reply_rate": 5.0, "icmp_gw": True}
+        fresh = baseline.reset_for_new_network(state)
+        self.assertIsNone(fresh.get("rtt_ewma"))
+        self.assertIsNone(fresh.get("arp_reply_rate"))
+        self.assertIsNone(fresh.get("icmp_gw"))
