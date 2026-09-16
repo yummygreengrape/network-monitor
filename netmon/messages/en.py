@@ -300,3 +300,7 @@ ARP_REPLY_SPIKE_RATE = "ARP replies arriving at %.1f per second (usually %.1f)."
 LATENCY_SPIKE_SUSTAINED = "Gateway round-trip time rose to %.0fms (average %.0fms, %d cycles running)."
 INV_L2_NO_CHANGE = "First hop identity held unchanged for %d cycles. No sign of spoofing."
 INV_L2_NO_CHANGE_VERDICT = "first hop identity unchanged"
+
+# ─────────────────────────────────────────── Found in the WARP drop logs
+INV_VPN_SINGLE_RESOLVED = "%s dropped once and has been steady for %d cycles since. %s."
+INV_VPN_VERDICT_SINGLE = "dropped once, then recovered"

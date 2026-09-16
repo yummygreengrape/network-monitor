@@ -161,6 +161,18 @@ def coalesce(*values: Optional[str]) -> Optional[str]:
     return None
 
 
+def is_loopback(addr: Optional[str]) -> bool:
+    """루프백 주소인가. 수집과 판정 양쪽이 쓴다."""
+    import ipaddress
+
+    if not addr:
+        return False
+    try:
+        return ipaddress.ip_address(str(addr).split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
 def normalize_mask(mask: Optional[str]) -> Optional[str]:
     """넷마스크를 점 표기로. ifconfig 는 0xffffff00, DHCP 는 255.255.255.0 을 준다."""
     if not mask:

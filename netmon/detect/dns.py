@@ -10,12 +10,36 @@ from typing import List, Optional
 from .. import messages as msg
 from ..model import (CONFIRMED, HIGH, INFO, MEDIUM, SECURITY, SUSPECT,
                      Finding, Observation, unwrap)
+from ..util import is_loopback
 
 FEATURE = "detect.dns"
 
 # 이 프록시 키가 켜지면 트래픽이 제3자를 거친다.
 INTERCEPT_KEYS = ("HTTPEnable", "HTTPSEnable", "SOCKSEnable",
                   "ProxyAutoConfigEnable", "ProxyAutoDiscoveryEnable")
+
+
+def explained_by_vpn(prev: Optional[Observation], cur: Observation, ctx) -> bool:
+    """리졸버 변화가 VPN 오르내림으로 설명되는가.
+
+    "같은 주기에 VPN 상태가 바뀌었다"만으로는 부족하다. 공격자가 VPN 을
+    끊으면서 리졸버를 자기 것으로 바꿀 수도 있다. 그래서 바뀐 결과가
+    **VPN 전환과 앞뒤가 맞는지**까지 본다.
+
+      VPN 내려감 → 리졸버가 DHCP 가 준 DNS 로 돌아감
+      VPN 올라감 → 리졸버가 루프백(로컬 프록시)이 됨
+
+    둘 중 어느 쪽도 아니면 억제하지 않는다.
+    """
+    if not ctx.has("vpn_change"):
+        return False
+    now = [str(unwrap(r)) for r in (cur.get("dns", "resolvers") or [])]
+    if not now:
+        return False
+    if all(is_loopback(a) for a in now):
+        return True   # 로컬 프록시로 올라간 모양
+    offered = [str(unwrap(r)) for r in (cur.get("dhcp", "dns_offered") or [])]
+    return bool(offered) and sorted(now) == sorted(offered)
 
 
 def _resolvers(obs: Optional[Observation]) -> List[str]:
@@ -30,6 +54,8 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         return out
 
     attribution = ctx.identity_attribution()
+    if attribution is None and explained_by_vpn(prev, cur, ctx):
+        attribution = "vpn_change"
 
     p_res, c_res = _resolvers(prev), _resolvers(cur)
     if p_res and c_res and p_res != c_res:

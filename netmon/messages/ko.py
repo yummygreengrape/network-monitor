@@ -294,3 +294,7 @@ ARP_REPLY_SPIKE_RATE = "ARP 응답 수신이 초당 %.1f건으로 증가 (평소
 LATENCY_SPIKE_SUSTAINED = "게이트웨이 왕복 시간이 %.0fms 로 크게 증가함 (평균 %.0fms, %d주기 연속)."
 INV_L2_NO_CHANGE = "첫 홉의 정체는 %d주기 동안 그대로 유지됨. 스푸핑 흔적 없음."
 INV_L2_NO_CHANGE_VERDICT = "첫 홉 정체 변화 없음"
+
+# ─────────────────────────────────────────── WARP 끊김 로그에서 드러난 항목
+INV_VPN_SINGLE_RESOLVED = "%s 가 한 번 끊겼다가 복구된 뒤 %d주기 동안 안정적임. %s."
+INV_VPN_VERDICT_SINGLE = "한 번 끊겼다 복구됨"

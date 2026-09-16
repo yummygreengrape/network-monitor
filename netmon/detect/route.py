@@ -24,6 +24,15 @@ def _routes(obs: Optional[Observation], key: str) -> Set[str]:
     return out
 
 
+TUNNEL_PREFIXES = ("utun", "ipsec", "ppp", "tun", "tap")
+
+
+def _is_tunnel_route(route_key: str) -> bool:
+    """"<게이트웨이>@<인터페이스>" 형태에서 인터페이스가 터널인가."""
+    iface = route_key.rsplit("@", 1)[-1]
+    return iface.startswith(TUNNEL_PREFIXES)
+
+
 def _router_addrs(obs: Optional[Observation]) -> Set[str]:
     if obs is None:
         return set()
@@ -39,14 +48,21 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
     # --- IPv4 기본 경로 ---
     p4, c4 = _routes(prev, "default4"), _routes(cur, "default4")
+    route_attribution = attribution
+    if route_attribution is None and ctx.has("vpn_change"):
+        # VPN 이 오르내리면 터널 경로가 생겼다 사라진다. 그 경로만 달라졌다면
+        # VPN 전환으로 설명된다. 물리 경로가 함께 바뀌었다면 설명되지 않는다.
+        changed = (p4 ^ c4)
+        if changed and all(_is_tunnel_route(r) for r in changed):
+            route_attribution = "vpn_change"
     if p4 and c4 and p4 != c4:
         out.append(Finding(
             axis=SECURITY, kind="DEFAULT_ROUTE_CHANGED",
             confidence=CONFIRMED,
-            severity=LOW if attribution else HIGH,
+            severity=LOW if route_attribution else HIGH,
             summary=msg.DEFAULT_ROUTE_CHANGED,
             evidence={"prev": sorted(p4), "cur": sorted(c4), "source": "netstat -rn -f inet"},
-            attribution=attribution,
+            attribution=route_attribution,
         ))
 
     # --- IPv6 기본 경로가 새로 생김 ---

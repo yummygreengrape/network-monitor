@@ -29,6 +29,7 @@ REGISTRY = [l2, dhcp, dns, route, wifi, quality, vpn]
 
 # 억제 사유
 NETWORK_CHANGE = "network_change"
+VPN_CHANGE = "vpn_change"
 SLEEP = "sleep"
 IFACE_CHANGE = "iface_change"
 FIRST_SAMPLE = "first_sample"
@@ -119,7 +120,25 @@ def attributions_for(prev: Optional[Observation], cur: Observation,
         out.append(IFACE_CHANGE)
     elif network_key(prev) != network_key(cur):
         out.append(NETWORK_CHANGE)
+    if vpn_state_changed(prev, cur):
+        out.append(VPN_CHANGE)
     return out
+
+
+def vpn_state_changed(prev: Optional[Observation], cur: Observation) -> bool:
+    """이번 주기에 VPN 공급자의 상태가 바뀌었는가.
+
+    VPN 이 오르내리면 리졸버와 기본 경로가 따라 바뀐다. 그 변화를 독립된
+    보안 사건으로 올리면 VPN 을 쓰는 사람에게는 끊길 때마다 high 가 두 건씩
+    뜬다 — 실제로 WARP 가 49초 끊겼을 때 그렇게 났다.
+    """
+    if prev is None:
+        return False
+    p, c = prev.get("vpn") or {}, cur.get("vpn") or {}
+    for name in set(p) | set(c):
+        if (p.get(name) or {}).get("state") != (c.get(name) or {}).get("state"):
+            return True
+    return False
 
 
 def run_all(prev: Optional[Observation], cur: Observation, ctx: Context) -> List[Finding]:

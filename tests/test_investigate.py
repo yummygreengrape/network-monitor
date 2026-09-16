@@ -190,14 +190,29 @@ class TestVpnInvestigation(unittest.TestCase):
 
 class TestPathConfigInvestigation(unittest.TestCase):
     def test_persisting_change_concludes_confirmed(self):
+        """존속 기준은 주기가 아니라 시간이다 (기본 300초).
+
+        조사 중에는 측정 간격을 줄이므로 주기 수는 실제 경과 시간과 무관해진다.
+        실측에서 12주기(36초)만에 "자리 잡았다"고 끝내고 12초 뒤 원복됐다.
+        """
         h = Harness()
         h.feed(obs(ts=ts(0), resolvers=(DNS1,)))
         h.feed(obs(ts=ts(5), resolvers=("192.0.2.66",)))
-        for i in range(13):
+        for i in range(70):          # 5초 간격 × 70 = 350초 > 300초
             h.feed(obs(ts=ts(10 + i * 5), resolvers=("192.0.2.66",)))
         inv = h.closed("path_config")[0]
         self.assertEqual(inv.status, CONCLUDED)
         self.assertEqual(inv.confidence, "confirmed")
+
+    def test_a_short_lived_change_does_not_conclude(self):
+        """WARP 가 49초 끊긴 동안의 리졸버 변화로 결론을 내면 안 된다."""
+        h = Harness()
+        h.feed(obs(ts=ts(0), resolvers=(DNS1,)))
+        h.feed(obs(ts=ts(5), resolvers=("192.0.2.66",)))
+        for i in range(9):           # 45초
+            h.feed(obs(ts=ts(10 + i * 5), resolvers=("192.0.2.66",)))
+        self.assertEqual(h.closed("path_config"), [])
+        self.assertEqual(len(h.opened("path_config")), 1)
 
     def test_repeated_flipping_retunes_to_contested(self):
         h = Harness()

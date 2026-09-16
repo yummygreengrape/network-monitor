@@ -180,3 +180,97 @@ class TestInvestigationDoesNotOverclaim(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVpnDropConsequences(unittest.TestCase):
+    """2026-09-16 05:56:48 의 WARP 끊김 49초.
+
+    WARP 가 내려가자 리졸버가 DHCP 가 준 DNS 로 돌아가고 기본 경로가 3개에서
+    2개가 됐다. 둘 다 끊김의 **결과**인데 독립된 보안 사건(high)으로 올라갔고,
+    그 때문에 엉뚱한 조사까지 열렸다.
+    """
+
+    OFFERED = ("192.0.2.53", "198.51.100.53")
+    LOOPBACK = ("127.0.2.2", "127.0.2.3")
+
+    def _up(self, ts):
+        return obs(ts=ts, vpn=vpn_state("connected"), resolvers=self.LOOPBACK,
+                   via_loopback=True, dns=self.OFFERED)
+
+    def _down(self, ts):
+        return obs(ts=ts, vpn=vpn_state("connecting"), resolvers=self.OFFERED,
+                   via_loopback=False, dns=self.OFFERED)
+
+    def test_resolver_change_is_attributed_to_the_vpn_drop(self):
+        f = by_kind(judge(self._up("2026-01-01T00:00:00Z"),
+                          self._down("2026-01-01T00:00:05Z")), "RESOLVER_CHANGED")
+        self.assertIsNotNone(f)
+        self.assertEqual(f.attribution, "vpn_change")
+        self.assertEqual(f.severity, "low", "끊김의 결과를 high 로 올리면 안 된다")
+
+    def test_the_drop_itself_is_still_reported(self):
+        found = judge(self._up("2026-01-01T00:00:00Z"), self._down("2026-01-01T00:00:05Z"))
+        self.assertIn("VPN_DISCONNECTED", kinds(found))
+        self.assertIn("VPN_PROTECTION_LOST", kinds(found))
+        self.assertIsNone(by_kind(found, "VPN_PROTECTION_LOST").attribution,
+                          "보호가 사라진 사실까지 억제하면 안 된다")
+
+    def test_a_resolver_change_to_a_third_party_is_not_attributed(self):
+        """공격자가 VPN 을 끊으면서 리졸버를 자기 것으로 바꿀 수 있다.
+
+        DHCP 가 준 값도 루프백도 아니면 VPN 전환으로 설명되지 않는다.
+        """
+        cur = obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("connecting"),
+                  resolvers=("192.0.2.99",), via_loopback=False, dns=self.OFFERED)
+        f = by_kind(judge(self._up("2026-01-01T00:00:00Z"), cur), "RESOLVER_CHANGED")
+        self.assertIsNone(f.attribution)
+        self.assertEqual(f.severity, "high")
+
+    def test_tunnel_route_change_is_attributed_but_physical_is_not(self):
+        up = obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state("connected"))
+        up.data["route"]["default4"] = [
+            {"gateway": {"id": "ipv4", "v": "192.0.2.1"}, "iface": "en0", "flags": "UGScg"},
+            {"gateway": "link#26", "iface": "utun6", "flags": "UCSIg"}]
+        down = obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("connecting"))
+        down.data["route"]["default4"] = [
+            {"gateway": {"id": "ipv4", "v": "192.0.2.1"}, "iface": "en0", "flags": "UGScg"}]
+        f = by_kind(judge(up, down), "DEFAULT_ROUTE_CHANGED")
+        self.assertEqual(f.attribution, "vpn_change")
+
+        moved = obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("connecting"))
+        moved.data["route"]["default4"] = [
+            {"gateway": {"id": "ipv4", "v": "192.0.2.77"}, "iface": "en0", "flags": "UGScg"},
+            {"gateway": "link#26", "iface": "utun6", "flags": "UCSIg"}]
+        g = by_kind(judge(up, moved), "DEFAULT_ROUTE_CHANGED")
+        self.assertIsNone(g.attribution, "물리 경로가 바뀐 것은 VPN 으로 설명되지 않는다")
+
+
+class TestSingleVpnDropConcludes(unittest.TestCase):
+    """49초짜리 끊김 하나로 열린 조사가 120주기를 다 쓰고 "판별 실패" 로 끝났다."""
+
+    def test_one_drop_then_quiet_concludes_without_burning_the_budget(self):
+        from netmon import investigate
+        from netmon import messages as msg
+        from netmon.investigate.playbooks import VpnDrop
+
+        state = {"icmp_gw": True}
+        inv = investigate.Investigator({})
+        prev = obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state("connected"), icmp_ok=True)
+        seq = [obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("disconnected"), icmp_ok=True),
+               obs(ts="2026-01-01T00:00:10Z", vpn=vpn_state("connected"), icmp_ok=True)]
+        seq += [obs(ts="2026-01-01T00:%02d:%02dZ" % ((i // 12) + 1, (i * 5) % 60),
+                    vpn=vpn_state("connected"), icmp_ok=True)
+                for i in range(VpnDrop.SETTLED_CYCLES + 2)]
+        for cur in seq:
+            ctx = Context(elapsed=5.0, interval=5.0, features=ON, state=state,
+                          attributions=attributions_for(prev, cur, 5.0, 5.0),
+                          network=network_key(cur))
+            found = run_all(prev, cur, ctx)
+            inv.run(prev, cur, ctx, found, state)
+            prev = cur
+        done = [i for i in investigate.Investigator.load(state)
+                if i.kind == "vpn_drop" and not i.open]
+        self.assertTrue(done, "한 번 끊겼다 복구된 것도 결론을 내야 한다")
+        self.assertEqual(done[0].verdict, msg.INV_VPN_VERDICT_SINGLE)
+        self.assertLess(done[0].cycles, VpnDrop.max_cycles,
+                        "예산을 다 쓰기 전에 끝나야 한다")

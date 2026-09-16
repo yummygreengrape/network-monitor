@@ -188,16 +188,21 @@ class PathConfig(Playbook):
     triggers = ("DHCP_SERVER_CHANGED", "DHCP_ROUTER_CHANGED", "DHCP_DNS_CHANGED",
                 "RESOLVER_CHANGED", "PROXY_ENABLED", "PROXY_SETTINGS_CHANGED",
                 "DEFAULT_ROUTE_CHANGED", "IPV6_DEFAULT_ROUTE_APPEARED")
-    max_cycles = 40
+    max_cycles = 120
     fast_interval = 3
 
-    PERSIST_CYCLES = 12
+    # **시간으로 센다.** 조사 중에는 측정 간격을 줄이므로 주기 수는 실제
+    # 경과 시간과 무관해진다. 12주기를 3초 간격으로 세면 36초인데, 실측에서
+    # WARP 가 49초 끊긴 동안 "설정이 자리 잡았다"고 결론 내고 12초 뒤에
+    # 원래대로 돌아갔다.
+    PERSIST_SECONDS = 300.0
 
     def initial_criteria(self, finding: Finding, cur: Observation) -> Dict[str, Any]:
         return {
             "watch_kinds": list(self.triggers),
             "snapshot": self._snapshot(cur),
             "persisted_for": 0,
+            "persisted_seconds": 0.0,
             "reverted": False,
             "further_changes": 0,
         }
@@ -217,11 +222,14 @@ class PathConfig(Playbook):
         ts, crit = cur.ts, inv.criteria
         now = self._snapshot(cur)
 
+        step_seconds = float(ctx.elapsed) if ctx.elapsed and ctx.elapsed > 0 else float(ctx.interval)
         if now == crit.get("snapshot"):
             crit["persisted_for"] = int(crit.get("persisted_for", 0)) + 1
+            crit["persisted_seconds"] = float(crit.get("persisted_seconds", 0.0)) + step_seconds
         else:
             crit["further_changes"] = int(crit.get("further_changes", 0)) + 1
             crit["persisted_for"] = 0
+            crit["persisted_seconds"] = 0.0
             crit["snapshot"] = now
             inv.note(ts, msg.INV_NOTE_CONFIG_AGAIN, count=crit["further_changes"])
 
@@ -229,10 +237,10 @@ class PathConfig(Playbook):
         if crit["further_changes"] == 2 and not crit.get("contested"):
             out.append(self._retuned(inv, inv.retune(
                 ts, msg.INV_PATH_CONTESTED,
-                contested=True, persist_target=self.PERSIST_CYCLES * 2)))
+                contested=True, persist_target=self.PERSIST_SECONDS * 2)))
 
-        target = int(crit.get("persist_target", self.PERSIST_CYCLES))
-        if int(crit["persisted_for"]) >= target:
+        target = float(crit.get("persist_target", self.PERSIST_SECONDS))
+        if float(crit["persisted_seconds"]) >= target:
             contested = bool(crit.get("contested"))
             inv.close(ts, CONCLUDED, msg.INV_PATH_VERDICT,
                       CONFIRMED if not contested else SUSPECT)
@@ -258,6 +266,10 @@ class VpnDrop(Playbook):
     fast_interval = 3
 
     REPEAT_THRESHOLD = 3
+    # 되풀이가 없더라도 이만큼 안정적이면 "한 번 끊겼다 복구됨"으로 닫는다.
+    # 그러지 않으면 예산(120주기)을 다 쓰고 "판별 실패"로 끝난다 — 실제로
+    # 49초짜리 끊김 하나에 대해 그렇게 끝났다.
+    SETTLED_CYCLES = 40
 
     def initial_criteria(self, finding: Finding, cur: Observation) -> Dict[str, Any]:
         ev = finding.evidence or {}
@@ -306,7 +318,24 @@ class VpnDrop(Playbook):
                 crit["link_events"] = int(crit.get("link_events", 0)) + len(hits)
                 inv.note(ts, msg.INV_NOTE_LINK_EVENT, kinds=hits)
 
+        # 복구된 뒤 얼마나 조용한가
+        if crit.get("still_down"):
+            crit["settled_for"] = 0
+        else:
+            crit["settled_for"] = int(crit.get("settled_for", 0)) + 1
+
         drops = int(crit.get("drops", 0))
+        if drops < self.REPEAT_THRESHOLD and int(crit.get("settled_for", 0)) >= self.SETTLED_CYCLES:
+            alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
+            leg = (msg.INV_VPN_VERDICT_TUNNEL if alive and all(alive)
+                   else msg.INV_VPN_VERDICT_LINK if alive and not any(alive)
+                   else msg.INV_VPN_VERDICT_UNKNOWN)
+            inv.close(ts, CONCLUDED, msg.INV_VPN_VERDICT_SINGLE, SUSPECT)
+            out.append(L2Identity._concluded(
+                inv, QUALITY, INFO_SEV, SUSPECT,
+                msg.INV_VPN_SINGLE_RESOLVED % (provider, crit["settled_for"], leg)))
+            return out
+
         if drops >= self.REPEAT_THRESHOLD:
             link_events = int(crit.get("link_events", 0))
             alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]

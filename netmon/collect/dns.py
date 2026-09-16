@@ -6,11 +6,10 @@
 """
 from __future__ import annotations
 
-import ipaddress
 from typing import Any, Dict, List, Optional
 
 from ..model import ident
-from ..util import OK, BROKEN, Capability, run
+from ..util import OK, BROKEN, Capability, is_loopback, run
 
 NAME = "dns"
 
@@ -22,13 +21,6 @@ PROXY_KEYS = (
     "ProxyAutoConfigEnable", "ProxyAutoConfigURLString",
     "ProxyAutoDiscoveryEnable",
 )
-
-
-def is_loopback(addr: str) -> bool:
-    try:
-        return ipaddress.ip_address(addr.split("%", 1)[0]).is_loopback
-    except ValueError:
-        return False
 
 
 def parse_scutil_dns(text: str) -> Dict[str, Any]:
