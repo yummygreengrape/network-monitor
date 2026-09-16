@@ -95,6 +95,34 @@ class Store:
         os.replace(tmp, self.state_path)
 
     # --- 보존 ---
+    AGENT_LOG_MAX = 5 * 1024 * 1024
+
+    def rotate_agent_logs(self) -> int:
+        """상시 실행 로그가 무한히 커지지 않게 자른다.
+
+        launchd 의 StandardOutPath 는 회전되지 않는다. 몇 달 켜 두면 수 GB 가
+        된다. 최근 절반만 남기고 앞을 버린다.
+        """
+        trimmed = 0
+        for name in os.listdir(self.dir):
+            if not (name.startswith("agent.") and name.endswith(".log")):
+                continue
+            path = os.path.join(self.dir, name)
+            try:
+                if os.path.getsize(path) <= self.AGENT_LOG_MAX:
+                    continue
+                with open(path, "rb") as fh:
+                    fh.seek(-self.AGENT_LOG_MAX // 2, os.SEEK_END)
+                    fh.readline()  # 잘린 첫 줄은 버린다
+                    tail = fh.read()
+                with open(path, "wb") as fh:
+                    fh.write("... (앞부분을 잘랐다)\n".encode("utf-8"))
+                    fh.write(tail)
+                trimmed += 1
+            except OSError:
+                pass
+        return trimmed
+
     def prune(self, retention_days: int) -> int:
         cutoff = time.time() - retention_days * 86400
         removed = 0
@@ -108,6 +136,7 @@ class Store:
                     removed += 1
             except OSError:
                 pass
+        self.rotate_agent_logs()
         return removed
 
 

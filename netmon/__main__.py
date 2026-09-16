@@ -18,7 +18,8 @@ import sys
 import time
 from typing import List, Optional
 
-from . import __version__, config as configmod, redact as redactmod, vpn, wifi_helper
+from . import (__version__, config as configmod, redact as redactmod, service,
+               setup as setupmod, vpn, wifi_helper)
 from .collect import REGISTRY as COLLECTORS
 from .engine import Engine, replay as replay_engine
 from .model import Observation
@@ -31,12 +32,21 @@ def default_log_dir() -> str:
     return os.environ.get("NETMON_LOG_DIR") or os.path.join(configmod.config_home(), "data")
 
 
-def _store(args) -> Store:
-    return Store(args.log_dir or default_log_dir())
-
-
 def _cfg(args) -> configmod.Config:
     return configmod.load(args.config)
+
+
+def log_dir_for(args, cfg: configmod.Config) -> str:
+    """--log-dir > NETMON_LOG_DIR > 설정 파일 > 기본값."""
+    return (args.log_dir
+            or os.environ.get("NETMON_LOG_DIR")
+            or cfg.data.get("log_dir")
+            or os.path.join(os.path.dirname(cfg.path), "data"))
+
+
+def _store(args, cfg: Optional[configmod.Config] = None) -> Store:
+    cfg = cfg or _cfg(args)
+    return Store(log_dir_for(args, cfg))
 
 
 # ---------------------------------------------------------------- doctor
@@ -44,7 +54,7 @@ def cmd_doctor(args) -> int:
     cfg = _cfg(args)
     print("netmon %s" % __version__)
     print("설정   %s" % cfg.path)
-    print("데이터 %s" % (args.log_dir or default_log_dir()))
+    print("데이터 %s" % log_dir_for(args, cfg))
     print()
 
     # 수집기가 무엇을 볼 수 있는지 알려면 먼저 인터페이스를 정해야 한다
@@ -83,6 +93,18 @@ def cmd_doctor(args) -> int:
     for name in sorted(k for k in cfg.data.get("features", {}) if k.startswith("detect.")):
         reason = cfg.blocked_reason(name)
         print("  %-24s %s" % (name, "켜짐" if reason is None else "꺼짐 (%s)" % reason))
+
+    print()
+    svc = service.describe()
+    if svc["installed"]:
+        state = "실행 중 (pid %s)" % svc["pid"] if svc["pid"] else (
+            "등록됨, 실행 대기" if svc["loaded"] else "등록 파일만 있고 launchd 에 없음")
+        print("상시 실행     %s" % state)
+        if svc["script_exists"] is False:
+            print("              └ 등록된 실행 파일이 없다: %s" % svc["script"])
+            print("                저장소를 옮겼다면 netmon.sh service install 로 다시 등록한다")
+    else:
+        print("상시 실행     등록 안 됨 — netmon.sh service install 로 켠다")
 
     print()
     home = os.path.dirname(cfg.path)
@@ -138,6 +160,124 @@ def cmd_consent(args) -> int:
         cfg.save()
         print("동의를 철회하고 관련 기능도 껐다 → %s" % cfg.path)
     return 0
+
+
+# ---------------------------------------------------------------- setup
+def repo_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def launcher_path() -> str:
+    return os.path.join(repo_root(), "netmon.sh")
+
+
+def _install_agent(cfg: configmod.Config, log_dir: str, quiet: bool = False) -> int:
+    script = launcher_path()
+    if not os.path.exists(script):
+        print("실행기를 찾을 수 없다: %s" % script, file=sys.stderr)
+        return 2
+    env = {
+        "NETMON_HOME": os.path.dirname(cfg.path),
+        "NETMON_LOG_DIR": log_dir,
+        # launchd 아래에서는 stdout 이 파이프라 버퍼링된다. 버퍼를 끄지 않으면
+        # 로그가 한참 뒤에야 나타나서 "멈춘 것처럼" 보인다.
+        "PYTHONUNBUFFERED": "1",
+    }
+    r = service.install(script, log_dir, env=env, interval=cfg.interval)
+    if not r["ok"]:
+        print("등록 실패: %s" % r["error"], file=sys.stderr)
+        return 2
+    if not quiet:
+        print("상시 실행으로 등록했다.")
+        print("  정의 파일  %s" % r["plist"])
+        print("  실행       %s run" % script)
+        print("  기록       %s" % log_dir)
+        print("  해제       netmon.sh service uninstall")
+    return 0
+
+
+def cmd_setup(args) -> int:
+    cfg = _cfg(args)
+    home = os.path.dirname(cfg.path)
+    default_dir = log_dir_for(args, cfg)
+
+    if args.defaults:
+        plan = setupmod.Plan(log_dir=default_dir, confirmed=True)
+        plan.interval = cfg.interval
+        plan.retention_days = int(cfg.data.get("retention_days", 14))
+    else:
+        # 파이프로 답을 넣어 자동 설치하는 것도 허용한다. 답이 떨어지면
+        # input() 이 EOFError 를 내고 아래에서 취소로 처리된다.
+        wiz = setupmod.Wizard(ask=input, say=print, default_log_dir=default_dir)
+        try:
+            plan = wiz.run()
+        except (KeyboardInterrupt, EOFError):
+            print("\n취소했다. 아무것도 바꾸지 않았다.")
+            return 1
+
+    if not plan.confirmed:
+        print("취소했다. 아무것도 바꾸지 않았다.")
+        return 1
+
+    todo = setupmod.apply(plan, cfg)
+    print()
+    print("설정을 저장했다 → %s" % cfg.path)
+
+    if todo["needs_location_request"]:
+        print()
+        print("위치 권한 헬퍼를 만든다...")
+        rc = cmd_location(argparse.Namespace(
+            config=args.config, log_dir=args.log_dir, action="setup", timeout=120))
+        if rc != 0:
+            print("위치 권한을 받지 못했다. 나머지 탐지는 그대로 동작한다.")
+
+    if todo["needs_agent_install"]:
+        print()
+        rc = _install_agent(cfg, todo["log_dir"])
+        if rc != 0:
+            return rc
+
+    print()
+    print("끝났다. 확인:  netmon.sh doctor")
+    if not todo["needs_agent_install"]:
+        print("측정 시작:     netmon.sh run")
+    return 0
+
+
+# ---------------------------------------------------------------- service
+def cmd_service(args) -> int:
+    cfg = _cfg(args)
+    log_dir = log_dir_for(args, cfg)
+
+    if args.action == "status":
+        d = service.describe()
+        print("이름   %s" % d["label"])
+        print("정의   %s%s" % (d["plist"], "" if d["installed"] else "  (없음)"))
+        if d["script"]:
+            print("실행   %s%s" % (d["script"],
+                                   "" if d["script_exists"] else "  (파일 없음)"))
+        print("상태   %s" % ("실행 중 (pid %s)" % d["pid"] if d["pid"]
+                             else "등록됨, 실행 대기" if d["loaded"] else "등록 안 됨"))
+        return 0 if d["installed"] else 1
+
+    if args.action == "install":
+        print("로그인할 때 자동으로 시작하고, 멈추면 다시 띄운다.")
+        print("~/Library/LaunchAgents 에 파일 하나를 만든다. sudo 는 쓰지 않는다.")
+        return _install_agent(cfg, log_dir)
+
+    if args.action == "uninstall":
+        r = service.uninstall()
+        print("해제했다." if r["removed"] else "등록되어 있지 않았다.")
+        print("기록은 %s 에 그대로 남아 있다." % log_dir)
+        return 0
+
+    if args.action == "restart":
+        return 0 if service.restart() else 1
+    if args.action == "start":
+        return 0 if service.start() else 1
+    if args.action == "stop":
+        return 0 if service.stop() else 1
+    return 2
 
 
 # ---------------------------------------------------------------- location
@@ -211,7 +351,8 @@ def _print_findings(findings, obs: Observation) -> None:
 
 
 def cmd_once(args) -> int:
-    cfg, store = _cfg(args), _store(args)
+    cfg = _cfg(args)
+    store = _store(args, cfg)
     eng = Engine(cfg, store)
     obs, findings = eng.cycle()
     if not args.no_write:
@@ -227,15 +368,21 @@ def cmd_once(args) -> int:
 
 
 def cmd_run(args) -> int:
-    cfg, store = _cfg(args), _store(args)
+    cfg = _cfg(args)
+    store = _store(args, cfg)
     interval = args.interval or cfg.interval
     eng = Engine(cfg, store)
     store.prune(int(cfg.data.get("retention_days", 14)))
     print("측정 시작 — 간격 %ds, 기록 %s  (Ctrl+C 로 종료)" % (interval, store.dir))
     n = 0
+    last_prune_day = time.strftime("%Y-%m-%d")
     try:
         while True:
             start = time.time()
+            day = time.strftime("%Y-%m-%d")
+            if day != last_prune_day:
+                store.prune(int(cfg.data.get("retention_days", 14)))
+                last_prune_day = day
             obs, findings = eng.cycle(start)
             eng.persist(obs, findings)
             n += 1
@@ -339,6 +486,16 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--note", help="기록에 남길 메모")
     c.set_defaults(func=cmd_consent)
 
+    st = sub.add_parser("setup", help="처음 켤 때의 설정 마법사")
+    st.add_argument("--defaults", action="store_true",
+                    help="묻지 않고 기본값으로 설정 (모든 선택 기능은 꺼짐)")
+    st.set_defaults(func=cmd_setup)
+
+    sv = sub.add_parser("service", help="상시 실행 등록 관리")
+    sv.add_argument("action",
+                    choices=["install", "uninstall", "status", "start", "stop", "restart"])
+    sv.set_defaults(func=cmd_service)
+
     lo = sub.add_parser("location", help="위치 권한 헬퍼 (evil twin 탐지용)")
     lo.add_argument("action", choices=["setup", "request", "status"])
     lo.add_argument("--timeout", type=int, default=120, help="권한 응답 대기 초")
@@ -375,11 +532,26 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
-    if not getattr(args, "func", None):
-        build_parser().print_help()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "func", None):
+        return args.func(args)
+
+    # 인자 없이 켰다. 설정이 아직 없으면 마법사를 권한다.
+    cfg = _cfg(args)
+    if not os.path.exists(cfg.path):
+        print("netmon %s — 처음 실행입니다." % __version__)
+        print()
+        if sys.stdin.isatty():
+            ans = input("설정 마법사를 시작할까요? (Y/n): ").strip().lower()
+            if ans in ("", "y", "yes", "예", "ㅇ"):
+                args.defaults = False
+                return cmd_setup(args)
+        print("설정: netmon.sh setup     점검: netmon.sh doctor")
         return 0
-    return args.func(args)
+
+    parser.print_help()
+    return 0
 
 
 if __name__ == "__main__":

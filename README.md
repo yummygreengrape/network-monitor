@@ -15,6 +15,19 @@ macOS용 감시 도구입니다.
 macOS와 Python 3.9 이상. 추가 설치는 없습니다. `python3`가 없으면 Xcode Command Line
 Tools를 설치하면 `/usr/bin/python3`가 생깁니다.
 
+## 처음 켤 때
+
+```
+./netmon.sh setup
+```
+
+무엇을 켜고 끌지 하나씩 물어봅니다. 측정 간격, 기록 위치와 보존 기간, 위치 권한,
+VPN 감시, 외부 점검 요청, 상시 실행 여부입니다. **엔터만 눌러도 안전한 값**입니다 —
+sudo를 쓰지 않고, 외부로 요청을 보내지 않고, 상시 실행으로 등록하지도 않습니다.
+
+아무 인자 없이 `./netmon.sh`를 실행해도 설정이 없으면 마법사를 권합니다.
+묻지 않고 기본값만 쓰려면 `./netmon.sh setup --defaults`입니다.
+
 ## 쓰는 법
 
 ```
@@ -24,7 +37,28 @@ Tools를 설치하면 `/usr/bin/python3`가 생깁니다.
 ./netmon.sh report           오늘 요약
 ./netmon.sh report --redact  식별자를 가려서 출력 (남에게 보낼 때)
 ./netmon.sh location setup   위치 권한 헬퍼를 만들고 권한 요청 (evil twin 탐지)
+./netmon.sh service install  항상 켜 두기 (로그인할 때 자동 시작)
 ```
+
+## 항상 켜 두기
+
+```
+./netmon.sh service install     등록
+./netmon.sh service status      상태 확인
+./netmon.sh service uninstall   해제 (기록은 남습니다)
+```
+
+`~/Library/LaunchAgents/io.github.network-monitor.plist` 파일 하나를 만듭니다.
+**sudo를 쓰지 않고**, 시스템 설정을 바꾸지 않으며, `uninstall`로 되돌립니다.
+`setup` 마법사에서도 고를 수 있고, 기본값은 등록하지 않는 것입니다.
+
+등록하면 로그인할 때 시작하고 멈추면 다시 뜹니다. 우선순위를 낮춰(`nice 5`,
+`Background`, `LowPriorityIO`) 다른 작업을 방해하지 않습니다. 실측에서 CPU 0.0%,
+메모리 약 17MB였습니다. `launchd`의 출력 파일은 회전되지 않으므로 5MB를 넘으면
+앞부분을 잘라 냅니다.
+
+저장소를 다른 곳으로 옮기면 등록된 실행 경로가 깨집니다. `service status`와
+`doctor`가 그 상태를 알려 주고, `service install`로 다시 등록하면 됩니다.
 
 먼저 `doctor`를 실행하세요. 기종과 macOS 버전, 권한에 따라 쓸 수 있는 탐지가 다르고,
 `doctor`는 **무엇이 왜 안 되는지**를 함께 알려줍니다. 남의 기계에서 탐지가 조용히
