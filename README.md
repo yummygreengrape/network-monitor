@@ -23,6 +23,7 @@ Tools를 설치하면 `/usr/bin/python3`가 생깁니다.
 ./netmon.sh run              계속 측정 (Ctrl+C로 종료)
 ./netmon.sh report           오늘 요약
 ./netmon.sh report --redact  식별자를 가려서 출력 (남에게 보낼 때)
+./netmon.sh location setup   위치 권한 헬퍼를 만들고 권한 요청 (evil twin 탐지)
 ```
 
 먼저 `doctor`를 실행하세요. 기종과 macOS 버전, 권한에 따라 쓸 수 있는 탐지가 다르고,
@@ -39,9 +40,22 @@ Tools를 설치하면 `/usr/bin/python3`가 생깁니다.
 
 ```
 ./netmon.sh consent list                       무엇을 왜 요구하는지 읽기
-./netmon.sh consent grant location --enable    위치 권한 (evil twin 탐지)
+./netmon.sh location setup                     위치 권한 헬퍼 생성 + 권한 요청
+./netmon.sh location status                    현재 권한 상태
 ./netmon.sh consent revoke location            철회 (관련 기능도 함께 꺼집니다)
 ```
+
+### 위치 권한이 왜 별도 앱을 거치나
+
+macOS의 위치 권한은 **앱 단위**입니다. 터미널에서 돌리는 스크립트는 권한을 요청할
+주체가 없어 요청 창이 뜨지 않고, 권한을 받은 다른 앱의 승인을 물려받지도 못합니다.
+그래서 `location setup`이 작은 헬퍼 앱(`NetworkMonitorLocation.app`)을 만들어
+설정 디렉터리에 두고, 그 앱이 권한을 받아 **SSID와 BSSID만** 돌려줍니다.
+
+헬퍼는 위치 좌표를 읽지 않고(`startUpdatingLocation`을 호출하지 않습니다),
+주변 AP 목록도 훑지 않습니다. 필요한 두 값이 전부입니다. 소스는
+[tools/location-helper/request_location.m](tools/location-helper/request_location.m)에
+있습니다.
 
 | 항목 | 무엇에 쓰나 | 밖으로 나가는 것 |
 |---|---|---|

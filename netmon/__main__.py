@@ -13,11 +13,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from typing import List, Optional
 
-from . import __version__, config as configmod, redact as redactmod, vpn
+from . import __version__, config as configmod, redact as redactmod, vpn, wifi_helper
 from .collect import REGISTRY as COLLECTORS
 from .engine import Engine, replay as replay_engine
 from .model import Observation
@@ -49,7 +50,8 @@ def cmd_doctor(args) -> int:
     # 수집기가 무엇을 볼 수 있는지 알려면 먼저 인터페이스를 정해야 한다
     from .collect import iface as iface_mod
     base = iface_mod.collect({})
-    ctx = {"primary": base.get("primary"), "primary_kind": base.get("primary_kind")}
+    ctx = {"primary": base.get("primary"), "primary_kind": base.get("primary_kind"),
+           "config_home": os.path.dirname(cfg.path)}
     print("주 인터페이스  %s (%s), 상태 %s" % (
         base.get("primary") or "없음", base.get("primary_kind"), base.get("primary_status")))
     if base.get("tunnel_iface"):
@@ -81,6 +83,13 @@ def cmd_doctor(args) -> int:
     for name in sorted(k for k in cfg.data.get("features", {}) if k.startswith("detect.")):
         reason = cfg.blocked_reason(name)
         print("  %-24s %s" % (name, "켜짐" if reason is None else "꺼짐 (%s)" % reason))
+
+    print()
+    home = os.path.dirname(cfg.path)
+    if wifi_helper.installed(home):
+        print("위치 권한 헬퍼  설치됨, 상태 %s" % wifi_helper.status(home))
+    else:
+        print("위치 권한 헬퍼  없음 — netmon.sh location setup 으로 만든다")
 
     print()
     print("동의")
@@ -129,6 +138,66 @@ def cmd_consent(args) -> int:
         cfg.save()
         print("동의를 철회하고 관련 기능도 껐다 → %s" % cfg.path)
     return 0
+
+
+# ---------------------------------------------------------------- location
+def cmd_location(args) -> int:
+    cfg = _cfg(args)
+    home = os.path.dirname(cfg.path)
+
+    if args.action == "status":
+        if not wifi_helper.installed(home):
+            print("헬퍼 앱 없음 — netmon.sh location setup")
+            return 1
+        print("헬퍼 %s" % wifi_helper.app_path(home))
+        print("상태 %s" % wifi_helper.status(home))
+        return 0
+
+    if args.action == "setup":
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "tools", "location-helper", "build.sh")
+        if not os.path.exists(script):
+            print("빌드 스크립트를 찾을 수 없다: %s" % script, file=sys.stderr)
+            return 2
+        print("헬퍼 앱을 만든다 → %s" % home)
+        r = subprocess.run(["bash", script, home], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr.strip() or "빌드 실패", file=sys.stderr)
+            return 2
+        print("만들었다: %s" % r.stdout.strip())
+        print()
+        print("이어서 권한을 요청한다. 창이 뜨면 허용을 누르세요.")
+        args.action = "request"
+
+    if args.action == "request":
+        if not wifi_helper.installed(home):
+            print("헬퍼 앱 없음 — netmon.sh location setup", file=sys.stderr)
+            return 2
+        meta = configmod.CONSENTS["location"]
+        print("무엇      %s" % meta["title"])
+        print("왜        %s" % meta["why"])
+        print("밖으로    %s" % meta["sends_out"])
+        print()
+        st = wifi_helper.request(home, timeout=args.timeout)
+        print("결과: %s" % st)
+        if st.startswith("authorized"):
+            cfg.grant("location", note="헬퍼 앱으로 요청, 결과 %s" % st)
+            cfg.set_feature("detect.evil_twin", True)
+            cfg.save()
+            print("동의를 기록하고 detect.evil_twin 을 켰다 → %s" % cfg.path)
+            probe = wifi_helper.wifi(home, force=True)
+            if probe and (probe.get("ssid") or probe.get("bssid")):
+                print("확인: SSID·BSSID 를 읽을 수 있다.")
+            else:
+                print("주의: 권한은 받았으나 Wi-Fi 값을 읽지 못했다 "
+                      "(유선 연결이거나 Wi-Fi 미접속일 수 있다).")
+            return 0
+        if st == "denied":
+            print("거부됨. 시스템 설정 > 개인정보 보호 및 보안 > 위치 서비스에서 "
+                  "'Network Monitor 위치 권한'을 켤 수 있다.")
+        return 1
+
+    return 2
 
 
 # ---------------------------------------------------------------- once / run
@@ -269,6 +338,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--enable", action="store_true", help="동의와 함께 관련 기능도 켠다")
     c.add_argument("--note", help="기록에 남길 메모")
     c.set_defaults(func=cmd_consent)
+
+    lo = sub.add_parser("location", help="위치 권한 헬퍼 (evil twin 탐지용)")
+    lo.add_argument("action", choices=["setup", "request", "status"])
+    lo.add_argument("--timeout", type=int, default=120, help="권한 응답 대기 초")
+    lo.set_defaults(func=cmd_location)
 
     o = sub.add_parser("once", help="한 주기만 측정")
     o.add_argument("--json", action="store_true", help="관측 원본도 출력")

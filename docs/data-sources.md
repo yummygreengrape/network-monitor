@@ -49,8 +49,41 @@ VPN 상태는 공급자별로 `warp-cli status`, `tailscale status --json`,
 대조해 값이 일치함을 확인했습니다(양쪽 모두 `None`). 그래서 암호화 다운그레이드
 탐지는 권한 없이 동작하고, evil twin(BSSID) 탐지만 권한을 요구합니다.
 
+표기가 한 가지가 아닙니다. 두 네트워크에서 각각 `NONE`과 `WPA2_PSK`를 봤고,
+`WPA2 Personal`·`WPA2/WPA3 Personal` 같은 형태도 쓰입니다. 고정 문자열 표를 쓰면
+처음 보는 표기에서 **조용히 판정 불가**가 되므로(실제로 그렇게 깨졌습니다) 세대
+토큰으로 읽습니다. 혼합 모드는 약한 쪽 접속을 허용하므로 약한 쪽으로 칩니다.
+
 `getsummary`는 15ms입니다. `system_profiler SPAirPortDataType`은 20초 이상 걸리므로
 주기 측정에 쓰지 않습니다.
+
+### 위치 권한은 앱 단위라 CLI가 직접 받을 수 없다
+
+실측한 순서와 결과입니다.
+
+1. `-sectcreate __TEXT __info_plist`로 Info.plist를 박은 **단일 실행 파일**에서
+   `requestWhenInUseAuthorization` 호출 → **75초 동안 요청 창이 뜨지 않음**,
+   상태는 계속 `not-determined`.
+2. 같은 코드를 **`.app` 번들**로 만들어 `open -n`으로 실행 → 요청 창이 뜨고
+   `authorized-always` 획득.
+3. 그 상태에서도 터미널의 `ipconfig getsummary`는 **여전히 `<redacted>`**.
+   권한은 요청한 앱에만 붙고 다른 프로세스로 넘어가지 않습니다.
+
+그래서 권한을 가진 헬퍼가 값을 읽어서 넘기는 구조로 만들었습니다. 한 번 호출에
+약 0.5초 걸리므로 기본 15초 간격으로 캐시하고, 게이트웨이 MAC·DHCP 서버·임대
+시작 시각이 바뀐 직후에는 즉시 다시 읽습니다.
+
+곁들여 확인한 것 두 가지:
+
+- **`open -a`는 이미 실행 중인 인스턴스를 재활성화할 뿐** 새 인자를 전달하지
+  않습니다. `open -n`으로 새 인스턴스를 띄워야 합니다.
+- **재서명하면 TCC 승인이 무효가 됩니다.** 그냥 ad-hoc 서명하면 재빌드마다
+  cdhash가 바뀌어 사용자가 매번 다시 허용해야 합니다. 지정 요구사항을
+  `identifier "io.github.network-monitor.location-helper"`로 고정하면 재빌드
+  후에도 승인이 유지되는 것을 확인했습니다.
+- **`CLLocationManager.authorizationStatus`는 만든 직후 읽으면 안 됩니다.**
+  델리게이트로 비동기 전달되므로 이미 승인된 앱도 `not-determined`로 보입니다.
+  첫 콜백을 최대 2초 기다린 뒤 읽습니다.
 
 ### `wdutil info`는 sudo가 필요한데 rc=0으로 끝난다
 

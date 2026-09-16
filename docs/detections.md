@@ -45,6 +45,11 @@
 |---|---|---|---|
 | `WIFI_ROAM` | `location` | 확정 | 같은 SSID 안의 AP 전환은 사실 |
 | `EVIL_TWIN_CANDIDATE` | `location` | **의심** | 정상 로밍과 완전히 구분할 수 없다. 게이트웨이 MAC이나 DHCP 서버가 함께 바뀌었을 때만 올린다 |
+| `WIFI_NETWORK_SWITCHED` | `location` | 확정 | 다른 SSID로 옮긴 것은 사실 |
+
+`location` 동의는 `netmon.sh location setup`으로 받습니다. macOS의 위치 권한이
+앱 단위라 헬퍼 앱을 거치며, 그 이유와 실측 근거는
+[data-sources.md](data-sources.md)에 적었습니다.
 
 ## 2단계 (예정)
 

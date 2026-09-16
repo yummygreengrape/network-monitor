@@ -27,3 +27,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# 빌드된 헬퍼 앱은 설정 디렉터리에 두고 저장소에 넣지 않는다
+*.app/

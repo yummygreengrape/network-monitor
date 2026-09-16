@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import baseline, vpn
@@ -41,6 +42,8 @@ class Engine:
         ctx: Dict[str, Any] = {
             "allow_location": self.cfg.effective("detect.evil_twin"),
             "allow_external": self.cfg.effective("detect.public_ip"),
+            "config_home": os.path.dirname(self.cfg.path),
+            "wifi_helper_interval": self.cfg.data.get("wifi_helper_interval", 15),
         }
 
         def step(module, name: str) -> None:
@@ -61,6 +64,10 @@ class Engine:
         step(dhcp, "dhcp")
         step(route, "route")
         step(dns, "dns")
+        # 헬퍼 앱 호출은 0.5초쯤 걸려서 매 주기 부르지 않는다. 다만 첫 주기이거나
+        # L2·DHCP 가 흔들린 직후에는 바로 다시 읽는다 — evil twin 으로 옮겨 가는
+        # 순간이 정확히 그 순간이기 때문이다.
+        ctx["wifi_force_refresh"] = self._wifi_changed_hint(obs)
         step(wifi, "wifi")
 
         ctx["resolver_external"] = _external_resolver(obs.data.get("dns", {}))
@@ -74,6 +81,15 @@ class Engine:
                 obs.errors["vpn"] = str(exc)[:120]
 
         return obs
+
+    def _wifi_changed_hint(self, obs: Observation) -> bool:
+        if self.prev is None:
+            return True
+        for block, key in (("arp", "gateway_mac"), ("dhcp", "server_identifier"),
+                           ("dhcp", "lease_start")):
+            if unwrap(self.prev.get(block, key)) != unwrap(obs.get(block, key)):
+                return True
+        return False
 
     # --- 판정 ---
     def judge(self, obs: Observation, elapsed: float) -> List[Finding]:

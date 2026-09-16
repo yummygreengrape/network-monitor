@@ -5,6 +5,7 @@ BSSID 탐지는 위치 권한과 사용자 동의가 둘 다 있을 때만 동�
 """
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 
 from ..model import (CONFIRMED, HIGH, LOW, MEDIUM, QUALITY, SECURITY, SUSPECT,
@@ -12,22 +13,41 @@ from ..model import (CONFIRMED, HIGH, LOW, MEDIUM, QUALITY, SECURITY, SUSPECT,
 
 FEATURE = "detect.wifi"
 
-# 낮을수록 약하다. 없는 값은 비교하지 않는다.
-STRENGTH = {
-    "none": 0, "open": 0,
-    "wep": 1,
-    "wpa": 2, "wpapersonal": 2,
-    "wpa2": 3, "wpa2personal": 3, "wpa2enterprise": 4,
-    "wpa3": 5, "wpa3personal": 5, "wpa3enterprise": 6,
-    "wpa2/wpa3personal": 4,
-}
+# 세대별 기본 점수. 낮을수록 약하다.
+# macOS 가 돌려주는 문자열은 한 가지가 아니다. 실측에서 `NONE` 과 `WPA2_PSK` 를
+# 봤고, `WPA2 Personal`, `WPA2/WPA3 Personal` 같은 형태도 쓰인다. 고정 문자열
+# 표를 쓰면 처음 보는 표기에서 조용히 판정 불가가 되므로 토큰으로 읽는다.
+GENERATION = {"wpa": 2, "wpa2": 3, "wpa3": 5}
+ENTERPRISE_BONUS = 1
 
 
 def rank(security: Optional[str]) -> Optional[int]:
+    """암호화 강도. 모르는 표기면 None — 모르면서 약해졌다고 단정하지 않는다."""
     if not security:
         return None
-    key = security.strip().lower().replace(" ", "").replace("-", "")
-    return STRENGTH.get(key)
+    key = re.sub(r"[^a-z0-9]", "", security.lower())
+    if not key or key in ("none", "open", "unknown"):
+        return 0 if key in ("none", "open") else None
+    if "wep" in key:
+        return 1
+
+    # wpa3 가 wpa 를 포함하므로 긴 것부터 떼어 낸다
+    rest = key
+    found = []
+    for gen in ("wpa3", "wpa2"):
+        if gen in rest:
+            found.append(gen)
+            rest = rest.replace(gen, "")
+    if "wpa" in rest:
+        found.append("wpa")
+    if not found:
+        return None
+
+    # 혼합 모드(WPA2/WPA3)는 약한 쪽 접속을 허용하므로 약한 쪽으로 친다
+    base = min(GENERATION[g] for g in found)
+    if "enterprise" in key or "eap" in key:
+        base += ENTERPRISE_BONUS
+    return base
 
 
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:

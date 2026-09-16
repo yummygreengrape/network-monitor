@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from .. import wifi_helper
 from ..model import ident
 from ..util import OK, UNSUPPORTED, NEEDS_CONSENT, Capability, run
 from .dhcp import parse_getsummary
@@ -61,11 +62,25 @@ def probe(ctx: Dict[str, Any] = None) -> Capability:
     if loc == "granted":
         return Capability(NAME, OK, "SSID·BSSID 읽힘", provides=["ssid", "bssid", "security"])
     if loc == "denied":
+        home = (ctx.get("config_home") or "~/.config/network-monitor")
+        if wifi_helper.installed(home):
+            st = wifi_helper.status(home)
+            if st.startswith("authorized"):
+                return Capability(NAME, OK, "헬퍼 앱을 통해 SSID·BSSID 읽힘",
+                                  provides=["ssid", "bssid", "security"])
+            return Capability(
+                NAME, NEEDS_CONSENT,
+                "헬퍼 앱은 설치됐으나 권한 상태가 %s" % st,
+                provides=["security"],
+                hint="netmon.sh location request 로 권한을 요청한다.",
+            )
         return Capability(
             NAME, NEEDS_CONSENT,
             "SSID·BSSID 가 <redacted> — 위치 서비스 권한 없음",
             provides=["security"],
-            hint="암호화 방식 변화 탐지는 그대로 동작한다. evil twin(BSSID) 탐지만 권한이 필요하다.",
+            hint="암호화 방식 변화 탐지는 그대로 동작한다. "
+                 "evil twin(BSSID) 탐지만 권한이 필요하고, "
+                 "netmon.sh location setup 으로 켠다.",
         )
     return Capability(NAME, UNSUPPORTED, "Wi-Fi 연결 정보 없음 (미연결?)", provides=["security"])
 
@@ -88,11 +103,32 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
 
     # 동의하지 않았으면 SSID·BSSID 를 기록하지 않는다. 권한이 우연히
     # 열려 있어도 마찬가지다 — 필요 조건 이상은 쓰지 않는다.
-    if ctx.get("allow_location") and loc == "granted":
+    if not ctx.get("allow_location"):
+        out["ssid"] = None
+        out["bssid"] = None
+        out["identity_withheld"] = True
+        return out
+
+    if loc == "granted":
+        # 이 프로세스가 직접 읽을 수 있는 드문 경우 (0.015초)
         out["ssid"] = ident("ssid", parsed["ssid"])
         out["bssid"] = ident("bssid", parsed["bssid"]) if parsed.get("bssid") else None
+        out["source"] = "ipconfig"
+        return out
+
+    # 흔한 경우: 이 프로세스에는 권한이 없다. 권한을 가진 헬퍼 앱에 물어본다.
+    helper = wifi_helper.wifi(
+        ctx.get("config_home") or "~/.config/network-monitor",
+        min_interval=float(ctx.get("wifi_helper_interval", wifi_helper.DEFAULT_MIN_INTERVAL)),
+        force=bool(ctx.get("wifi_force_refresh")),
+    )
+    if helper:
+        out["ssid"] = ident("ssid", helper["ssid"]) if helper.get("ssid") else None
+        out["bssid"] = ident("bssid", helper["bssid"]) if helper.get("bssid") else None
+        out["location"] = "granted-via-helper"
+        out["source"] = "location-helper"
     else:
         out["ssid"] = None
         out["bssid"] = None
-        out["identity_withheld"] = not ctx.get("allow_location")
+        out["helper_unavailable"] = True
     return out
