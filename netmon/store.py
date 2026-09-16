@@ -136,16 +136,32 @@ class Store:
         return trimmed
 
     def prune(self, retention_days: int) -> int:
-        cutoff = time.time() - retention_days * 86400
+        """보존 기간이 지난 기록을 지운다.
+
+        **파일 이름의 날짜로 판단한다.** 수정 시각(mtime)은 백업·동기화·복사가
+        건드리므로 기준이 될 수 없다. 이름은 UTC 날짜로 붙으므로(today())
+        문자열 비교만으로 충분하다.
+
+        보존 기간은 최소 1일로 묶는다. 설정에 0 이 들어가면 방금 쓴 오늘
+        기록까지 지워진다 — 테스트가 실제로 그것을 잡았다.
+        """
+        import datetime
+
+        keep_days = max(1, int(retention_days))
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(days=keep_days)).strftime("%Y-%m-%d")
         removed = 0
         for name in os.listdir(self.dir):
             if not name.endswith(".jsonl"):
                 continue
-            path = os.path.join(self.dir, name)
+            if not name.startswith(("samples-", "events-")):
+                continue
+            day = name.split("-", 1)[1][: -len(".jsonl")]
+            if len(day) != 10 or day >= cutoff:
+                continue
             try:
-                if os.path.getmtime(path) < cutoff:
-                    os.remove(path)
-                    removed += 1
+                os.remove(os.path.join(self.dir, name))
+                removed += 1
             except OSError:
                 pass
         self.rotate_agent_logs()
