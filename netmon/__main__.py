@@ -20,7 +20,7 @@ from typing import List, Optional
 
 from . import (__version__, config as configmod, investigate,
                redact as redactmod, service, setup as setupmod, vpn,
-               wifi_helper)
+               watch as watchmod, wifi_helper)
 from .collect import REGISTRY as COLLECTORS
 from .engine import Engine, replay as replay_engine
 from .model import Observation
@@ -172,6 +172,56 @@ def cmd_consent(args) -> int:
         cfg.save()
         print("동의를 철회하고 관련 기능도 껐다 → %s" % cfg.path)
     return 0
+
+
+# ---------------------------------------------------------------- watch
+def cmd_watch(args) -> int:
+    """상시 실행 에이전트가 남긴 기록을 실시간으로 보여 준다.
+
+    스스로 측정하지 않는다. 화면을 띄운다고 측정이 두 번 일어나면 관측이
+    서로를 방해한다.
+    """
+    import datetime
+
+    cfg = _cfg(args)
+    store = _store(args, cfg)
+    salt = None
+    if args.redact:
+        salt = redactmod.load_or_create_salt(
+            os.path.join(os.path.dirname(cfg.path), "salt"))
+    rules = investigate.describe_rules(cfg.data.get("investigate"))
+    rules_short = rules.split(". 제외")[0]
+
+    try:
+        while True:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            day = now.astimezone().strftime("%Y-%m-%d")
+            samples = list(store.samples(day))
+            events = list(store.events(day))
+            state = store.load_state()
+            if salt:
+                samples = [redactmod.redact(s_, salt) for s_ in samples]
+                events = [redactmod.redact(e, salt) for e in events]
+            screen = watchmod.render(
+                now=now,
+                agent=service.describe(),
+                last_sample=samples[-1] if samples else None,
+                sample_count=len(samples),
+                events=events,
+                open_invs=investigate.open_investigations(state),
+                rules_summary=rules_short,
+                lines=args.lines,
+                show_suppressed=args.verbose,
+                stale_after=max(30.0, cfg.interval * 4),
+            )
+            sys.stdout.write(watchmod.CLEAR + screen + "\n")
+            sys.stdout.flush()
+            if args.once:
+                return 0
+            time.sleep(max(1, args.refresh))
+    except KeyboardInterrupt:
+        print()
+        return 0
 
 
 # ---------------------------------------------------------------- investigate
@@ -579,6 +629,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--enable", action="store_true", help="동의와 함께 관련 기능도 켠다")
     c.add_argument("--note", help="기록에 남길 메모")
     c.set_defaults(func=cmd_consent)
+
+    w = sub.add_parser("watch", help="실시간 화면 (감시는 에이전트가 계속한다)")
+    w.add_argument("--refresh", type=int, default=3, help="새로 고침 간격(초)")
+    w.add_argument("--lines", type=int, default=12, help="보여 줄 판정 수")
+    w.add_argument("--redact", action="store_true", help="식별자를 가려서 표시")
+    w.add_argument("-v", "--verbose", action="store_true", help="억제된 판정도 표시")
+    w.add_argument("--once", action="store_true", help="한 번만 그리고 끝낸다")
+    w.set_defaults(func=cmd_watch)
 
     iv = sub.add_parser("investigate", help="이어지는 조사 보기와 기준 조정")
     iv.add_argument("action", choices=["list", "show", "rules"])

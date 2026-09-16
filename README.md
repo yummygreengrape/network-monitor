@@ -39,7 +39,20 @@ sudo를 쓰지 않고, 외부로 요청을 보내지 않고, 상시 실행으로
 ./netmon.sh location setup   위치 권한 헬퍼를 만들고 권한 요청 (evil twin 탐지)
 ./netmon.sh service install  항상 켜 두기 (로그인할 때 자동 시작)
 ./netmon.sh investigate list 이어지는 조사 보기
+./netmon.sh watch            실시간 화면 (감시는 에이전트가 계속합니다)
 ```
+
+## 실시간으로 보기
+
+```
+./netmon.sh watch                    지금 상태·열린 조사·최근 판정
+./netmon.sh watch --redact           식별자를 가려서 (화면 공유할 때)
+./netmon.sh watch -v                 억제된 판정도 함께
+```
+
+`watch`는 **스스로 측정하지 않습니다.** 상시 실행 에이전트가 남긴 기록을 읽어
+보여 줄 뿐이라, 창을 띄운다고 측정이 두 번 일어나지 않습니다. 창을 닫아도
+감시는 계속됩니다. 에이전트가 멈추면 화면이 "멈춘 듯"이라고 알려 줍니다.
 
 ## 유의미한 신호는 계속 조사합니다
 
