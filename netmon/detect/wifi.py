@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
+from .. import messages as msg
 from ..model import (CONFIRMED, HIGH, LOW, MEDIUM, QUALITY, SECURITY, SUSPECT,
                      Finding, Observation, unwrap)
 
@@ -68,9 +69,8 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             kind="WIFI_SECURITY_DOWNGRADE" if downgrade else "WIFI_SECURITY_CHANGED",
             confidence=CONFIRMED,
             severity=HIGH if downgrade and not attribution else MEDIUM,
-            summary=("Wi-Fi 암호화가 약해졌습니다 (%s → %s). 같은 이름을 쓰는 약한 접속점으로 유인됐을 수 있습니다."
-                     % (p_sec, c_sec)) if downgrade else
-                    ("Wi-Fi 암호화 방식이 바뀌었습니다 (%s → %s)." % (p_sec, c_sec)),
+            summary=((msg.WIFI_SECURITY_DOWNGRADE if downgrade else msg.WIFI_SECURITY_CHANGED)
+                     % (p_sec, c_sec)),
             evidence={"prev": p_sec, "cur": c_sec, "known_ranks": [p_rank, c_rank],
                       "source": "ipconfig getsummary"},
             attribution=attribution,
@@ -92,10 +92,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                 axis=SECURITY, kind="EVIL_TWIN_CANDIDATE" if corroborated else "WIFI_ROAM",
                 confidence=SUSPECT if corroborated else CONFIRMED,
                 severity=HIGH if corroborated else "info",
-                summary=("같은 SSID 인데 접속점과 게이트웨이·DHCP 가 함께 바뀌었습니다. "
-                         "정상적인 로밍에서는 보통 게이트웨이가 그대로입니다."
-                         if corroborated else
-                         "같은 SSID 안에서 접속점이 바뀌었습니다 (로밍)."),
+                summary=(msg.EVIL_TWIN_CANDIDATE if corroborated else msg.WIFI_ROAM),
                 evidence={"prev_bssid": prev.get("wifi", "bssid"), "bssid": cur.get("wifi", "bssid"),
                           "gateway_mac_changed": gw_changed, "dhcp_server_changed": srv_changed,
                           "source": "ipconfig getsummary"},
@@ -105,7 +102,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             out.append(Finding(
                 axis=QUALITY, kind="WIFI_NETWORK_SWITCHED",
                 confidence=CONFIRMED, severity="info",
-                summary="다른 Wi-Fi 네트워크로 옮겼습니다.",
+                summary=msg.WIFI_NETWORK_SWITCHED,
                 evidence={"prev_ssid": prev.get("wifi", "ssid"), "ssid": cur.get("wifi", "ssid"),
                           "source": "ipconfig getsummary"},
                 attribution=ctx.identity_attribution(),
@@ -117,7 +114,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=QUALITY, kind="WIFI_LINK_CHANGED",
             confidence=CONFIRMED, severity=LOW,
-            summary="Wi-Fi 링크 상태가 바뀌었습니다 (%s → %s)." % (p_link, c_link),
+            summary=msg.WIFI_LINK_CHANGED % (p_link, c_link),
             evidence={"prev": p_link, "cur": c_link, "source": "ipconfig getsummary"},
             attribution=ctx.quality_attribution(),
         ))

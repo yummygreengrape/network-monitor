@@ -19,7 +19,8 @@ import time
 from typing import List, Optional
 
 from . import (__version__, config as configmod, investigate, link as linkmod,
-               redact as redactmod, service, setup as setupmod, vpn,
+               messages, messages as msg, redact as redactmod, service,
+               setup as setupmod, vpn,
                watch as watchmod, wifi_helper)
 from .collect import REGISTRY as COLLECTORS
 from .engine import Engine, replay as replay_engine
@@ -34,7 +35,14 @@ def default_log_dir() -> str:
 
 
 def _cfg(args) -> configmod.Config:
-    return configmod.load(args.config)
+    """설정을 읽고, 그 즉시 문구 언어를 정한다.
+
+    문구는 늦게 묶이므로(netmon/messages/__init__.py) 여기서 한 번 정하면
+    이후 모든 출력이 그 언어로 나온다.
+    """
+    cfg = configmod.load(args.config)
+    messages.use_config(cfg.language)
+    return cfg
 
 
 def log_dir_for(args, cfg: configmod.Config) -> str:
@@ -54,8 +62,10 @@ def _store(args, cfg: Optional[configmod.Config] = None) -> Store:
 def cmd_doctor(args) -> int:
     cfg = _cfg(args)
     print("netmon %s" % __version__)
-    print("설정   %s" % cfg.path)
-    print("데이터 %s" % log_dir_for(args, cfg))
+    print(msg.CLI_DOCTOR_CONFIG % cfg.path)
+    print(msg.CLI_DOCTOR_LANG % (messages.language(),
+                                 messages.display_name(messages.language())))
+    print(msg.CLI_DOCTOR_DATA % log_dir_for(args, cfg))
     print()
 
     # 수집기가 무엇을 볼 수 있는지 알려면 먼저 인터페이스를 정해야 한다
@@ -174,19 +184,51 @@ def cmd_consent(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- lang
+def cmd_lang(args) -> int:
+    cfg = _cfg(args)
+    if not args.code:
+        print(msg.CLI_LANG_CURRENT % (messages.language(),
+                                      messages.display_name(messages.language())))
+        print(msg.CLI_LANG_CONFIG % cfg.language)
+        env = os.environ.get(messages.ENV)
+        if env:
+            print(msg.CLI_LANG_ENV % (messages.ENV, env))
+        print()
+        print(msg.CLI_LANG_AVAILABLE)
+        for code in messages.available():
+            print("  %-4s %s" % (code, messages.display_name(code)))
+        print()
+        print(msg.CLI_LANG_HOWTO)
+        print(msg.CLI_LANG_FILES)
+        return 0
+
+    code = args.code.lower()
+    if code not in messages.available():
+        print(msg.CLI_LANG_UNKNOWN % (args.code, ", ".join(messages.available())),
+              file=sys.stderr)
+        return 2
+    cfg.data["language"] = code
+    cfg.save()
+    messages.set_language(code)
+    print(msg.CLI_LANG_CHANGED % (code, messages.display_name(code), cfg.path))
+    print(msg.CLI_LANG_KEEPS_RECORDS)
+    return 0
+
+
 # ---------------------------------------------------------------- link
 def _report_link(result) -> int:
     if not result.get("ok"):
         print(result.get("error", "링크를 걸지 못했습니다."), file=sys.stderr)
         return 2
-    print("이제 어디서나 `netmon` 으로 실행할 수 있습니다.")
-    print("  링크  %s" % result["path"])
-    print("  대상  %s" % result["target"])
+    print(msg.CLI_LINK_DONE)
+    print(msg.CLI_LINK_PATH % result["path"])
+    print(msg.CLI_LINK_TARGET % result["target"])
     if not result.get("on_path"):
         directory = os.path.dirname(result["path"])
         print()
-        print("다만 이 디렉터리는 PATH 에 없습니다. 아래 한 줄을 실행한 뒤")
-        print("터미널을 새로 열면 `netmon` 이 바로 잡힙니다:")
+        for line in msg.CLI_LINK_NOT_ON_PATH.splitlines():
+            print(line)
         print("  %s" % linkmod.path_hint(directory))
     return 0
 
@@ -197,34 +239,33 @@ def cmd_link(args) -> int:
         st = linkmod.status()
         found = st["found"]
         if not found:
-            print("PATH 에 netmon 링크가 없습니다.")
-            print("저장소 안에서는 ./netmon.sh 로 실행합니다:")
+            print(msg.CLI_LINK_NONE)
+            print(msg.CLI_LINK_USE_REPO)
             print("  %s" % launcher)
-            print("어디서나 쓰려면: netmon.sh link")
+            print(msg.CLI_LINK_HOWTO)
             return 1
         for entry in found:
-            mark = "" if entry["target"] == launcher else "  ← 다른 저장소를 가리킵니다"
+            mark = "" if entry["target"] == launcher else msg.CLI_LINK_OTHER_REPO
             print("%s → %s%s" % (entry["path"], entry["target"], mark))
         return 0
 
     if args.action == "remove":
         r = linkmod.remove()
         for p_ in r["removed"]:
-            print("지웠습니다: %s" % p_)
+            print(msg.CLI_LINK_REMOVED % p_)
         for p_ in r["skipped"]:
-            print("건너뛰었습니다(링크가 아님): %s" % p_, file=sys.stderr)
+            print(msg.CLI_LINK_SKIPPED % p_, file=sys.stderr)
         if not r["removed"] and not r["skipped"]:
-            print("지울 링크가 없습니다.")
+            print(msg.CLI_LINK_NOTHING)
         return 0
 
     directory = args.dir
     if not directory:
         directory, why = linkmod.choose_dir()
         if directory is None:
-            print("링크를 걸 만한 디렉터리를 찾지 못했습니다. --dir 로 지정해 주세요.",
-                  file=sys.stderr)
+            print(msg.CLI_LINK_NO_DIR, file=sys.stderr)
             return 2
-        print("링크를 걸 곳: %s (%s)" % (directory, why))
+        print(msg.CLI_LINK_WHERE % (directory, why))
     return _report_link(linkmod.install(launcher, directory))
 
 
@@ -386,10 +427,10 @@ def _install_agent(cfg: configmod.Config, log_dir: str, quiet: bool = False) -> 
 
     r = service.install(script, log_dir, env=env, interval=cfg.interval)
     if not r["ok"]:
-        print("등록에 실패했습니다: %s" % r["error"], file=sys.stderr)
+        print(msg.CLI_AGENT_FAILED % r["error"], file=sys.stderr)
         return 2
     if not quiet:
-        print("상시 실행으로 등록했습니다.")
+        print(msg.CLI_AGENT_DONE)
         print("  정의 파일  %s" % r["plist"])
         print("  실행       %s run" % script)
         print("  기록       %s" % log_dir)
@@ -413,24 +454,24 @@ def cmd_setup(args) -> int:
         try:
             plan = wiz.run()
         except (KeyboardInterrupt, EOFError):
-            print("\n취소했습니다. 아무것도 바꾸지 않았습니다.")
+            print("\n" + msg.CLI_SETUP_CANCELLED)
             return 1
 
     if not plan.confirmed:
-        print("취소했습니다. 아무것도 바꾸지 않았습니다.")
+        print(msg.CLI_SETUP_CANCELLED)
         return 1
 
     todo = setupmod.apply(plan, cfg)
     print()
-    print("설정을 저장했습니다 → %s" % cfg.path)
+    print(msg.CLI_SETUP_SAVED % cfg.path)
 
     if todo["needs_location_request"]:
         print()
-        print("위치 권한 헬퍼를 만듭니다...")
+        print(msg.CLI_SETUP_BUILD_HELPER)
         rc = cmd_location(argparse.Namespace(
             config=args.config, log_dir=args.log_dir, action="setup", timeout=120))
         if rc != 0:
-            print("위치 권한을 받지 못했습니다. 나머지 탐지는 그대로 동작합니다.")
+            print(msg.CLI_SETUP_NO_LOCATION)
 
     if todo["needs_agent_install"]:
         print()
@@ -446,14 +487,14 @@ def cmd_setup(args) -> int:
             print("링크를 걸 만한 디렉터리를 찾지 못했습니다. "
                   "저장소 안에서 ./netmon.sh 로 실행해 주세요.")
         else:
-            print("링크를 걸 곳: %s (%s)" % (directory, why))
+            print(msg.CLI_LINK_WHERE % (directory, why))
             linked = _report_link(linkmod.install(launcher_path(), directory)) == 0
 
     cmd = "netmon" if linked or linkmod.status()["found"] else "./netmon.sh"
     print()
-    print("설정을 마쳤습니다. 확인:  %s doctor" % cmd)
+    print(msg.CLI_SETUP_DONE % cmd)
     if not todo["needs_agent_install"]:
-        print("측정 시작:     %s run" % cmd)
+        print(msg.CLI_SETUP_NEXT_RUN % cmd)
     return 0
 
 
@@ -474,14 +515,14 @@ def cmd_service(args) -> int:
         return 0 if d["installed"] else 1
 
     if args.action == "install":
-        print("로그인할 때 자동으로 시작하고, 멈추면 다시 띄웁니다.")
-        print("~/Library/LaunchAgents 에 파일 하나를 만듭니다. sudo 는 쓰지 않습니다.")
+        for line in msg.CLI_AGENT_INTRO.splitlines():
+            print(line)
         return _install_agent(cfg, log_dir)
 
     if args.action == "uninstall":
         r = service.uninstall()
-        print("해제했습니다." if r["removed"] else "등록되어 있지 않았습니다.")
-        print("기록은 %s 에 그대로 남아 있습니다." % log_dir)
+        print(msg.CLI_AGENT_REMOVED if r["removed"] else msg.CLI_AGENT_NOT_INSTALLED)
+        print(msg.CLI_AGENT_RECORDS_KEPT % log_dir)
         return 0
 
     if args.action == "restart":
@@ -556,7 +597,7 @@ def cmd_location(args) -> int:
 # ---------------------------------------------------------------- once / run
 def _print_findings(findings, obs: Observation) -> None:
     if not findings:
-        print("  판정 없음")
+        print(msg.CLI_NO_FINDINGS)
         return
     for f in findings:
         tag = " (억제: %s)" % f.attribution if f.attribution else ""
@@ -573,7 +614,7 @@ def cmd_once(args) -> int:
     print("%s  네트워크 %s" % (obs.ts, eng.state.get("network")))
     if obs.errors:
         for name, err in obs.errors.items():
-            print("  수집 실패 %s: %s" % (name, err))
+            print(msg.CLI_COLLECT_FAILED % (name, err))
     _print_findings(findings, obs)
     if args.json:
         print(json.dumps(obs.as_dict(), ensure_ascii=False, indent=2))
@@ -586,7 +627,7 @@ def cmd_run(args) -> int:
     interval = args.interval or cfg.interval
     eng = Engine(cfg, store)
     store.prune(int(cfg.data.get("retention_days", 14)))
-    print("측정을 시작합니다 — 간격 %d초, 기록 %s  (Ctrl+C 로 종료)" % (interval, store.dir))
+    print(msg.CLI_RUN_START % (interval, store.dir))
     n = 0
     last_prune_day = time.strftime("%Y-%m-%d")
     try:
@@ -608,12 +649,11 @@ def cmd_run(args) -> int:
                 break
             wait = eng.effective_interval(interval)
             if wait != interval and n % 10 == 1:
-                print("%s  조사 %d건 진행 중 — 측정 간격을 %.0f초로 줄입니다"
-                      % (obs.ts[11:19], eng.needs.get("open", 0), wait))
+                print(msg.CLI_RUN_FASTER % (obs.ts[11:19], eng.needs.get("open", 0), wait))
             time.sleep(max(0.0, wait - (time.time() - start)))
     except KeyboardInterrupt:
         print()
-    print("%d주기를 기록했습니다 → %s" % (n, store.dir))
+    print(msg.CLI_RUN_DONE % (n, store.dir))
     return 0
 
 
@@ -624,7 +664,7 @@ def cmd_report(args) -> int:
     events = list(store.events(day))
     samples = list(store.samples(day))
     if not events and not samples:
-        print("%s 기록이 없습니다 (%s)" % (day, store.dir))
+        print(msg.CLI_NO_RECORDS % (day, store.dir))
         return 1
 
     if args.redact:
@@ -635,7 +675,7 @@ def cmd_report(args) -> int:
     print(render(day, events, len(samples), exposure_notes(samples[-1] if samples else None)))
     if args.redact:
         print()
-        print("-- 식별자를 가린 출력입니다. %s --" % redactmod.describe())
+        print(msg.REPORT_REDACTED % redactmod.describe())
     return 0
 
 
@@ -649,9 +689,9 @@ def cmd_capture(args) -> int:
     if args.redact:
         salt = redactmod.load_or_create_salt(os.path.join(configmod.config_home(), "salt"))
 
-    print("관측 %d주기를 %s 로 저장합니다 (간격 %d초)%s"
+    print(msg.CLI_CAPTURE_START
           % (args.count, out_path, args.interval or cfg.interval,
-             ", 식별자 가림" if salt else ""))
+             msg.CLI_CAPTURE_REDACT if salt else ""))
     with open(out_path, "w", encoding="utf-8") as fh:
         for i in range(args.count):
             start = time.time()
@@ -664,14 +704,14 @@ def cmd_capture(args) -> int:
             print("  %d/%d" % (i + 1, args.count), end="\r", flush=True)
             if i + 1 < args.count:
                 time.sleep(max(0.0, (args.interval or cfg.interval) - (time.time() - start)))
-    print("\n저장했습니다 → %s" % out_path)
+    print("\n" + msg.CLI_CAPTURE_DONE % out_path)
     return 0
 
 
 def cmd_replay(args) -> int:
     cfg = _cfg(args)
     obs_list = observations_from(args.path)
-    print("%d주기를 재생합니다 — %s" % (len(obs_list), args.path))
+    print(msg.CLI_REPLAY_START % (len(obs_list), args.path))
     total = 0
     for obs, findings in replay_engine(cfg, obs_list):
         for f in findings:
@@ -681,7 +721,7 @@ def cmd_replay(args) -> int:
             tag = " (억제: %s)" % f.attribution if f.attribution else ""
             print("  %s [%s/%s/%s] %s%s" % (obs.ts[11:19], f.axis, f.confidence,
                                             f.severity, f.summary, tag))
-    print("판정 %d건" % total)
+    print(msg.CLI_REPLAY_DONE % total)
     return 0
 
 
@@ -702,6 +742,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--enable", action="store_true", help="동의와 함께 관련 기능도 켠다")
     c.add_argument("--note", help="기록에 남길 메모")
     c.set_defaults(func=cmd_consent)
+
+    lg = sub.add_parser("lang", help="문구 언어 보기/바꾸기")
+    lg.add_argument("code", nargs="?", help="ko 또는 en")
+    lg.set_defaults(func=cmd_lang)
 
     ln = sub.add_parser("link", help="어디서나 netmon 으로 실행되게 링크 걸기")
     ln.add_argument("action", nargs="?", default="install",

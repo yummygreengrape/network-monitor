@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional
 
+from .. import messages as msg
 from ..model import (CONFIRMED, HIGH, INFO, LOW, MEDIUM, QUALITY, SECURITY,
                      Finding, Observation, unwrap)
 
@@ -33,9 +34,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             axis=SECURITY, kind="DHCP_SERVER_CHANGED",
             confidence=CONFIRMED,
             severity=LOW if attribution else HIGH,
-            summary=("같은 네트워크에 머물러 있는데 DHCP 서버가 바뀌었습니다. "
-                     "rogue DHCP 의 전형적인 형태입니다." if not attribution else
-                     "DHCP 서버가 바뀌었지만, 같은 시점에 네트워크도 달라졌습니다."),
+            summary=(msg.DHCP_SERVER_CHANGED_MOVED if attribution else msg.DHCP_SERVER_CHANGED),
             evidence={"prev": prev.get("dhcp", "server_identifier"),
                       "cur": cur.get("dhcp", "server_identifier"),
                       "source": "ipconfig getpacket"},
@@ -49,7 +48,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             axis=SECURITY, kind="DHCP_ROUTER_CHANGED",
             confidence=CONFIRMED,
             severity=LOW if attribution else HIGH,
-            summary="DHCP 가 알려주는 기본 라우터가 바뀌었습니다.",
+            summary=msg.DHCP_ROUTER_CHANGED,
             evidence={"prev": prev.get("dhcp", "routers"), "cur": cur.get("dhcp", "routers"),
                       "source": "ipconfig getpacket"},
             attribution=attribution,
@@ -62,7 +61,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             axis=SECURITY, kind="DHCP_DNS_CHANGED",
             confidence=CONFIRMED,
             severity=LOW if attribution else HIGH,
-            summary="DHCP 가 알려주는 DNS 서버가 바뀌었습니다. 이름 해석을 가로채는 첫 단계일 수 있습니다.",
+            summary=msg.DHCP_DNS_CHANGED,
             evidence={"prev": prev.get("dhcp", "dns_offered"), "cur": cur.get("dhcp", "dns_offered"),
                       "source": "ipconfig getpacket"},
             attribution=attribution,
@@ -76,7 +75,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=QUALITY, kind="DHCP_LEASE_RENEWED",
             confidence=CONFIRMED, severity="info",
-            summary="DHCP 임대가 새로 시작됐습니다. 링크가 한 번 끊겼다가 다시 붙었다는 뜻입니다.",
+            summary=msg.DHCP_LEASE_RENEWED,
             evidence={"prev": p_l, "cur": c_l, "source": "ipconfig getsummary"},
             attribution=ctx.quality_attribution(),
         ))
@@ -88,7 +87,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=INFO, kind="OWN_IP_CHANGED",
             confidence=CONFIRMED, severity="info",
-            summary="이 기기에 할당된 IP 가 바뀌었습니다.",
+            summary=msg.OWN_IP_CHANGED,
             evidence={"prev": prev.get("dhcp", "yiaddr"), "cur": cur.get("dhcp", "yiaddr"),
                       "source": "ipconfig getpacket"},
             attribution=ctx.quality_attribution(),

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from .. import messages as msg
 from ..liveness import evaluate
 from ..model import (CONFIRMED, HIGH, INFO, INFO_SEV, LOW, MEDIUM, POSSIBLE,
                      QUALITY, SECURITY, SUSPECT, Finding, Observation, unwrap)
@@ -49,7 +50,7 @@ class Playbook:
         return Finding(
             axis=INFO, kind="INVESTIGATION_RETUNED",
             confidence=CONFIRMED, severity=INFO_SEV,
-            summary="조사 %s 의 기준을 바꿨습니다: %s" % (inv.id, change["reason"]),
+            summary=msg.INV_RETUNED % (inv.id, change["reason"]),
             evidence={"investigation": inv.id, "kind": inv.kind, **change},
         )
 
@@ -107,7 +108,7 @@ class L2Identity(Playbook):
                 seen = crit.setdefault("seen_macs", [])
                 if mac not in seen:
                     seen.append(mac)
-                inv.note(ts, "게이트웨이 MAC 이 또 바뀜",
+                inv.note(ts, msg.INV_NOTE_MAC_AGAIN,
                          change_count=crit["changes_seen"], distinct=len(seen))
             else:
                 crit["stable_for"] = int(crit.get("stable_for", 0)) + 1
@@ -117,13 +118,13 @@ class L2Identity(Playbook):
                     if f.kind in crit.get("watch_kinds", []) and not f.attribution]
         if new_corr:
             crit.setdefault("corroborated", []).extend(new_corr)
-            inv.note(ts, "다른 신호가 함께 나타남", kinds=new_corr)
+            inv.note(ts, msg.INV_NOTE_CORROBORATED, kinds=new_corr)
             # 경로 설정까지 흔들렸다면 이제 DNS 와 경로도 유의미하게 본다.
             # 처음부터 이렇게 넓히면 평소 소음까지 다 걸린다.
             if not crit.get("widened"):
                 out.append(self._retuned(inv, inv.retune(
                     ts,
-                    "MAC 변경에 경로·이름 해석 변화가 겹쳤습니다. 감시 범위를 넓힙니다.",
+                    msg.INV_L2_WIDEN,
                     widened=True,
                     watch_kinds=sorted(set(crit["watch_kinds"]) |
                                        {"DNS_LOCAL_PROXY_CHANGED", "IPV6_ROUTER_APPEARED",
@@ -135,30 +136,24 @@ class L2Identity(Playbook):
         flaps = int(crit.get("changes_seen", 0))
 
         if corr:
-            inv.close(ts, CONCLUDED,
-                      "경로를 쥔 무언가가 바뀜 — 중간자 가능성", SUSPECT)
+            inv.close(ts, CONCLUDED, msg.INV_L2_CORROBORATED_VERDICT, SUSPECT)
             out.append(self._concluded(
                 inv, SECURITY, HIGH, SUSPECT,
-                "첫 홉의 정체가 바뀐 뒤 %s 가 함께 나타났습니다. 접속점 교체만으로는 "
-                "설명되지 않습니다." % ", ".join(corr)))
+                msg.INV_L2_CORROBORATED % ", ".join(corr)))
             return out
 
         if flaps >= self.FLAP_THRESHOLD:
-            inv.close(ts, CONCLUDED, "첫 홉의 정체가 요동침", SUSPECT)
+            inv.close(ts, CONCLUDED, msg.INV_L2_FLAPPING_VERDICT, SUSPECT)
             out.append(self._concluded(
                 inv, SECURITY, MEDIUM, SUSPECT,
-                "게이트웨이 MAC 이 %d번 바뀌었고 서로 다른 값 %d개가 나타났습니다. "
-                "정상적인 접속점 교체는 이렇게 되돌아가지 않습니다."
-                % (flaps, len(crit.get("seen_macs", [])))))
+                msg.INV_L2_FLAPPING % (flaps, len(crit.get("seen_macs", [])))))
             return out
 
         if int(crit.get("stable_for", 0)) >= self.STABLE_CYCLES:
-            inv.close(ts, CONCLUDED, "새 첫 홉으로 안정됨", POSSIBLE)
+            inv.close(ts, CONCLUDED, msg.INV_L2_STABLE_VERDICT, POSSIBLE)
             out.append(self._concluded(
                 inv, SECURITY, LOW, POSSIBLE,
-                "새 게이트웨이 MAC 이 %d주기 동안 그대로이고 뒤따른 신호가 없습니다. "
-                "접속점 교체로 보입니다. 다만 공격을 배제하지는 못합니다."
-                % crit["stable_for"]))
+                msg.INV_L2_STABLE % crit["stable_for"]))
         return out
 
     @staticmethod
@@ -220,25 +215,25 @@ class PathConfig(Playbook):
             crit["further_changes"] = int(crit.get("further_changes", 0)) + 1
             crit["persisted_for"] = 0
             crit["snapshot"] = now
-            inv.note(ts, "설정이 또 바뀜", count=crit["further_changes"])
+            inv.note(ts, msg.INV_NOTE_CONFIG_AGAIN, count=crit["further_changes"])
 
         # 계속 흔들리면 한 번의 변화가 아니라 경합이다. 기준을 그쪽으로 옮긴다.
         if crit["further_changes"] == 2 and not crit.get("contested"):
             out.append(self._retuned(inv, inv.retune(
-                ts, "설정이 반복해서 바뀝니다. 한 번의 변조가 아니라 경합으로 봅니다.",
+                ts, msg.INV_PATH_CONTESTED,
                 contested=True, persist_target=self.PERSIST_CYCLES * 2)))
 
         target = int(crit.get("persist_target", self.PERSIST_CYCLES))
         if int(crit["persisted_for"]) >= target:
             contested = bool(crit.get("contested"))
-            inv.close(ts, CONCLUDED,
-                      "바뀐 설정이 자리 잡음", CONFIRMED if not contested else SUSPECT)
+            inv.close(ts, CONCLUDED, msg.INV_PATH_VERDICT,
+                      CONFIRMED if not contested else SUSPECT)
             out.append(L2Identity._concluded(
                 inv, SECURITY, MEDIUM if not contested else LOW,
                 CONFIRMED if not contested else SUSPECT,
-                "바뀐 경로·이름 해석 설정이 %d주기 동안 유지되고 있습니다%s."
+                msg.INV_PATH_PERSISTED
                 % (crit["persisted_for"],
-                   " (그 전에 여러 번 흔들렸습니다)" if contested else "")))
+                   msg.INV_PATH_CONTESTED_NOTE if contested else "")))
         return out
 
 
@@ -280,17 +275,17 @@ class VpnDrop(Playbook):
                 crit["still_down"] = True
                 crit.setdefault("first_hop_alive_at_drop", []).append(
                     f.evidence.get("first_hop_alive"))
-                inv.note(ts, "또 끊김", drops=crit["drops"])
+                inv.note(ts, msg.INV_NOTE_DROP_AGAIN, drops=crit["drops"])
             elif f.kind == "VPN_RECONNECTED":
                 crit["reconnects"] = int(crit.get("reconnects", 0)) + 1
                 crit["still_down"] = False
-                inv.note(ts, "다시 연결됨", reconnects=crit["reconnects"])
+                inv.note(ts, msg.INV_NOTE_RECONNECT, reconnects=crit["reconnects"])
 
         # 되풀이가 보이기 시작하면, 이제는 링크 품질까지 함께 본다.
         # 끊김이 한 번일 때는 링크 잡음이 섞여 들어와 쓸모가 없다.
         if int(crit.get("drops", 0)) == 2 and not crit.get("watch_link"):
             out.append(self._retuned(inv, inv.retune(
-                ts, "끊김이 되풀이되고 있습니다. 무선 구간 품질도 함께 봅니다.",
+                ts, msg.INV_VPN_WIDEN,
                 watch_link=True,
                 watch_kinds=sorted(set(crit["watch_kinds"]) |
                                    {"FIRST_HOP_UNREACHABLE", "LATENCY_SPIKE",
@@ -301,7 +296,7 @@ class VpnDrop(Playbook):
                     and f.kind.startswith(("FIRST_HOP", "LATENCY", "DHCP_LEASE"))]
             if hits:
                 crit["link_events"] = int(crit.get("link_events", 0)) + len(hits)
-                inv.note(ts, "같은 구간에 링크 사건", kinds=hits)
+                inv.note(ts, msg.INV_NOTE_LINK_EVENT, kinds=hits)
 
         drops = int(crit.get("drops", 0))
         if drops >= self.REPEAT_THRESHOLD:
@@ -309,15 +304,15 @@ class VpnDrop(Playbook):
             alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
             tunnel_side = alive and all(alive)
             if tunnel_side and not link_events:
-                verdict = "터널 쪽에서 되풀이되는 끊김 — 무선 구간은 매번 정상"
+                verdict = msg.INV_VPN_VERDICT_TUNNEL
             elif link_events:
-                verdict = "무선 구간 불안정과 함께 되풀이되는 끊김"
+                verdict = msg.INV_VPN_VERDICT_LINK
             else:
-                verdict = "되풀이되는 끊김 — 구간을 가르지 못함"
+                verdict = msg.INV_VPN_VERDICT_UNKNOWN
             inv.close(ts, CONCLUDED, verdict, SUSPECT)
             out.append(L2Identity._concluded(
                 inv, QUALITY, MEDIUM, SUSPECT,
-                "%s 가 %d번 끊겼습니다. %s." % (provider, drops, verdict)))
+                msg.INV_VPN_REPEATED % (provider, drops, verdict)))
         return out
 
 

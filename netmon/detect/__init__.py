@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .. import messages as msg
 from ..model import Finding, Observation, unwrap
 from ..util import subnet_of
 from . import dhcp, dns, l2, quality, route, vpn, wifi  # noqa: F401
@@ -131,7 +132,7 @@ def run_all(prev: Optional[Observation], cur: Observation, ctx: Context) -> List
         except Exception as exc:  # 한 판정기의 버그가 나머지를 막지 않는다
             findings.append(Finding(
                 axis="info", kind="DETECTOR_ERROR", confidence="confirmed", severity="low",
-                summary="판정기 %s 가 예외로 멈췄습니다: %s" % (module.FEATURE, str(exc)[:120]),
+                summary=msg.DETECTOR_ERROR % (module.FEATURE, str(exc)[:120]),
                 evidence={"detector": module.FEATURE, "error": repr(exc)[:200]},
             ))
     for f in findings:

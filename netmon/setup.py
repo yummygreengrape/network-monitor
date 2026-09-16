@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import config as configmod
+from . import messages as msg
+from . import messages as _messages_mod
 from . import service, vpn
 
 MAX_RETRIES = 5
@@ -23,6 +25,7 @@ MAX_RETRIES = 5
 class Plan:
     """마법사가 모은 답. 이것만으로는 아무것도 바뀌지 않는다."""
 
+    language: str = "ko"
     interval: int = 5
     log_dir: str = ""
     retention_days: int = 14
@@ -36,17 +39,18 @@ class Plan:
 
     def summary_lines(self) -> List[str]:
         def mark(on: bool) -> str:
-            return "켬" if on else "끔"
+            return msg.WZ_ON if on else msg.WZ_OFF
         return [
-            "측정 간격        %d초" % self.interval,
-            "기록 위치        %s" % self.log_dir,
-            "보존 기간        %d일" % self.retention_days,
-            "위치 권한        %s  (evil twin 탐지)" % mark(self.want_location),
-            "VPN 감시         %s  (%s)" % (mark(self.want_vpn),
-                                           ", ".join(self.vpn_providers) if self.want_vpn else "-"),
-            "외부 점검 요청   %s  (DNS·TLS 가로채기, 공인 IP)" % mark(self.want_external),
-            "상시 실행        %s  (로그인할 때 자동 시작)" % mark(self.want_agent),
-            "명령 등록        %s  (어디서나 netmon 으로 실행)" % mark(self.want_link),
+            msg.WZ_ROW_LANGUAGE % _messages_mod.display_name(self.language),
+            msg.WZ_ROW_INTERVAL % self.interval,
+            msg.WZ_ROW_LOGDIR % self.log_dir,
+            msg.WZ_ROW_RETENTION % self.retention_days,
+            msg.WZ_ROW_LOCATION % mark(self.want_location),
+            msg.WZ_ROW_VPN % (mark(self.want_vpn),
+                              ", ".join(self.vpn_providers) if self.want_vpn else "-"),
+            msg.WZ_ROW_EXTERNAL % mark(self.want_external),
+            msg.WZ_ROW_AGENT % mark(self.want_agent),
+            msg.WZ_ROW_LINK % mark(self.want_link),
         ]
 
 
@@ -64,15 +68,15 @@ class Wizard:
         self.say("")
         self.say(question)
         for i, (label, note) in enumerate(options, 1):
-            star = " (기본)" if i == default else ""
+            star = msg.WZ_DEFAULT_MARK if i == default else ""
             self.say("  %d) %-10s %s%s" % (i, label, note, star))
         for _ in range(MAX_RETRIES):
-            raw = self.ask("선택 [%d]: " % default).strip()
+            raw = self.ask(msg.WZ_PICK % default).strip()
             if not raw:
                 return default
             if raw.isdigit() and 1 <= int(raw) <= len(options):
                 return int(raw)
-            self.say("  1에서 %d 사이의 번호를 넣으세요." % len(options))
+            self.say(msg.WZ_PICK_RANGE % len(options))
         return default
 
     def _yes_no(self, question: str, default: bool) -> bool:
@@ -85,7 +89,7 @@ class Wizard:
                 return True
             if raw in ("n", "no", "아니오", "ㄴ"):
                 return False
-            self.say("  y 또는 n 으로 답하세요.")
+            self.say(msg.WZ_YES_NO)
         return default
 
     def _text(self, question: str, default: str) -> str:
@@ -96,78 +100,80 @@ class Wizard:
     def run(self) -> Plan:
         plan = Plan(log_dir=self.default_log_dir)
 
-        self.say("netmon 초기 설정")
-        self.say("엔터만 누르면 기본값입니다. 기본값은 sudo 를 쓰지 않고, 외부로")
-        self.say("요청을 보내지 않고, 상시 실행으로 등록하지도 않습니다.")
-
-        # 1. 측정 간격
+        # 1. 언어 — 가장 먼저 묻고 즉시 반영한다. 나머지 질문이 그 언어로 나온다.
+        codes = _messages_mod.available()
         idx = self._choice(
-            "얼마나 자주 측정할까요?",
-            [("3초", "변화를 빨리 잡습니다. 배터리를 조금 더 씁니다"),
-             ("5초", "대부분의 경우에 적당합니다"),
-             ("10초", "배터리를 아낍니다. 짧은 끊김을 놓칠 수 있습니다"),
-             ("30초", "아주 가볍게. 품질 판정은 거칠어집니다")],
-            default=2)
+            msg.WZ_LANG_Q,
+            [(_messages_mod.display_name(c), "") for c in codes],
+            default=codes.index(_messages_mod.language()) + 1
+            if _messages_mod.language() in codes else 1)
+        plan.language = codes[idx - 1]
+        _messages_mod.set_language(plan.language)
+
+        self.say("")
+        self.say(msg.WZ_TITLE)
+        for line in msg.WZ_INTRO.splitlines():
+            self.say(line)
+
+        # 2. 측정 간격
+        idx = self._choice(msg.WZ_INTERVAL_Q, [
+            ("3s", msg.WZ_INTERVAL_3), ("5s", msg.WZ_INTERVAL_5),
+            ("10s", msg.WZ_INTERVAL_10), ("30s", msg.WZ_INTERVAL_30)], default=2)
         plan.interval = [3, 5, 10, 30][idx - 1]
 
-        # 2. 기록 위치
-        plan.log_dir = self._text("\n기록을 어디에 둘까요?", self.default_log_dir)
+        # 3. 기록 위치
+        plan.log_dir = self._text(msg.WZ_LOGDIR_Q, self.default_log_dir)
 
-        # 3. 보존 기간
-        idx = self._choice(
-            "기록을 며칠 보관할까요?",
-            [("7일", "가볍게"), ("14일", "기본"), ("30일", "오래 되짚어 보려면"),
-             ("90일", "디스크를 꽤 씁니다")],
-            default=2)
+        # 4. 보존 기간
+        idx = self._choice(msg.WZ_RETENTION_Q, [
+            ("7", msg.WZ_RETENTION_7), ("14", msg.WZ_RETENTION_14),
+            ("30", msg.WZ_RETENTION_30), ("90", msg.WZ_RETENTION_90)], default=2)
         plan.retention_days = [7, 14, 30, 90][idx - 1]
 
-        # 4. 위치 권한
+        # 5. 위치 권한
         self.say("")
-        self.say("[위치 권한]  Wi-Fi 이름(SSID)과 접속점 식별자(BSSID)를 읽습니다.")
-        self.say("  같은 이름을 쓰는 가짜 접속점(evil twin)과 정상적인 접속점 전환을")
-        self.say("  구분하는 데 씁니다. 위치 좌표는 읽지 않고, 값은 이 기계 밖으로")
-        self.say("  나가지 않습니다. macOS 권한이 앱 단위라 작은 헬퍼 앱을 만듭니다.")
-        plan.want_location = self._yes_no("  위치 권한을 쓸까요?", default=False)
+        self.say(msg.WZ_LOCATION_HEAD)
+        for line in msg.WZ_LOCATION_BODY.splitlines():
+            self.say(line)
+        plan.want_location = self._yes_no(msg.WZ_LOCATION_Q, default=False)
 
-        # 5. VPN
+        # 6. VPN
         self.say("")
         if self.installed_vpn:
-            self.say("[VPN 감시]  이 기계에서 찾은 VPN: %s" % ", ".join(self.installed_vpn))
-            self.say("  연결 상태와 끊김을 함께 기록합니다. 외부로 나가는 요청은 없습니다.")
-            plan.want_vpn = self._yes_no("  VPN 감시를 켤까요?", default=False)
+            self.say(msg.WZ_VPN_HEAD % ", ".join(self.installed_vpn))
+            self.say(msg.WZ_VPN_BODY)
+            plan.want_vpn = self._yes_no(msg.WZ_VPN_Q, default=False)
         else:
-            self.say("[VPN 감시]  설치된 VPN 을 찾지 못해 건너뜁니다.")
+            self.say(msg.WZ_VPN_NONE)
             plan.want_vpn = False
 
-        # 6. 외부 요청
+        # 7. 외부 요청
         self.say("")
-        self.say("[외부 점검 요청]  DNS 응답을 기준값과 비교하고(가로채기 탐지),")
-        self.say("  고정 호스트의 TLS 발급자와 공인 IP 변화를 봅니다.")
-        self.say("  고정된 조회 이름과 이 기계의 출발지 IP 가 밖으로 나갑니다.")
-        self.say("  SSID·BSSID·MAC 같은 네트워크 식별자는 보내지 않습니다.")
-        plan.want_external = self._yes_no("  외부 점검 요청을 켤까요?", default=False)
+        self.say(msg.WZ_EXTERNAL_HEAD)
+        for line in msg.WZ_EXTERNAL_BODY.splitlines():
+            self.say(line)
+        plan.want_external = self._yes_no(msg.WZ_EXTERNAL_Q, default=False)
 
-        # 7. 상시 실행
+        # 8. 상시 실행
         self.say("")
-        self.say("[상시 실행]  로그인할 때 자동으로 시작하고, 멈추면 다시 띄웁니다.")
-        self.say("  ~/Library/LaunchAgents 에 파일 하나를 만듭니다. sudo 는 쓰지 않고,")
-        self.say("  나중에 netmon.sh service uninstall 로 되돌릴 수 있습니다.")
-        plan.want_agent = self._yes_no("  항상 켜 둘까요?", default=False)
+        self.say(msg.WZ_AGENT_HEAD)
+        for line in msg.WZ_AGENT_BODY.splitlines():
+            self.say(line)
+        plan.want_agent = self._yes_no(msg.WZ_AGENT_Q, default=False)
 
-        # 8. 어디서나 실행
+        # 9. 어디서나 실행
         self.say("")
-        self.say("[명령 등록]  지금은 저장소 안에서 ./netmon.sh 로만 실행됩니다.")
-        self.say("  다른 디렉터리에서 치면 셸이 파일을 찾지 못합니다. PATH 에 있는")
-        self.say("  디렉터리에 링크를 걸어 두면 어디서나 netmon 으로 실행됩니다.")
-        self.say("  sudo 는 쓰지 않고, netmon link remove 로 되돌립니다.")
-        plan.want_link = self._yes_no("  어디서나 netmon 으로 실행할까요?", default=True)
+        self.say(msg.WZ_LINK_HEAD)
+        for line in msg.WZ_LINK_BODY.splitlines():
+            self.say(line)
+        plan.want_link = self._yes_no(msg.WZ_LINK_Q, default=True)
 
-        # 9. 확인
+        # 10. 확인
         self.say("")
-        self.say("이대로 적용합니다:")
+        self.say(msg.WZ_SUMMARY_HEAD)
         for line in plan.summary_lines():
             self.say("  " + line)
-        plan.confirmed = self._yes_no("\n적용할까요?", default=True)
+        plan.confirmed = self._yes_no(msg.WZ_CONFIRM_Q, default=True)
         return plan
 
 
@@ -178,6 +184,7 @@ def apply(plan: Plan, cfg: configmod.Config) -> Dict[str, Any]:
     상호작용이 필요한 것을 여기서 하지 않는 이유는, 이 함수를 테스트에서
     그대로 부를 수 있게 하기 위해서다.
     """
+    cfg.data["language"] = plan.language
     cfg.data["interval"] = int(plan.interval)
     cfg.data["retention_days"] = int(plan.retention_days)
     cfg.data["log_dir"] = plan.log_dir

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import unittest
 
+from netmon import messages as msg
 from netmon.detect import Context, attributions_for, network_key, run_all
 from tests.helpers import GW_MAC, by_kind, kinds, obs, vpn_state
 
@@ -38,14 +39,14 @@ class TestDisconnect(unittest.TestCase):
         prev = obs(vpn=vpn_state("connected"), icmp_ok=True)
         cur = obs(vpn=vpn_state("disconnected"), icmp_ok=True)
         f = by_kind(judge(prev, cur), "VPN_DISCONNECTED")
-        self.assertIn("터널 경로 문제", f.summary)
+        self.assertIn(msg.WHY_TUNNEL, f.summary)
         self.assertIs(f.evidence["first_hop_alive"], True)
 
     def test_dead_first_hop_points_at_the_link(self):
         prev = obs(vpn=vpn_state("connected"), icmp_ok=True, gw_mac=GW_MAC)
         cur = obs(vpn=vpn_state("disconnected"), icmp_ok=False, gw_mac=None)
         f = by_kind(judge(prev, cur), "VPN_DISCONNECTED")
-        self.assertIn("무선 구간", f.summary)
+        self.assertIn(msg.WHY_LINK, f.summary)
         self.assertIs(f.evidence["first_hop_alive"], False)
 
     def test_manual_disconnect_is_attributed_not_alarmed(self):
@@ -76,7 +77,7 @@ class TestDisconnect(unittest.TestCase):
         cur = obs(vpn=vpn_state("disconnected"), security="NONE")
         f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
         self.assertEqual(f.severity, "medium")
-        self.assertIn("터널 밖", f.summary)
+        self.assertEqual(f.summary, msg.VPN_PROTECTION_LOST % "warp")
 
     def test_enterprise_network_does_not_claim_exposure(self):
         prev = obs(vpn=vpn_state("connected"), security="WPA2 Enterprise")
@@ -88,7 +89,7 @@ class TestDisconnect(unittest.TestCase):
         cur = obs(vpn=vpn_state("disconnected"), iface_kind="ethernet")
         f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
         self.assertIsNotNone(f)
-        self.assertIn("판단하지 못했습니다", f.summary)
+        self.assertEqual(f.summary, msg.VPN_PROTECTION_LOST_UNKNOWN % "warp")
         self.assertEqual(f.severity, "low")
 
 

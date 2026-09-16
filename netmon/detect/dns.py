@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from .. import messages as msg
 from ..model import (CONFIRMED, HIGH, INFO, MEDIUM, SECURITY, SUSPECT,
                      Finding, Observation, unwrap)
 
@@ -36,7 +37,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             axis=SECURITY, kind="RESOLVER_CHANGED",
             confidence=CONFIRMED,
             severity="low" if attribution else HIGH,
-            summary="시스템 DNS 리졸버가 바뀌었습니다.",
+            summary=msg.RESOLVER_CHANGED,
             evidence={"prev": prev.get("dns", "resolvers"), "cur": cur.get("dns", "resolvers"),
                       "source": "scutil --dns"},
             attribution=attribution,
@@ -50,8 +51,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=SECURITY, kind="DNS_LOCAL_PROXY_CHANGED",
             confidence=SUSPECT, severity=MEDIUM,
-            summary=("DNS 가 로컬 프록시를 거치기 시작했습니다." if c_lb else
-                     "DNS 가 더 이상 로컬 프록시를 거치지 않습니다."),
+            summary=(msg.DNS_LOCAL_PROXY_ON if c_lb else msg.DNS_LOCAL_PROXY_OFF),
             evidence={"prev_via_loopback": p_lb, "cur_via_loopback": c_lb,
                       "resolvers": cur.get("dns", "resolvers"), "source": "scutil --dns"},
             attribution=attribution,
@@ -68,8 +68,8 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             kind="PROXY_ENABLED" if turned_on else "PROXY_SETTINGS_CHANGED",
             confidence=CONFIRMED,
             severity=HIGH if turned_on else MEDIUM,
-            summary=("프록시가 켜졌습니다 (%s). 트래픽이 제3자를 거쳐 갑니다." % ", ".join(turned_on)
-                     if turned_on else "프록시 설정이 바뀌었습니다."),
+            summary=(msg.PROXY_ENABLED % ", ".join(turned_on) if turned_on
+                     else msg.PROXY_SETTINGS_CHANGED),
             evidence={"prev": p_proxy, "cur": c_proxy, "source": "scutil --proxy"},
             attribution=attribution,
         ))

@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, List, Optional
 
+from . import messages as msg
 from .model import QUALITY, SECURITY, unwrap
 
 CLEAR = "\033[H\033[2J"
@@ -49,11 +50,11 @@ def render(now: datetime.datetime, agent: Dict[str, Any],
     # --- 머리 ---
     stamp = now.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     if agent.get("pid"):
-        state = GREEN + "에이전트 실행 중 (pid %s)" % agent["pid"] + OFF
+        state = GREEN + msg.WATCH_AGENT_RUNNING % agent["pid"] + OFF
     elif agent.get("installed"):
-        state = YELLOW + "에이전트 등록됨, 실행 대기" + OFF
+        state = YELLOW + msg.WATCH_AGENT_WAITING + OFF
     else:
-        state = DIM + "상시 실행 등록 안 됨" + OFF
+        state = DIM + msg.WATCH_AGENT_NONE + OFF
     out.append("%snetmon%s  %s    %s" % (BOLD, OFF, stamp, state))
 
     # --- 지금 ---
@@ -68,16 +69,16 @@ def render(now: datetime.datetime, agent: Dict[str, Any],
         stale = age is not None and age > stale_after
         parts = [
             "%s %s" % (iface.get("primary") or "?", iface.get("primary_kind") or ""),
-            wifi.get("security") or ("유선" if iface.get("primary_kind") != "wifi" else "?"),
+            wifi.get("security") or (msg.WATCH_WIRED if iface.get("primary_kind") != "wifi" else "?"),
         ]
         if dns.get("via_loopback"):
-            parts.append("DNS 로컬 프록시")
+            parts.append(msg.WATCH_DNS_PROXY)
         age_txt = "%.0f초 전" % age if age is not None else "?"
         if stale:
-            age_txt = YELLOW + age_txt + " ← 갱신이 멈췄습니다" + OFF
-        out.append("  %-10s %s   관측 %d주기, 마지막 %s"
-                   % ("네트워크", " · ".join(p for p in parts if p),
-                      sample_count, age_txt))
+            age_txt = YELLOW + age_txt + msg.WATCH_STALE + OFF
+        out.append("  %-10s %s   %s"
+                   % ("", " · ".join(p for p in parts if p),
+                      msg.WATCH_SUMMARY % (sample_count, age_txt)))
 
         vpn = d.get("vpn") or {}
         if vpn:
@@ -89,38 +90,41 @@ def render(now: datetime.datetime, agent: Dict[str, Any],
                 shown.append("%s%s %s%s" % (color, name, s, OFF))
             out.append("  %-10s %s" % ("VPN", " · ".join(shown)))
     else:
-        out.append("  " + DIM + "아직 기록이 없습니다" + OFF)
+        out.append("  " + DIM + msg.WATCH_NO_SAMPLES + OFF)
 
     # --- 조사 ---
     out.append("")
-    out.append(_rule("조사", width))
+    out.append(_rule(msg.WATCH_SECTION_INVESTIGATION, width))
     if open_invs:
         for inv in open_invs:
-            out.append("  %s%s%s  %s  %d주기  계기=%s"
-                       % (BOLD, inv.kind, OFF, inv.id, inv.cycles, inv.trigger))
-            tuned = [e for e in inv.evidence if e.get("what") == "기준 변경"]
+            out.append("  %s%s%s  %s"
+                       % (BOLD, inv.kind, OFF,
+                          msg.WATCH_INV_LINE % (inv.id, inv.cycles, inv.trigger)))
+            tuned = [e for e in inv.evidence if e.get("what") == msg.INV_NOTE_RETUNE]
             if tuned:
-                out.append("    %s기준 %d번 바뀜 — 마지막: %s%s"
-                           % (DIM, len(tuned), tuned[-1].get("reason", ""), OFF))
+                out.append("    %s%s%s"
+                           % (DIM,
+                              msg.WATCH_INV_RETUNED % (len(tuned), tuned[-1].get("reason", "")),
+                              OFF))
             recent = inv.evidence[-2:]
             for e in recent:
-                if e.get("what") == "기준 변경":
+                if e.get("what") == msg.INV_NOTE_RETUNE:
                     continue
                 out.append("    %s%s  %s%s" % (DIM, e.get("ts", "")[11:19],
                                                e.get("what", ""), OFF))
     else:
-        out.append("  %s열린 조사 없음%s" % (DIM, OFF))
-    out.append("  %s기준: %s%s" % (DIM, rules_summary, OFF))
+        out.append("  %s%s%s" % (DIM, msg.WATCH_NO_INVESTIGATION, OFF))
+    out.append("  %s%s%s" % (DIM, msg.WATCH_RULES % rules_summary, OFF))
 
     # --- 최근 판정 ---
     out.append("")
-    out.append(_rule("최근 판정", width))
+    out.append(_rule(msg.WATCH_SECTION_FINDINGS, width))
     shown = [e for e in events if show_suppressed or not e.get("attribution")]
     if not shown:
-        out.append("  %s아직 판정 없음%s" % (DIM, OFF))
+        out.append("  %s%s%s" % (DIM, msg.WATCH_NO_FINDINGS, OFF))
     for e in shown[-lines:]:
         color = SEV_COLOR.get(e.get("severity"), "")
-        tag = "억제" if e.get("attribution") else ""
+        tag = msg.WATCH_SUPPRESSED_TAG if e.get("attribution") else ""
         summary = e.get("summary", "")
         room = width - 34
         if len(summary) > room:
@@ -133,5 +137,5 @@ def render(now: datetime.datetime, agent: Dict[str, Any],
                       (" " + DIM + tag + OFF) if tag else ""))
 
     out.append("")
-    out.append("%sCtrl+C 로 닫습니다. 창을 닫아도 감시는 계속됩니다.%s" % (DIM, OFF))
+    out.append("%s%s%s" % (DIM, msg.WATCH_FOOTER, OFF))
     return "\n".join(out)

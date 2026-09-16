@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from .. import messages as msg
 from ..liveness import evaluate
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, QUALITY, SECURITY,
                      Finding, Observation)
@@ -70,17 +71,17 @@ def _down_reason(cur: Observation, ctx, state: Dict[str, Any]) -> Dict[str, Any]
 def _likely(cur: Observation, ctx, state: Dict[str, Any]) -> str:
     """가장 그럴듯한 설명. 판정을 덮어쓰지 않고 요약문에만 쓴다."""
     if _user_action(state.get("reason")):
-        return "사용자가 직접 끊은 경우"
+        return msg.WHY_USER
     if ctx.has("sleep"):
-        return "잠자기"
+        return msg.WHY_SLEEP
     if ctx.moved:
-        return "네트워크 이동"
+        return msg.WHY_MOVED
     _, alive = evaluate(cur, ctx.state)
     if alive is False:
-        return "첫 홉이 응답하지 않음 — 무선 구간 문제"
+        return msg.WHY_LINK
     if alive is True:
-        return "첫 홉은 정상 — 터널 경로 문제"
-    return "판단 근거 부족"
+        return msg.WHY_TUNNEL
+    return msg.WHY_UNKNOWN
 
 
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
@@ -104,7 +105,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             out.append(Finding(
                 axis=INFO, kind="VPN_STATE_UNKNOWN",
                 confidence=CONFIRMED, severity=INFO_SEV,
-                summary="%s 의 상태를 확인하지 못했습니다 (%s → %s)." % (name, was, now),
+                summary=msg.VPN_STATE_UNKNOWN % (name, was, now),
                 evidence={"provider": name, "prev": prev_st, "cur": cur_st},
             ))
             continue
@@ -120,7 +121,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                 axis=QUALITY, kind="VPN_DISCONNECTED",
                 confidence=CONFIRMED,
                 severity=INFO_SEV if user else MEDIUM,
-                summary="%s 연결이 끊겼습니다. 가장 그럴듯한 설명은 %s 입니다." % (name, likely),
+                summary=msg.VPN_DISCONNECTED % (name, likely),
                 evidence=evidence,
                 attribution=attribution,
             ))
@@ -133,11 +134,8 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                     axis=SECURITY, kind="VPN_PROTECTION_LOST",
                     confidence=CONFIRMED,
                     severity=LOW if (user or untrusted is None) else MEDIUM,
-                    summary=("%s 가 끊겨서 트래픽이 터널 밖으로 나가고 있습니다. "
-                             "이 네트워크는 같은 L2 에 있는 다른 기기가 들여다볼 수 있는 곳입니다."
-                             % name) if untrusted else
-                            ("%s 가 끊겼습니다. 이 네트워크를 신뢰할 수 있는지는 "
-                             "판단하지 못했습니다." % name),
+                    summary=((msg.VPN_PROTECTION_LOST if untrusted
+                              else msg.VPN_PROTECTION_LOST_UNKNOWN) % name),
                     evidence={"provider": name,
                               "wifi_security": (cur.get("wifi") or {}).get("security"),
                               "untrusted_network": untrusted,
@@ -147,13 +145,11 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
         elif was != CONNECTED and now == CONNECTED:
             since = (ctx.state.get("vpn_down_since") or {}).get(name)
-            dur = ""
-            if since:
-                dur = " (%s 부터)" % since[11:19]
+            dur = msg.VPN_SINCE % since[11:19] if since else ""
             out.append(Finding(
                 axis=QUALITY, kind="VPN_RECONNECTED",
                 confidence=CONFIRMED, severity=INFO_SEV,
-                summary="%s 가 다시 연결됐습니다%s." % (name, dur),
+                summary=msg.VPN_RECONNECTED % (name, dur),
                 evidence={"provider": name, "down_since": since,
                           "prev_state": was},
                 attribution=ctx.quality_attribution(),
@@ -162,7 +158,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             out.append(Finding(
                 axis=INFO, kind="VPN_STATE_CHANGED",
                 confidence=CONFIRMED, severity=INFO_SEV,
-                summary="%s 상태가 바뀌었습니다 (%s → %s)." % (name, was, now),
+                summary=msg.VPN_STATE_CHANGED % (name, was, now),
                 evidence={"provider": name, "prev": was, "cur": now},
             ))
 

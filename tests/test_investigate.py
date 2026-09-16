@@ -7,6 +7,7 @@ from __future__ import annotations
 import unittest
 
 from netmon import investigate
+from netmon import messages as msg
 from netmon.detect import Context, attributions_for, network_key, run_all
 from netmon.investigate import triggers
 from netmon.investigate.model import ABANDONED, CONCLUDED, OPEN
@@ -107,11 +108,10 @@ class TestL2Investigation(unittest.TestCase):
             h.feed(obs(ts=ts(10 + i * 5), gw_mac=GW_MAC_ALT))
         inv = h.closed("l2_identity")[0]
         self.assertEqual(inv.status, CONCLUDED)
-        self.assertIn("안정", inv.verdict)
+        self.assertEqual(inv.verdict, msg.INV_L2_STABLE_VERDICT)
         self.assertEqual(inv.confidence, "possible")
         c = by_kind(h.all, "INVESTIGATION_CONCLUDED")
-        self.assertIn("접속점 교체로 보입니다", c.summary)
-        self.assertIn("배제하지는 못합니다", c.summary)
+        self.assertIn(msg.INV_L2_STABLE % inv.criteria["stable_for"], c.summary)
 
     def test_flapping_mac_concludes_as_suspicious(self):
         """정상적인 접속점 교체는 되돌아가지 않는다."""
@@ -121,7 +121,7 @@ class TestL2Investigation(unittest.TestCase):
             h.feed(obs(ts=ts(i * 5), gw_mac=mac))
         inv = h.closed("l2_identity")[0]
         self.assertEqual(inv.status, CONCLUDED)
-        self.assertIn("요동", inv.verdict)
+        self.assertEqual(inv.verdict, msg.INV_L2_FLAPPING_VERDICT)
         self.assertEqual(inv.confidence, "suspect")
 
     def test_corroborating_signal_widens_criteria_then_escalates(self):
@@ -140,7 +140,7 @@ class TestL2Investigation(unittest.TestCase):
         c = by_kind(f, "INVESTIGATION_CONCLUDED")
         self.assertEqual(c.axis, "security")
         self.assertEqual(c.severity, "high")
-        self.assertIn("접속점 교체만으로는", c.summary)
+        self.assertIn("DHCP_SERVER_CHANGED", c.summary)
 
     def test_criteria_change_is_recorded_with_before_and_after(self):
         h = Harness()
@@ -148,7 +148,7 @@ class TestL2Investigation(unittest.TestCase):
         h.feed(obs(ts=ts(5), gw_mac=GW_MAC_ALT))
         h.feed(obs(ts=ts(10), gw_mac=GW_MAC_ALT, dhcp_server="192.0.2.99"))
         inv = h.closed("l2_identity")[0]
-        tuned = [e for e in inv.evidence if e["what"] == "기준 변경"]
+        tuned = [e for e in inv.evidence if e["what"] == msg.INV_NOTE_RETUNE]
         self.assertTrue(tuned, "기준을 바꿨으면 기록이 있어야 한다")
         self.assertIn("reason", tuned[0])
         self.assertIn("before", tuned[0])
@@ -178,7 +178,7 @@ class TestVpnInvestigation(unittest.TestCase):
         done = h.closed("vpn_drop")
         self.assertEqual(len(done), 1)
         self.assertEqual(done[0].status, CONCLUDED)
-        self.assertIn("터널 쪽", done[0].verdict)
+        self.assertEqual(done[0].verdict, msg.INV_VPN_VERDICT_TUNNEL)
         self.assertEqual(h.opened("vpn_drop"), [],
                          "결론을 낸 주기에 같은 조사가 또 열리면 안 된다")
 
@@ -230,7 +230,7 @@ class TestLifecycle(unittest.TestCase):
                 break
         done = h.closed("vpn_drop")
         self.assertTrue(done)
-        self.assertIn("예산", done[0].verdict)
+        self.assertIn("%d" % done[0].cycles, done[0].verdict)
 
     def test_state_survives_a_round_trip(self):
         """에이전트를 재시작해도 조사가 이어져야 한다."""

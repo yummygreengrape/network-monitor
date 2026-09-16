@@ -15,6 +15,8 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .. import messages as msg
+
 OPEN = "open"
 CONCLUDED = "concluded"
 ABANDONED = "abandoned"   # 네트워크가 바뀌는 등 대상 자체가 사라짐
@@ -56,7 +58,7 @@ class Investigation:
         """
         before = {k: self.criteria.get(k) for k in changes}
         self.criteria.update(changes)
-        self.note(ts, "기준 변경", reason=reason, before=before, after=dict(changes))
+        self.note(ts, msg.INV_NOTE_RETUNE, reason=reason, before=before, after=dict(changes))
         return {"reason": reason, "before": before, "after": dict(changes)}
 
     def close(self, ts: str, status: str, verdict: str, confidence: str) -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from .. import messages as msg
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, POSSIBLE, Finding,
                      Observation)
 from . import playbooks, triggers
@@ -82,12 +83,11 @@ class Investigator:
         # "중단했다"고 남긴다 — 무엇을 못 보고 넘어갔는지가 기록에 있어야 한다.
         for inv in invs:
             if inv.open and ctx.network and inv.network != ctx.network:
-                inv.close(cur.ts, ABANDONED, "네트워크가 바뀌어 중단함", POSSIBLE)
+                inv.close(cur.ts, ABANDONED, msg.INV_ABANDON_REASON_NETWORK, POSSIBLE)
                 out.append(Finding(
                     axis=INFO, kind="INVESTIGATION_ABANDONED",
                     confidence=CONFIRMED, severity=INFO_SEV,
-                    summary="조사 %s 를 중단했습니다. 네트워크가 바뀌어 대상이 사라졌습니다."
-                            % inv.id,
+                    summary=msg.INV_ABANDONED % inv.id,
                     evidence={"investigation": inv.id, "kind": inv.kind,
                               "cycles": inv.cycles, "criteria": inv.criteria},
                 ))
@@ -96,30 +96,29 @@ class Investigator:
         for inv in [i for i in invs if i.open]:
             pb = playbooks.by_name(inv.kind)
             if pb is None:
-                inv.close(cur.ts, ABANDONED, "조사 지침을 찾을 수 없음", POSSIBLE)
+                inv.close(cur.ts, ABANDONED, msg.INV_ABANDON_REASON_NO_PLAYBOOK, POSSIBLE)
                 continue
             inv.cycles += 1
             try:
                 out.extend(pb.step(inv, prev, cur, ctx, findings) or [])
             except Exception as exc:
-                inv.close(cur.ts, ABANDONED, "조사 중 오류: %s" % str(exc)[:80], POSSIBLE)
+                inv.close(cur.ts, ABANDONED, msg.INV_ABANDON_REASON_ERROR % str(exc)[:80], POSSIBLE)
                 out.append(Finding(
                     axis=INFO, kind="INVESTIGATION_ERROR",
                     confidence=CONFIRMED, severity=LOW,
-                    summary="조사 %s 가 예외로 멈췄습니다: %s" % (inv.id, str(exc)[:100]),
+                    summary=msg.INV_ERROR % (inv.id, str(exc)[:100]),
                     evidence={"investigation": inv.id, "error": repr(exc)[:200]},
                 ))
             if not inv.open and inv.closed_at == cur.ts:
                 cooldown[inv.kind] = int(self.conf["cooldown_cycles"])
             if inv.open and inv.cycles >= pb.max_cycles:
                 inv.close(cur.ts, CONCLUDED,
-                          "예산 안에 결론이 나지 않음 (%d주기)" % inv.cycles, POSSIBLE)
+                          msg.INV_BUDGET_VERDICT % inv.cycles, POSSIBLE)
                 cooldown[inv.kind] = int(self.conf["cooldown_cycles"])
                 out.append(Finding(
                     axis=INFO, kind="INVESTIGATION_CONCLUDED",
                     confidence=POSSIBLE, severity=INFO_SEV,
-                    summary="[%s] %d주기를 지켜봤지만 가르지 못했습니다. 관측을 남기고 닫습니다."
-                            % (inv.kind, inv.cycles),
+                    summary=msg.INV_BUDGET_SPENT % (inv.kind, inv.cycles),
                     evidence={"investigation": inv.id, "trigger": inv.trigger,
                               "criteria": inv.criteria,
                               "evidence": inv.evidence[-8:]},
@@ -135,7 +134,7 @@ class Investigator:
                              if i.open and i.kind == pb.name), None)
             if existing is not None:
                 # 같은 종류의 조사가 이미 열려 있다. 새로 열지 않고 증거로 붙인다.
-                existing.note(cur.ts, "같은 종류의 신호가 또 나타남", kind=f.kind)
+                existing.note(cur.ts, msg.INV_NOTE_SAME_SIGNAL, kind=f.kind)
                 continue
             if cooldown.get(pb.name, 0) > 0:
                 # 조용히 넘기지 않는다. 무엇을 안 열었는지가 기록에 있어야 한다.
@@ -144,9 +143,7 @@ class Investigator:
                     out.append(Finding(
                         axis=INFO, kind="INVESTIGATION_COOLDOWN",
                         confidence=CONFIRMED, severity=INFO_SEV,
-                        summary="%s 조사를 방금 끝냈습니다. %d주기 동안 같은 종류를 "
-                                "다시 열지 않습니다 (%s 신호는 기록에 남습니다)."
-                                % (pb.name, cooldown[pb.name], f.kind),
+                        summary=msg.INV_COOLDOWN % (pb.name, cooldown[pb.name], f.kind),
                         evidence={"playbook": pb.name, "trigger": f.kind,
                                   "cooldown_left": cooldown[pb.name]},
                     ))
@@ -159,14 +156,13 @@ class Investigator:
                 network=ctx.network or "-",
                 criteria=pb.initial_criteria(f, cur),
             )
-            inv.note(cur.ts, "조사 시작", trigger=f.kind, summary=f.summary)
+            inv.note(cur.ts, msg.INV_NOTE_START, trigger=f.kind, summary=f.summary)
             invs.append(inv)
             open_count += 1
             out.append(Finding(
                 axis=INFO, kind="INVESTIGATION_OPENED",
                 confidence=CONFIRMED, severity=INFO_SEV,
-                summary="%s 때문에 조사 %s 를 엽니다. 결론이 날 때까지 계속 지켜봅니다."
-                        % (f.kind, inv.id),
+                summary=msg.INV_OPENED % (f.kind, inv.id),
                 evidence={"investigation": inv.id, "kind": pb.name,
                           "trigger": f.kind, "criteria": inv.criteria,
                           "max_cycles": pb.max_cycles},

@@ -8,13 +8,16 @@ from __future__ import annotations
 from collections import Counter, OrderedDict
 from typing import Any, Dict, Iterable, List, Optional
 
+from . import messages as msg
 from .model import CONFIRMED, POSSIBLE, QUALITY, SECURITY, SUSPECT
 
-CONF_LABEL = OrderedDict([
-    (CONFIRMED, "확정  — 관측만으로 사실이라고 말할 수 있습니다"),
-    (SUSPECT, "의심  — 기준선과 어긋납니다. 양성 오류의 여지가 있습니다"),
-    (POSSIBLE, "가능  — 구조적으로 가능합니다. 증거는 없습니다"),
-])
+def conf_labels() -> "OrderedDict[str, str]":
+    """확신도 이름표. 언어가 바뀌면 바로 따라가도록 부를 때마다 만든다."""
+    return OrderedDict([
+        (CONFIRMED, msg.CONF_CONFIRMED),
+        (SUSPECT, msg.CONF_SUSPECT),
+        (POSSIBLE, msg.CONF_POSSIBLE),
+    ])
 SEV_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
 AXIS_LABEL = {SECURITY: "보안", QUALITY: "연결 품질", "info": "참고"}
 
@@ -47,11 +50,11 @@ def render(day: str, events: List[Dict[str, Any]], samples_count: int = 0,
            exposure: Optional[List[str]] = None) -> str:
     s = summarize(events)
     lines: List[str] = []
-    lines.append("== %s  관측 %d주기, 판정 %d건" % (day, samples_count, s["total"]))
+    lines.append(msg.REPORT_HEADER % (day, samples_count, s["total"]))
 
     if exposure:
         lines.append("")
-        lines.append("-- 이 네트워크에서 구조적으로 가능한 것 (증거 없음) --")
+        lines.append(msg.REPORT_EXPOSURE_TITLE)
         for item in exposure:
             lines.append("    %s" % item)
 
@@ -61,7 +64,7 @@ def render(day: str, events: List[Dict[str, Any]], samples_count: int = 0,
             continue
         lines.append("")
         lines.append("-- %s --" % AXIS_LABEL.get(axis, axis))
-        for conf, label in CONF_LABEL.items():
+        for conf, label in conf_labels().items():
             group = sorted([e for e in in_axis if e.get("confidence") == conf], key=_sort_key)
             if not group:
                 continue
@@ -72,8 +75,8 @@ def render(day: str, events: List[Dict[str, Any]], samples_count: int = 0,
     invs = [e for e in events if e.get("kind", "").startswith("INVESTIGATION_")]
     if invs:
         lines.append("")
-        lines.append("-- 조사 --")
-        lines.append("   유의미한 신호가 잡히면 결론이 날 때까지 계속 지켜봅니다.")
+        lines.append(msg.REPORT_INVESTIGATION_TITLE)
+        lines.append(msg.REPORT_INVESTIGATION_NOTE)
         for e in invs:
             lines.append("    %s  %-26s %s" % (e.get("ts", "")[11:19],
                                                e.get("kind", "")[len("INVESTIGATION_"):],
@@ -81,15 +84,14 @@ def render(day: str, events: List[Dict[str, Any]], samples_count: int = 0,
 
     if s["suppressed"]:
         lines.append("")
-        lines.append("-- 사용자 행동·환경으로 설명되어 억제된 판정 (%d건) --"
-                     % len(s["suppressed"]))
-        lines.append("   지워지지 않고 남습니다. 억제 판단이 틀렸다면 여기서 찾을 수 있습니다.")
+        lines.append(msg.REPORT_SUPPRESSED_TITLE % len(s["suppressed"]))
+        lines.append(msg.REPORT_SUPPRESSED_NOTE)
         for reason, n in s["attributions"].most_common():
             lines.append("    %-16s %d건" % (reason, n))
 
     if not s["active"]:
         lines.append("")
-        lines.append("  활성 판정 없음.")
+        lines.append(msg.REPORT_NO_ACTIVE)
     return "\n".join(lines)
 
 
@@ -107,11 +109,9 @@ def exposure_notes(last_sample: Optional[Dict[str, Any]]) -> List[str]:
     sec = (wifi.get("security") or "").lower()
     if wifi.get("applicable"):
         if sec.startswith("wpa") and "enterprise" not in sec:
-            out.append("공유 비밀번호 Wi-Fi(%s): 같은 비밀번호를 아는 사람은 같은 L2 에 있고, "
-                       "ARP·DHCP·RA 조작과 수동 복호가 가능합니다." % (wifi.get("security") or "?"))
+            out.append(msg.EXPOSURE_SHARED_PSK % (wifi.get("security") or "?"))
         elif sec in ("none", "open", ""):
-            out.append("암호화 없는 Wi-Fi: 같은 공간에 있는 누구나 평문을 읽을 수 있습니다.")
+            out.append(msg.EXPOSURE_OPEN)
     if (data.get("dns") or {}).get("via_loopback"):
-        out.append("DNS 가 로컬 프록시를 거칩니다. VPN·필터의 정상 동작일 수도, "
-                   "가로채기일 수도 있습니다 — 무엇이 듣고 있는지는 이 도구가 판별하지 못합니다.")
+        out.append(msg.EXPOSURE_DNS_PROXY)
     return out

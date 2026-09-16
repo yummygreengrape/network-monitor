@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import baseline, investigate, vpn
+from . import baseline, investigate, messages, vpn
 from .collect import arp, dhcp, dns, iface, link, route, wifi
 from .config import Config
 from .detect import Context, attributions_for, network_key, run_all
@@ -32,6 +32,7 @@ class Engine:
     def __init__(self, cfg: Config, store: Store) -> None:
         self.cfg = cfg
         self.store = store
+        messages.use_config(cfg.language)
         self.prev: Optional[Observation] = None
         self.prev_wall: Optional[float] = None
         self.state: Dict[str, Any] = store.load_state()

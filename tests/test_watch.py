@@ -5,6 +5,7 @@ import datetime
 import re
 import unittest
 
+from netmon import messages as msg
 from netmon import watch
 from netmon.investigate.model import Investigation
 
@@ -40,28 +41,28 @@ class TestRender(unittest.TestCase):
         return plain(watch.render(**args))
 
     def test_shows_agent_running(self):
-        self.assertIn("에이전트 실행 중 (pid 123)", self._render())
+        self.assertIn(msg.WATCH_AGENT_RUNNING % "123", self._render())
 
     def test_shows_not_installed(self):
         out = self._render(agent={"pid": None, "installed": False})
-        self.assertIn("상시 실행 등록 안 됨", out)
+        self.assertIn(msg.WATCH_AGENT_NONE, out)
 
     def test_marks_stale_data(self):
         """에이전트가 멈췄는데 오래된 화면을 그대로 보여 주면 안 된다."""
         fresh = self._render(last_sample=sample(ts="2026-01-01T00:00:57Z"))
-        self.assertNotIn("갱신이 멈췄습니다", fresh)
+        self.assertNotIn(msg.WATCH_STALE.strip(), fresh)
         stale = self._render(last_sample=sample(ts="2026-01-01T00:00:00Z"),
                              stale_after=30.0)
-        self.assertIn("갱신이 멈췄습니다", stale)
+        self.assertIn(msg.WATCH_STALE.strip(), stale)
 
     def test_stale_threshold_follows_the_interval(self):
         """30초 간격으로 도는 에이전트를 60초마다 멈췄다고 하면 계속 거짓말이 된다."""
         old = sample(ts="2026-01-01T00:00:00Z")   # 60초 전
-        self.assertIn("갱신이 멈췄습니다", self._render(last_sample=old, stale_after=30.0))
-        self.assertNotIn("갱신이 멈췄습니다", self._render(last_sample=old, stale_after=120.0))
+        self.assertIn(msg.WATCH_STALE.strip(), self._render(last_sample=old, stale_after=30.0))
+        self.assertNotIn(msg.WATCH_STALE.strip(), self._render(last_sample=old, stale_after=120.0))
 
     def test_says_when_no_investigation_is_open(self):
-        self.assertIn("열린 조사 없음", self._render())
+        self.assertIn(msg.WATCH_NO_INVESTIGATION, self._render())
 
     def test_shows_open_investigation_and_criteria_changes(self):
         inv = Investigation(id="l2-abc", kind="l2_identity",
@@ -72,12 +73,12 @@ class TestRender(unittest.TestCase):
         out = self._render(open_invs=[inv])
         self.assertIn("l2_identity", out)
         self.assertIn("7주기", out)
-        self.assertIn("기준 1번 바뀜", out)
+        self.assertIn(msg.WATCH_INV_RETUNED % (1, "다른 신호가 겹쳤다"), out)
         self.assertIn("다른 신호가 겹쳤다", out)
 
     def test_suppressed_findings_are_hidden_by_default(self):
         ev = [event(attribution="network_change")]
-        self.assertIn("아직 판정 없음", self._render(events=ev))
+        self.assertIn(msg.WATCH_NO_FINDINGS, self._render(events=ev))
         self.assertIn("GW_MAC_CHANGED", self._render(events=ev, show_suppressed=True))
 
     def test_long_summaries_are_cut_not_wrapped(self):
@@ -94,7 +95,7 @@ class TestRender(unittest.TestCase):
         self.assertIn("tailscale connected", out)
 
     def test_closing_the_window_does_not_stop_monitoring(self):
-        self.assertIn("창을 닫아도 감시는 계속됩니다", self._render())
+        self.assertIn(msg.WATCH_FOOTER, self._render())
 
 
 if __name__ == "__main__":

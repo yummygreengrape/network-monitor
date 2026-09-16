@@ -40,6 +40,9 @@ CONSENTS = {
 
 DEFAULTS: Dict[str, Any] = {
     "version": 1,
+    # 문구 언어. NETMON_LANG 환경 변수가 이 값을 덮어쓴다.
+    # 카탈로그는 netmon/messages/<코드>.py 에 있다.
+    "language": "ko",
     "interval": 5,
     "retention_days": 14,
     # 비워 두면 설정 파일 옆의 data/ 를 쓴다
@@ -145,6 +148,10 @@ class Config:
         for feat, need in FEATURE_CONSENT.items():
             if need == name:
                 self.set_feature(feat, False)
+
+    @property
+    def language(self) -> str:
+        return str(self.data.get("language") or "ko")
 
     @property
     def interval(self) -> int:

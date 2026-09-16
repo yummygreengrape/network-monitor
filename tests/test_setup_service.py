@@ -11,6 +11,8 @@ import tempfile
 import unittest
 
 from netmon import config as configmod
+from netmon import messages as msg
+from netmon import messages
 from netmon import service, setup as setupmod
 
 
@@ -34,11 +36,20 @@ class ScriptedIO:
         return "\n".join(self.said)
 
 
-def wizard(answers, vpn_installed=("warp",)):
-    io = ScriptedIO(answers)
+def wizard(answers, vpn_installed=("warp",), language=""):
+    """답을 순서대로 넣고 마법사를 돌린다.
+
+    첫 질문은 언어다. 기본값(엔터)이면 지금 언어가 그대로 유지된다.
+    언어는 전역 상태이므로 시작 전에 한국어로 맞춰 둔다.
+    """
+    messages.set_language("ko")
+    io = ScriptedIO([language] + list(answers))
     w = setupmod.Wizard(ask=io.ask, say=io.say, default_log_dir="/tmp/netmon-test",
                         installed_vpn=list(vpn_installed))
-    return w.run(), io
+    try:
+        return w.run(), io
+    finally:
+        messages.set_language("ko")
 
 
 class TestWizardDefaults(unittest.TestCase):
@@ -54,7 +65,8 @@ class TestWizardDefaults(unittest.TestCase):
         self.assertTrue(plan.confirmed, "마지막 확인의 기본값은 적용")
 
     def test_choices_are_applied_in_order(self):
-        # 간격 3초, 기록 기본, 보존 30일, 위치 y, VPN y, 외부 n, 상시 y, 링크 y, 확인 y
+        # 언어 기본, 간격 3초, 기록 기본, 보존 30일, 위치 y, VPN y, 외부 n,
+        # 상시 y, 링크 y, 확인 y
         plan, _ = wizard(["1", "", "3", "y", "y", "n", "y", "y", "y"])
         self.assertEqual(plan.interval, 3)
         self.assertEqual(plan.retention_days, 30)
@@ -67,7 +79,7 @@ class TestWizardDefaults(unittest.TestCase):
     def test_invalid_choice_is_reasked(self):
         plan, io = wizard(["99", "abc", "1"])
         self.assertEqual(plan.interval, 3)
-        self.assertIn("번호를 넣으세요", io.transcript)
+        self.assertIn(msg.WZ_PICK_RANGE % 4, io.transcript)
 
     def test_declining_at_the_end_leaves_plan_unconfirmed(self):
         # 위치·VPN·외부·상시·링크에 모두 n, 마지막 확인에도 n
@@ -78,7 +90,7 @@ class TestWizardDefaults(unittest.TestCase):
         """`./netmon.sh` 는 저장소 안에서만 통한다. 기본값은 링크를 거는 쪽이다."""
         plan, io = wizard([])
         self.assertTrue(plan.want_link)
-        self.assertIn("어디서나 netmon 으로 실행", io.transcript)
+        self.assertIn(msg.WZ_LINK_Q, io.transcript + " ".join(io.asked))
         self.assertIn("netmon link remove", io.transcript)
 
     def test_command_registration_can_be_declined(self):
@@ -88,12 +100,36 @@ class TestWizardDefaults(unittest.TestCase):
     def test_vpn_question_skipped_when_none_installed(self):
         plan, io = wizard([], vpn_installed=())
         self.assertFalse(plan.want_vpn)
-        self.assertIn("설치된 VPN 을 찾지 못해", io.transcript)
+        self.assertIn(msg.WZ_VPN_NONE, io.transcript)
 
     def test_external_probe_question_states_what_leaves_the_machine(self):
         _, io = wizard([])
-        self.assertIn("출발지 IP", io.transcript)
-        self.assertIn("네트워크 식별자는 보내지 않습니다", io.transcript)
+        for line in msg.WZ_EXTERNAL_BODY.splitlines():
+            self.assertIn(line, io.transcript)
+
+
+class TestLanguageQuestion(unittest.TestCase):
+    def tearDown(self):
+        messages.set_language("ko")
+
+    def test_language_is_asked_first_in_both_languages(self):
+        _, io = wizard([])
+        self.assertIn(msg.WZ_LANG_Q, io.transcript)
+        self.assertIn("English", io.transcript)
+        self.assertIn("한국어", io.transcript)
+
+    def test_choosing_english_switches_the_rest_of_the_wizard(self):
+        codes = messages.available()
+        plan, io = wizard([], language=str(codes.index("en") + 1))
+        self.assertEqual(plan.language, "en")
+        self.assertIn("netmon first-run setup", io.transcript)
+
+    def test_language_is_saved_to_config(self):
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            cfg = configmod.load(os.path.join(d, "config.json"))
+            setupmod.apply(setupmod.Plan(language="en", log_dir=d, confirmed=True), cfg)
+            self.assertEqual(configmod.load(os.path.join(d, "config.json")).language, "en")
 
 
 class TestApply(unittest.TestCase):
