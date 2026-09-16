@@ -18,8 +18,9 @@ import sys
 import time
 from typing import List, Optional
 
-from . import (__version__, config as configmod, redact as redactmod, service,
-               setup as setupmod, vpn, wifi_helper)
+from . import (__version__, config as configmod, investigate,
+               redact as redactmod, service, setup as setupmod, vpn,
+               wifi_helper)
 from .collect import REGISTRY as COLLECTORS
 from .engine import Engine, replay as replay_engine
 from .model import Observation
@@ -95,6 +96,17 @@ def cmd_doctor(args) -> int:
         print("  %-24s %s" % (name, "켜짐" if reason is None else "꺼짐 (%s)" % reason))
 
     print()
+    print("조사")
+    print("  기준  %s" % investigate.describe_rules(cfg.data.get("investigate")))
+    try:
+        st_data = _store(args, cfg).load_state()
+        open_now = investigate.open_investigations(st_data)
+        print("  진행  %s" % (", ".join("%s(%d주기)" % (i.kind, i.cycles)
+                                        for i in open_now) if open_now else "없음"))
+    except OSError:
+        pass
+
+    print()
     svc = service.describe()
     if svc["installed"]:
         state = "실행 중 (pid %s)" % svc["pid"] if svc["pid"] else (
@@ -160,6 +172,82 @@ def cmd_consent(args) -> int:
         cfg.save()
         print("동의를 철회하고 관련 기능도 껐다 → %s" % cfg.path)
     return 0
+
+
+# ---------------------------------------------------------------- investigate
+def cmd_investigate(args) -> int:
+    cfg = _cfg(args)
+    store = _store(args, cfg)
+    conf = cfg.data.get("investigate") or {}
+
+    if args.action == "rules":
+        if args.set:
+            block = dict(conf)
+            rules = dict(block.get("open_on") or {})
+            for item in args.set:
+                if "=" not in item:
+                    print("형식은 키=값1,값2 이다: %s" % item, file=sys.stderr)
+                    return 2
+                key, _, raw = item.partition("=")
+                key = key.strip()
+                if key == "include_attributed":
+                    rules[key] = raw.strip().lower() in ("1", "true", "y", "yes", "예")
+                else:
+                    rules[key] = [x.strip() for x in raw.split(",") if x.strip()]
+            block["open_on"] = rules
+            cfg.data["investigate"] = block
+            cfg.save()
+            print("조사를 여는 기준을 바꿨다 → %s" % cfg.path)
+        print()
+        print("지금 기준:")
+        print("  %s" % investigate.describe_rules(cfg.data.get("investigate")))
+        print()
+        print("바꾸는 법 (예):")
+        print("  netmon.sh investigate rules --set severities=high")
+        print("  netmon.sh investigate rules --set kinds=GW_MAC_CHANGED,DUPLICATE_IP")
+        print("  netmon.sh investigate rules --set include_attributed=yes")
+        print()
+        print("조사가 열린 뒤에는 조사 자신의 기준이 쓰인다. 그 기준은 조사 중에")
+        print("바뀌며, 바뀔 때마다 이유와 함께 기록에 남는다.")
+        return 0
+
+    state = store.load_state()
+    invs = investigate.Investigator.load(state)
+    if args.action == "list":
+        if not invs:
+            print("조사 기록 없음 (%s)" % store.dir)
+            return 1
+        for inv in invs:
+            mark = "진행" if inv.open else ("중단" if inv.status == "abandoned" else "완료")
+            print("[%s] %-14s %s  %d주기  계기=%s"
+                  % (mark, inv.kind, inv.id, inv.cycles, inv.trigger))
+            if inv.verdict:
+                print("       결론: %s (%s)" % (inv.verdict, inv.confidence))
+        cd = state.get("investigation_cooldown") or {}
+        if cd:
+            print()
+            print("냉각 중: %s" % ", ".join("%s(%d주기)" % (k, v) for k, v in cd.items()))
+        return 0
+
+    if args.action == "show":
+        target = next((i for i in invs if i.id == args.id or i.kind == args.id), None)
+        if target is None:
+            print("찾을 수 없다: %s" % args.id, file=sys.stderr)
+            return 1
+        print("조사 %s (%s)" % (target.id, target.kind))
+        print("  계기    %s" % target.trigger)
+        print("  시작    %s   주기 %d" % (target.opened_at, target.cycles))
+        print("  상태    %s" % target.status)
+        if target.verdict:
+            print("  결론    %s (%s)" % (target.verdict, target.confidence))
+        print("  기준    %s" % json.dumps(target.criteria, ensure_ascii=False))
+        print("  경과")
+        for e in target.evidence:
+            extra = {k: v for k, v in e.items() if k not in ("ts", "what")}
+            print("    %s  %-16s %s" % (e.get("ts", "")[11:19], e.get("what", ""),
+                                        json.dumps(extra, ensure_ascii=False) if extra else ""))
+        return 0
+    return 2
 
 
 # ---------------------------------------------------------------- setup
@@ -395,7 +483,11 @@ def cmd_run(args) -> int:
                 print("%s  [%s/%s] %s%s" % (obs.ts[11:19], f.axis, f.severity, f.summary, tag))
             if args.count and n >= args.count:
                 break
-            time.sleep(max(0.0, interval - (time.time() - start)))
+            wait = eng.effective_interval(interval)
+            if wait != interval and n % 10 == 1:
+                print("%s  조사 %d건 진행 중 — 측정 간격을 %.0f초로 줄인다"
+                      % (obs.ts[11:19], eng.needs.get("open", 0), wait))
+            time.sleep(max(0.0, wait - (time.time() - start)))
     except KeyboardInterrupt:
         print()
     print("%d주기 기록함 → %s" % (n, store.dir))
@@ -487,6 +579,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--enable", action="store_true", help="동의와 함께 관련 기능도 켠다")
     c.add_argument("--note", help="기록에 남길 메모")
     c.set_defaults(func=cmd_consent)
+
+    iv = sub.add_parser("investigate", help="이어지는 조사 보기와 기준 조정")
+    iv.add_argument("action", choices=["list", "show", "rules"])
+    iv.add_argument("id", nargs="?", help="show 에 쓸 조사 id 또는 종류")
+    iv.add_argument("--set", action="append", metavar="키=값",
+                    help="rules 에 쓸 기준 변경 (여러 번 쓸 수 있다)")
+    iv.set_defaults(func=cmd_investigate)
 
     st = sub.add_parser("setup", help="처음 켤 때의 설정 마법사")
     st.add_argument("--defaults", action="store_true",

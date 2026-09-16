@@ -69,6 +69,16 @@ def render(day: str, events: List[Dict[str, Any]], samples_count: int = 0,
             for e in group:
                 lines.append(_fmt_event(e))
 
+    invs = [e for e in events if e.get("kind", "").startswith("INVESTIGATION_")]
+    if invs:
+        lines.append("")
+        lines.append("-- 조사 --")
+        lines.append("   유의미한 신호가 잡히면 결론이 날 때까지 계속 본다.")
+        for e in invs:
+            lines.append("    %s  %-26s %s" % (e.get("ts", "")[11:19],
+                                               e.get("kind", "")[len("INVESTIGATION_"):],
+                                               e.get("summary", "")))
+
     if s["suppressed"]:
         lines.append("")
         lines.append("-- 사용자 행동·환경으로 설명되어 억제된 판정 (%d건) --"

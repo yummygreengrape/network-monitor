@@ -38,7 +38,26 @@ sudo를 쓰지 않고, 외부로 요청을 보내지 않고, 상시 실행으로
 ./netmon.sh report --redact  식별자를 가려서 출력 (남에게 보낼 때)
 ./netmon.sh location setup   위치 권한 헬퍼를 만들고 권한 요청 (evil twin 탐지)
 ./netmon.sh service install  항상 켜 두기 (로그인할 때 자동 시작)
+./netmon.sh investigate list 이어지는 조사 보기
 ```
+
+## 유의미한 신호는 계속 조사합니다
+
+"게이트웨이 MAC이 바뀌었다"는 확정이지만, 그것이 공격인지 접속점 교체인지는
+**그 다음에 일어나는 일**로만 갈립니다. 유의미한 신호가 잡히면 조사를 열고,
+더 자주 측정하면서 결론이 날 때까지 봅니다.
+
+무엇을 유의미하다고 볼지는 바꿀 수 있고, **조사가 스스로도 바꿉니다.** MAC
+변경에 DHCP 변조가 겹치면 감시 범위를 넓히고, VPN 끊김이 되풀이되면 무선 구간
+품질까지 함께 봅니다. 기준이 바뀔 때마다 이유와 이전·이후 값이 기록에 남습니다.
+
+```
+netmon.sh investigate rules                        지금 기준 보기
+netmon.sh investigate rules --set severities=high  좁히기
+netmon.sh investigate show <id>                    기준이 어떻게 움직였는지
+```
+
+자세한 것은 [docs/detections.md](docs/detections.md)의 "이어지는 조사"에 있습니다.
 
 ## 항상 켜 두기
 

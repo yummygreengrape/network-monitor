@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import baseline, vpn
+from . import baseline, investigate, vpn
 from .collect import arp, dhcp, dns, iface, link, route, wifi
 from .config import Config
 from .detect import Context, attributions_for, network_key, run_all
@@ -35,6 +35,9 @@ class Engine:
         self.prev: Optional[Observation] = None
         self.prev_wall: Optional[float] = None
         self.state: Dict[str, Any] = store.load_state()
+        self.investigator = investigate.Investigator(cfg.data.get("investigate"))
+        # 조사가 요청한 측정 변화. 다음 주기에 반영된다.
+        self.needs: Dict[str, Any] = {}
 
     # --- 수집 ---
     def observe(self) -> Observation:
@@ -68,7 +71,8 @@ class Engine:
         # 헬퍼 앱 호출은 0.5초쯤 걸려서 매 주기 부르지 않는다. 다만 첫 주기이거나
         # L2·DHCP 가 흔들린 직후에는 바로 다시 읽는다 — evil twin 으로 옮겨 가는
         # 순간이 정확히 그 순간이기 때문이다.
-        ctx["wifi_force_refresh"] = self._wifi_changed_hint(obs)
+        ctx["wifi_force_refresh"] = (self._wifi_changed_hint(obs)
+                                     or bool(self.needs.get("open")))
         step(wifi, "wifi")
 
         ctx["resolver_external"] = _external_resolver(obs.data.get("dns", {}))
@@ -112,6 +116,12 @@ class Engine:
             network=network_key(obs),
         )
         findings = run_all(self.prev, obs, ctx)
+
+        # 조사는 판정 뒤에 돈다. 이번 주기의 판정을 증거로 쓰기 때문이다.
+        extra, self.needs = self.investigator.run(
+            self.prev, obs, ctx, findings, self.state)
+        findings.extend(extra)
+
         self.state = baseline.update_baselines(self.state, obs)
         self.state["network"] = ctx.network
         self.state["last_ts"] = obs.ts
@@ -127,6 +137,11 @@ class Engine:
         self.prev, self.prev_wall = obs, now
         return obs, findings
 
+    def effective_interval(self, configured: float) -> float:
+        """조사 중에는 더 자주 본다. 조사가 요청한 값과 설정값 중 짧은 쪽."""
+        want = self.needs.get("interval")
+        return min(float(configured), float(want)) if want else float(configured)
+
     def persist(self, obs: Observation, findings: List[Finding]) -> None:
         self.store.write_sample(obs)
         self.store.write_findings(obs.ts, findings)
@@ -140,12 +155,16 @@ def replay(cfg: Config, observations: List[Observation]) -> List[Tuple[Observati
     """
     import datetime
 
+    # 저장소 없이 판정만 돌린다. __init__ 을 우회하므로 여기서 초기화하는 것을
+    # 빠뜨리면 조용히 AttributeError 가 난다 — 실제로 조사 계층에서 그랬다.
     eng = Engine.__new__(Engine)
     eng.cfg = cfg
     eng.store = None
     eng.prev = None
     eng.prev_wall = None
     eng.state = {}
+    eng.investigator = investigate.Investigator(cfg.data.get("investigate"))
+    eng.needs = {}
 
     out = []
     for obs in observations:

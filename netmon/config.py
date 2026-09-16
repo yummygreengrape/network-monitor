@@ -49,6 +49,9 @@ DEFAULTS: Dict[str, Any] = {
     # 주기마다 쏘는 ping 개수. macOS 는 패킷 간격이 1초 고정이라 2 이상이면
     # 한 주기가 그만큼 길어진다.
     "ping_count": 1,
+    # 유의미한 신호가 잡히면 조사를 이어 간다. 무엇을 유의미하다고 볼지는
+    # investigate.open_on 으로 바꾼다 (netmon/investigate/triggers.py 참조).
+    "investigate": {"enabled": True, "max_open": 3, "keep_closed": 20, "open_on": {}},
     "consents": {},
     "features": {
         # VPN 감시는 사람마다 쓰는지조차 다르므로 기본은 꺼짐.
