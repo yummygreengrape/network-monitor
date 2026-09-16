@@ -10,16 +10,14 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .. import messages as msg
+from ..baseline import RTT_SUSTAIN_CYCLES
 from ..liveness import ARP, ICMP, LINK, evaluate, signals
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, QUALITY, SUSPECT,
                      Finding, Observation)
 
 FEATURE = "detect.quality"
 
-# 기준선 대비 이 배수를 넘으면 급변으로 본다. 절대 하한을 같이 둬서
-# 1ms 가 4ms 가 된 것을 사건으로 만들지 않는다.
-RTT_SPIKE_FACTOR = 4.0
-RTT_SPIKE_MIN_MS = 50.0
+# 왕복 시간 급변 기준은 baseline 이 갖는다. 연속 횟수를 거기서 세기 때문이다.
 FAIL_STREAK_ALERT = 2
 
 METHOD_LABEL = {ARP: "ARP 해석", ICMP: "ICMP 응답", LINK: "링크 상태"}
@@ -76,17 +74,19 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
     # --- 지연 급변 ---
     # ICMP 를 쓸 수 있는 네트워크에서만 의미가 있다.
-    if method == ICMP and alive:
+    # 한 주기만 보고 알리면 무선 구간의 정상적인 흔들림이 전부 사건이 된다.
+    # 연속으로 높을 때 한 번만 알린다.
+    if method == ICMP and alive and int(ctx.state.get("rtt_high_run", 0)) == RTT_SUSTAIN_CYCLES:
         rtt = cur.get("link", "gateway_rtt_ms")
         base = ctx.state.get("rtt_ewma")
-        if rtt is not None and base and rtt > max(RTT_SPIKE_MIN_MS, base * RTT_SPIKE_FACTOR):
-            out.append(Finding(
-                axis=QUALITY, kind="LATENCY_SPIKE",
-                confidence=SUSPECT, severity=LOW,
-                summary=msg.LATENCY_SPIKE % (rtt, base),
-                evidence={"rtt_ms": rtt, "baseline_ms": round(base, 1), "source": "ping"},
-                attribution=attribution,
-            ))
+        out.append(Finding(
+            axis=QUALITY, kind="LATENCY_SPIKE",
+            confidence=SUSPECT, severity=LOW,
+            summary=msg.LATENCY_SPIKE_SUSTAINED % (rtt, base, RTT_SUSTAIN_CYCLES),
+            evidence={"rtt_ms": rtt, "baseline_ms": round(base, 1),
+                      "cycles": RTT_SUSTAIN_CYCLES, "source": "ping"},
+            attribution=attribution,
+        ))
 
     # --- 측정이 멈춘 구간 ---
     if ctx.has("sleep"):

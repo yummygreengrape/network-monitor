@@ -123,7 +123,7 @@ class Engine:
             self.prev, obs, ctx, findings, self.state)
         findings.extend(extra)
 
-        self.state = baseline.update_baselines(self.state, obs)
+        self.state = baseline.update_baselines(self.state, obs, elapsed, interval)
         self.state["network"] = ctx.network
         self.state["last_ts"] = obs.ts
         return findings

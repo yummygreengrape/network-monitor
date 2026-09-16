@@ -12,10 +12,14 @@ from ..model import CONFIRMED, HIGH, LOW, MEDIUM, POSSIBLE, SECURITY, SUSPECT, F
 
 FEATURE = "detect.l2"
 
-# ARP 응답 수신량이 이 배수 이상으로 뛰면 이상으로 본다. 정상 변동과
-# 구분하려고 절대 하한도 같이 둔다.
+# ARP 응답 수신이 평소의 이 배수를 넘으면 이상으로 본다. 정상 변동과
+# 구분하려고 절대 하한(초당 건수)도 같이 둔다.
+#
+# **초당 건수로 비교한다.** 누적 카운터의 증가분을 그대로 쓰면 주기 사이가
+# 벌어졌을 때 그만큼 커진다 — 잠자기로 939초가 벌어진 구간에서 실제로
+# 거짓 경보가 났다. 그때 초당 건수는 평소의 12분의 1이었다.
 REPLY_SPIKE_FACTOR = 8.0
-REPLY_SPIKE_MIN = 60
+REPLY_SPIKE_MIN_RATE = 10.0
 
 
 def _gw_mac(obs: Observation) -> Optional[str]:
@@ -62,15 +66,20 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     # --- ARP 응답 폭주 ---
     p_rep = prev.get("arp", "replies_received")
     c_rep = cur.get("arp", "replies_received")
-    if isinstance(p_rep, int) and isinstance(c_rep, int) and c_rep >= p_rep:
-        delta = c_rep - p_rep
+    # 측정이 크게 벌어진 주기는 건너뛴다. 그 구간의 카운터 증가분은 무엇을
+    # 뜻하는지 알 수 없다 — 자는 동안 인터페이스가 내려갔을 수도 있다.
+    if (isinstance(p_rep, int) and isinstance(c_rep, int) and c_rep >= p_rep
+            and not ctx.has("sleep")):
+        span = float(ctx.elapsed) if ctx.elapsed and ctx.elapsed > 0 else float(ctx.interval)
+        rate = (c_rep - p_rep) / span
         base = ctx.state.get("arp_reply_rate")
-        if base and delta > max(REPLY_SPIKE_MIN, base * REPLY_SPIKE_FACTOR):
+        if base and rate > max(REPLY_SPIKE_MIN_RATE, base * REPLY_SPIKE_FACTOR):
             out.append(Finding(
                 axis=SECURITY, kind="ARP_REPLY_SPIKE",
                 confidence=SUSPECT, severity=MEDIUM,
-                summary=msg.ARP_REPLY_SPIKE % (delta / base, delta, base),
-                evidence={"delta": delta, "baseline": round(base, 2),
+                summary=msg.ARP_REPLY_SPIKE_RATE % (rate, base),
+                evidence={"replies": c_rep - p_rep, "seconds": round(span, 1),
+                          "per_second": round(rate, 3), "baseline_per_second": round(base, 3),
                           "source": "netstat -s -p arp"},
                 attribution=ctx.quality_attribution() if ctx.moved else None,
             ))

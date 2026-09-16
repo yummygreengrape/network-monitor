@@ -87,7 +87,10 @@ class L2Identity(Playbook):
             "watch_kinds": list(self.CORROBORATING),
             "watch_mac": True,
             "baseline_mac": unwrap(cur.get("arp", "gateway_mac")),
-            "changes_seen": 1,
+            # 이 조사가 MAC 변경으로 열렸는가. ARP 급증이나 IP 충돌로 열렸다면
+            # 변경을 본 적이 없으므로 "교체됐다"고 말하면 안 된다.
+            "mac_changed": finding.kind == "GW_MAC_CHANGED",
+            "changes_seen": 1 if finding.kind == "GW_MAC_CHANGED" else 0,
             "stable_for": 0,
             "corroborated": [],
             "seen_macs": [unwrap(cur.get("arp", "gateway_mac"))],
@@ -103,6 +106,7 @@ class L2Identity(Playbook):
         if crit.get("watch_mac") and mac:
             if mac != crit.get("baseline_mac"):
                 crit["changes_seen"] = int(crit.get("changes_seen", 0)) + 1
+                crit["mac_changed"] = True
                 crit["stable_for"] = 0
                 crit["baseline_mac"] = mac
                 seen = crit.setdefault("seen_macs", [])
@@ -150,10 +154,14 @@ class L2Identity(Playbook):
             return out
 
         if int(crit.get("stable_for", 0)) >= self.STABLE_CYCLES:
-            inv.close(ts, CONCLUDED, msg.INV_L2_STABLE_VERDICT, POSSIBLE)
-            out.append(self._concluded(
-                inv, SECURITY, LOW, POSSIBLE,
-                msg.INV_L2_STABLE % crit["stable_for"]))
+            if crit.get("mac_changed"):
+                inv.close(ts, CONCLUDED, msg.INV_L2_STABLE_VERDICT, POSSIBLE)
+                summary = msg.INV_L2_STABLE % crit["stable_for"]
+            else:
+                # 애초에 MAC 이 바뀐 적이 없다. 접속점 교체를 주장할 근거가 없다.
+                inv.close(ts, CONCLUDED, msg.INV_L2_NO_CHANGE_VERDICT, POSSIBLE)
+                summary = msg.INV_L2_NO_CHANGE % crit["stable_for"]
+            out.append(self._concluded(inv, SECURITY, LOW, POSSIBLE, summary))
         return out
 
     @staticmethod

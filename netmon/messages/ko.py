@@ -288,3 +288,9 @@ CLI_AGENT_FAILED = "등록에 실패했습니다: %s"
 CLI_AGENT_REMOVED = "해제했습니다."
 CLI_AGENT_NOT_INSTALLED = "등록되어 있지 않았습니다."
 CLI_AGENT_RECORDS_KEPT = "기록은 %s 에 그대로 남아 있습니다."
+
+# ─────────────────────────────────────────── 로그 실측으로 드러난 항목
+ARP_REPLY_SPIKE_RATE = "ARP 응답 수신이 초당 %.1f건으로 증가 (평소 %.1f건)."
+LATENCY_SPIKE_SUSTAINED = "게이트웨이 왕복 시간이 %.0fms 로 크게 증가함 (평균 %.0fms, %d주기 연속)."
+INV_L2_NO_CHANGE = "첫 홉의 정체는 %d주기 동안 그대로 유지됨. 스푸핑 흔적 없음."
+INV_L2_NO_CHANGE_VERDICT = "첫 홉 정체 변화 없음"

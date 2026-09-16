@@ -294,3 +294,9 @@ CLI_AGENT_FAILED = "Registration failed: %s"
 CLI_AGENT_REMOVED = "Removed."
 CLI_AGENT_NOT_INSTALLED = "It was not registered."
 CLI_AGENT_RECORDS_KEPT = "Records are still in %s."
+
+# ─────────────────────────────────────────── Found by reading real logs
+ARP_REPLY_SPIKE_RATE = "ARP replies arriving at %.1f per second (usually %.1f)."
+LATENCY_SPIKE_SUSTAINED = "Gateway round-trip time rose to %.0fms (average %.0fms, %d cycles running)."
+INV_L2_NO_CHANGE = "First hop identity held unchanged for %d cycles. No sign of spoofing."
+INV_L2_NO_CHANGE_VERDICT = "first hop identity unchanged"

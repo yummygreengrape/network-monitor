@@ -15,6 +15,22 @@ NAME = "arp"
 INCOMPLETE = ("(incomplete)", "(none)", "incomplete")
 
 
+def normalize_mac(raw: str) -> str:
+    """MAC 을 두 자리씩 채운 표기로 맞춘다.
+
+    macOS `arp` 는 각 옥텟의 앞 0 을 떼고 출력한다 — `00:00:5e:00:53:01` 이
+    `0:0:5e:0:53:1` 로 나온다. 그대로 두면 다른 데이터원에서 온 값과 비교할 수
+    없고, 누출 검사의 MAC 패턴에도 걸리지 않아 저장소로 새어 들어갈 수 있다.
+    """
+    parts = raw.strip().lower().split(":")
+    if len(parts) != 6 or not all(p and len(p) <= 2 for p in parts):
+        return raw.strip().lower()
+    try:
+        return ":".join("%02x" % int(p, 16) for p in parts)
+    except ValueError:
+        return raw.strip().lower()
+
+
 def parse_arp_table(text: str) -> List[Dict[str, Any]]:
     """`arp -an -x` 출력을 파싱한다.
 
@@ -34,7 +50,7 @@ def parse_arp_table(text: str) -> List[Dict[str, Any]]:
             continue
         rows.append({
             "ip": ip,
-            "mac": None if mac in INCOMPLETE else mac.lower(),
+            "mac": None if mac in INCOMPLETE else normalize_mac(mac),
             "iface": netif,
             "expire_o": parts[2],
             "expire_i": parts[3],
