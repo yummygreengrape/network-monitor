@@ -56,6 +56,18 @@ class Context:
     def moved(self) -> bool:
         return self.has(NETWORK_CHANGE) or self.has(IFACE_CHANGE)
 
+    @property
+    def settling(self) -> Optional[str]:
+        """흔들림 직후의 안정화 창 안인가. 그렇다면 그 사유.
+
+        원인과 결과가 같은 주기에 떨어지지 않으므로, 창 안에서 일어난 파생
+        변화는 그 흔들림으로 설명될 수 있다. **설명될 수 있다는 것이지
+        무조건 억제한다는 뜻은 아니다** — 판정기가 값의 앞뒤까지 확인한다.
+        """
+        if self.state.get("settle_left_s"):
+            return self.state.get("settle_reason")
+        return None
+
     def quality_attribution(self) -> Optional[str]:
         """품질 판정에 붙일 억제 사유. 잠자기는 품질만 설명한다."""
         for a in (SLEEP, IFACE_CHANGE, NETWORK_CHANGE):

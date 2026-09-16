@@ -274,3 +274,99 @@ class TestSingleVpnDropConcludes(unittest.TestCase):
         self.assertEqual(done[0].verdict, msg.INV_VPN_VERDICT_SINGLE)
         self.assertLess(done[0].cycles, VpnDrop.max_cycles,
                         "예산을 다 쓰기 전에 끝나야 한다")
+
+
+class TestLaggedConsequences(unittest.TestCase):
+    """2026-09-16 06:54 의 WARP 재연결.
+
+    실제 관측:
+      06:54:01  warp=connecting  리졸버 외부   [VPN 상태 변화]
+      06:54:06  warp=connecting  리졸버 루프백 [리졸버만 변화]  ← high 로 올라감
+      06:54:10  warp=connected
+
+    WARP 는 connecting 인 채로 리졸버를 설치한다. 상태 전환과 그 결과가 서로
+    다른 주기에 떨어지므로, 같은 주기만 보는 억제는 놓친다.
+    """
+
+    OFFERED = ("192.0.2.53",)
+    LOOPBACK = ("127.0.2.2",)
+
+    def _judge_sequence(self, samples):
+        from netmon import baseline
+        state = {"icmp_gw": True}
+        prev = samples[0]
+        out = []
+        for cur in samples[1:]:
+            attrs = attributions_for(prev, cur, 5.0, 5.0)
+            state = baseline.update_counters(state, cur, attrs, 5.0, 5.0)
+            ctx = Context(elapsed=5.0, interval=5.0, features=ON, state=state,
+                          attributions=attrs, network=network_key(cur))
+            out.append(run_all(prev, cur, ctx))
+            state = baseline.update_baselines(state, cur, 5.0, 5.0)
+            prev = cur
+        return out
+
+    def test_resolver_returning_one_cycle_after_the_transition_is_attributed(self):
+        seq = [
+            obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state("disconnected"),
+                resolvers=self.OFFERED, via_loopback=False, dns=self.OFFERED),
+            obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("connecting"),
+                resolvers=self.OFFERED, via_loopback=False, dns=self.OFFERED),
+            obs(ts="2026-01-01T00:00:10Z", vpn=vpn_state("connecting"),
+                resolvers=self.LOOPBACK, via_loopback=True, dns=self.OFFERED),
+        ]
+        lagged = self._judge_sequence(seq)[-1]
+        f = by_kind(lagged, "RESOLVER_CHANGED")
+        self.assertIsNotNone(f)
+        self.assertIsNotNone(f.attribution,
+                             "전환 다음 주기에 온 결과도 설명돼야 한다")
+        self.assertEqual(f.severity, "low")
+
+    def test_a_third_party_resolver_in_the_window_is_still_high(self):
+        """안정화 창 안이라도 값의 앞뒤가 맞지 않으면 억제하지 않는다."""
+        seq = [
+            obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state("disconnected"),
+                resolvers=self.OFFERED, via_loopback=False, dns=self.OFFERED),
+            obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("connecting"),
+                resolvers=self.OFFERED, via_loopback=False, dns=self.OFFERED),
+            obs(ts="2026-01-01T00:00:10Z", vpn=vpn_state("connecting"),
+                resolvers=("192.0.2.99",), via_loopback=False, dns=self.OFFERED),
+        ]
+        f = by_kind(self._judge_sequence(seq)[-1], "RESOLVER_CHANGED")
+        self.assertIsNone(f.attribution)
+        self.assertEqual(f.severity, "high")
+
+    def test_the_window_closes(self):
+        """창이 영원히 열려 있으면 그 뒤의 진짜 변조도 묻힌다."""
+        from netmon import baseline
+        state = baseline.update_counters({}, obs(), ["vpn_change"], 5.0, 5.0)
+        self.assertTrue(state.get("settle_left_s"))
+        for _ in range(int(baseline.SETTLE_SECONDS / 5) + 1):
+            state = baseline.update_counters(state, obs(), [], 5.0, 5.0)
+        self.assertIsNone(state.get("settle_left_s"))
+
+
+class TestSecurityKnownFromTheCycleBefore(unittest.TestCase):
+    """잠에서 깬 직후 Wi-Fi 가 아직 붙지 않아 "신뢰 여부 판단 불가" 가 나왔다.
+
+    직전 주기에는 WPA2_PSK 인 것을 알고 있었다.
+    """
+
+    def test_falls_back_to_the_last_known_security_on_the_same_interface(self):
+        prev = obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state("connected"),
+                   security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("disconnected"),
+                  iface_kind="wifi")
+        cur.data["wifi"] = {"applicable": False, "reason": "아직 미접속"}
+        f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
+        self.assertIsNotNone(f)
+        self.assertEqual(f.severity, "medium")
+        self.assertNotIn("판단 불가", f.summary)
+
+    def test_a_different_interface_does_not_inherit(self):
+        prev = obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state("connected"),
+                   security="WPA2_PSK", iface="en0")
+        cur = obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state("disconnected"),
+                  iface="en1", iface_kind="ethernet")
+        f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
+        self.assertIn("판단 불가", f.summary)

@@ -31,7 +31,9 @@ def explained_by_vpn(prev: Optional[Observation], cur: Observation, ctx) -> bool
 
     둘 중 어느 쪽도 아니면 억제하지 않는다.
     """
-    if not ctx.has("vpn_change"):
+    # 같은 주기의 전환뿐 아니라 그 직후의 안정화 창도 본다. WARP 는
+    # connecting 인 채로 리졸버를 설치하므로 전환과 결과가 다른 주기에 온다.
+    if not (ctx.has("vpn_change") or ctx.settling):
         return False
     now = [str(unwrap(r)) for r in (cur.get("dns", "resolvers") or [])]
     if not now:

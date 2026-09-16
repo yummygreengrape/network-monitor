@@ -49,12 +49,12 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     # --- IPv4 기본 경로 ---
     p4, c4 = _routes(prev, "default4"), _routes(cur, "default4")
     route_attribution = attribution
-    if route_attribution is None and ctx.has("vpn_change"):
+    if route_attribution is None and (ctx.has("vpn_change") or ctx.settling):
         # VPN 이 오르내리면 터널 경로가 생겼다 사라진다. 그 경로만 달라졌다면
         # VPN 전환으로 설명된다. 물리 경로가 함께 바뀌었다면 설명되지 않는다.
         changed = (p4 ^ c4)
         if changed and all(_is_tunnel_route(r) for r in changed):
-            route_attribution = "vpn_change"
+            route_attribution = "vpn_change" if ctx.has("vpn_change") else ctx.settling
     if p4 and c4 and p4 != c4:
         out.append(Finding(
             axis=SECURITY, kind="DEFAULT_ROUTE_CHANGED",

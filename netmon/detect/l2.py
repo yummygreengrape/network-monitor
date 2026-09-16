@@ -81,7 +81,10 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                 evidence={"replies": c_rep - p_rep, "seconds": round(span, 1),
                           "per_second": round(rate, 3), "baseline_per_second": round(base, 3),
                           "source": "netstat -s -p arp"},
-                attribution=ctx.quality_attribution() if ctx.moved else None,
+                # 네트워크에 새로 붙으면 ARP 를 몰아친다. 흔들림 직후의
+                # 폭주는 그 과정으로 설명된다.
+                attribution=(ctx.quality_attribution() if ctx.moved
+                             else ctx.settling),
             ))
 
     # --- 한 MAC 이 여러 IP 를 쥐고 있음 ---

@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .model import Observation
 
@@ -24,6 +24,13 @@ RTT_SPIKE_FACTOR = 4.0
 RTT_SPIKE_MIN_MS = 50.0
 RTT_SUSTAIN_CYCLES = 3
 
+# 잠자기·네트워크 이동·VPN 전환 직후에는 리졸버·경로·ARP 가 뒤따라 바뀐다.
+# **결과는 원인보다 늦게 온다.** 실측에서 WARP 가 connecting 인 채로 리졸버를
+# 설치했고, 상태 전환과 리졸버 변화가 서로 다른 주기에 떨어졌다. 같은 주기만
+# 보는 억제는 그것을 놓친다.
+DISRUPTIONS = ("sleep", "network_change", "iface_change", "vpn_change")
+SETTLE_SECONDS = 45.0
+
 
 def rtt_elevated(rtt: Optional[float], base: Optional[float]) -> bool:
     if rtt is None or not base:
@@ -33,7 +40,7 @@ def rtt_elevated(rtt: Optional[float], base: Optional[float]) -> bool:
 # 네트워크가 바뀌면 기준선을 버린다. 이전 네트워크의 정상값을 새 네트워크에
 # 적용하면 첫 몇 분이 통째로 오탐이 된다.
 VOLATILE_KEYS = ("rtt_ewma", "rtt_high_run", "arp_reply_rate", "gw_fail_streak",
-                 "arp_replies_last",
+                 "arp_replies_last", "settle_left_s", "settle_reason",
                  # 게이트웨이가 ICMP 에 응답하는지는 네트워크마다 다르다.
                  "icmp_gw", "cycles_on_network", "_liveness_decided", "icmp_fail_run")
 
@@ -51,7 +58,10 @@ def reset_for_new_network(state: Dict[str, Any]) -> Dict[str, Any]:
     return new
 
 
-def update_counters(state: Dict[str, Any], cur: Observation) -> Dict[str, Any]:
+def update_counters(state: Dict[str, Any], cur: Observation,
+                    attributions: Optional[List[str]] = None,
+                    elapsed: Optional[float] = None,
+                    interval: float = 5.0) -> Dict[str, Any]:
     """판정 전에 갱신한다. 이번 주기를 포함한 값이어야 하는 것들.
 
     연속 실패 횟수는 ICMP 가 아니라 liveness 가 고른 방법으로 센다. 그러지
@@ -60,6 +70,19 @@ def update_counters(state: Dict[str, Any], cur: Observation) -> Dict[str, Any]:
     from .liveness import calibrate, evaluate
 
     new, decided = calibrate(state, cur)
+
+    # 흔들림이 있었으면 창을 다시 연다. 없으면 흘려보낸다.
+    step = float(elapsed) if elapsed and elapsed > 0 else float(interval)
+    if any(a in (attributions or []) for a in DISRUPTIONS):
+        new["settle_left_s"] = SETTLE_SECONDS
+        new["settle_reason"] = next(a for a in DISRUPTIONS if a in (attributions or []))
+    else:
+        left = float(state.get("settle_left_s", 0.0)) - step
+        if left > 0:
+            new["settle_left_s"] = round(left, 1)
+        else:
+            new.pop("settle_left_s", None)
+            new.pop("settle_reason", None)
     new["_liveness_decided"] = decided
 
     # 지연이 이만큼 연속으로 높았는가. 판정 시점에 이번 주기가 포함돼야 하므로

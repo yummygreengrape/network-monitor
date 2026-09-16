@@ -39,15 +39,25 @@ def _user_action(reason: Optional[str]) -> bool:
     return any(h in low for h in USER_ACTION_HINTS)
 
 
-def _network_is_untrusted(cur: Observation) -> Optional[bool]:
+def _network_is_untrusted(cur: Observation,
+                          prev: Optional[Observation] = None) -> Optional[bool]:
     """이 네트워크에서 보호가 사라지는 것이 얼마나 위험한가.
 
     None 은 "모른다"다. 유선이거나 암호화 방식을 못 읽은 경우다.
     """
     wifi = cur.get("wifi") or {}
-    if not wifi.get("applicable"):
-        return None
-    sec = (wifi.get("security") or "").lower()
+    sec = (wifi.get("security") or "") if wifi.get("applicable") else ""
+
+    # 잠에서 깬 직후에는 Wi-Fi 가 아직 붙지 않아 값이 비어 있다. 같은
+    # 인터페이스라면 직전에 알던 값을 쓴다 — 모르는 것과 잠깐 못 읽은 것은
+    # 다르다. 실측에서 이 때문에 "신뢰 여부 판단 불가" 가 나왔다.
+    if not sec and prev is not None:
+        if prev.get("iface", "primary") == cur.get("iface", "primary"):
+            pw = prev.get("wifi") or {}
+            if pw.get("applicable"):
+                sec = pw.get("security") or ""
+
+    sec = sec.lower()
     if not sec:
         return None
     # 접미사 없는 "WPA2" 도 사실상 Personal 이다. 개인별 자격증명이라는 근거가
@@ -128,7 +138,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
             # 보호가 사라진 것은 별개 사건이다. 사용자가 직접 끊었어도
             # "지금 보호받고 있지 않다"는 사실은 남는다.
-            untrusted = _network_is_untrusted(cur)
+            untrusted = _network_is_untrusted(cur, prev)
             if untrusted is not False:
                 out.append(Finding(
                     axis=SECURITY, kind="VPN_PROTECTION_LOST",

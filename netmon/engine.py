@@ -105,7 +105,8 @@ class Engine:
         if changed:
             self.state = baseline.reset_for_new_network(self.state)
 
-        self.state = baseline.update_counters(self.state, obs)
+        self.state = baseline.update_counters(self.state, obs, attributions,
+                                              elapsed, interval)
 
         ctx = Context(
             elapsed=elapsed,
