@@ -88,7 +88,7 @@ class TestDisconnect(unittest.TestCase):
         cur = obs(vpn=vpn_state("disconnected"), iface_kind="ethernet")
         f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
         self.assertIsNotNone(f)
-        self.assertIn("판단하지 못했다", f.summary)
+        self.assertIn("판단하지 못했습니다", f.summary)
         self.assertEqual(f.severity, "low")
 
 

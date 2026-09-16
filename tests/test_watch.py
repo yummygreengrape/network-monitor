@@ -49,16 +49,16 @@ class TestRender(unittest.TestCase):
     def test_marks_stale_data(self):
         """에이전트가 멈췄는데 오래된 화면을 그대로 보여 주면 안 된다."""
         fresh = self._render(last_sample=sample(ts="2026-01-01T00:00:57Z"))
-        self.assertNotIn("멈춘 듯", fresh)
+        self.assertNotIn("갱신이 멈췄습니다", fresh)
         stale = self._render(last_sample=sample(ts="2026-01-01T00:00:00Z"),
                              stale_after=30.0)
-        self.assertIn("멈춘 듯", stale)
+        self.assertIn("갱신이 멈췄습니다", stale)
 
     def test_stale_threshold_follows_the_interval(self):
         """30초 간격으로 도는 에이전트를 60초마다 멈췄다고 하면 계속 거짓말이 된다."""
         old = sample(ts="2026-01-01T00:00:00Z")   # 60초 전
-        self.assertIn("멈춘 듯", self._render(last_sample=old, stale_after=30.0))
-        self.assertNotIn("멈춘 듯", self._render(last_sample=old, stale_after=120.0))
+        self.assertIn("갱신이 멈췄습니다", self._render(last_sample=old, stale_after=30.0))
+        self.assertNotIn("갱신이 멈췄습니다", self._render(last_sample=old, stale_after=120.0))
 
     def test_says_when_no_investigation_is_open(self):
         self.assertIn("열린 조사 없음", self._render())
@@ -94,7 +94,7 @@ class TestRender(unittest.TestCase):
         self.assertIn("tailscale connected", out)
 
     def test_closing_the_window_does_not_stop_monitoring(self):
-        self.assertIn("닫아도 감시는 계속됩니다", self._render())
+        self.assertIn("창을 닫아도 감시는 계속됩니다", self._render())
 
 
 if __name__ == "__main__":

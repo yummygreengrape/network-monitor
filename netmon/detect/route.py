@@ -43,7 +43,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             axis=SECURITY, kind="DEFAULT_ROUTE_CHANGED",
             confidence=CONFIRMED,
             severity=LOW if attribution else HIGH,
-            summary="IPv4 기본 경로가 바뀌었다.",
+            summary="IPv4 기본 경로가 바뀌었습니다.",
             evidence={"prev": sorted(p4), "cur": sorted(c4), "source": "netstat -rn -f inet"},
             attribution=attribution,
         ))
@@ -60,7 +60,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                 axis=SECURITY, kind="IPV6_DEFAULT_ROUTE_APPEARED",
                 confidence=CONFIRMED,
                 severity=MEDIUM if attribution else HIGH,
-                summary="물리 인터페이스에 IPv6 기본 경로가 새로 생겼다. 같은 네트워크의 누군가가 "
+                summary="물리 인터페이스에 IPv6 기본 경로가 새로 생겼습니다. 같은 네트워크의 누군가가 "
                         "라우터 광고를 보냈을 수 있다 (rogue RA).",
                 evidence={"appeared": sorted(physical), "prev": sorted(p6),
                           "source": "netstat -rn -f inet6"},
@@ -75,7 +75,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             axis=SECURITY, kind="IPV6_ROUTER_APPEARED",
             confidence=SUSPECT,
             severity=LOW if attribution else MEDIUM,
-            summary="새 IPv6 라우터가 이웃 표에 나타났다 (%d개)." % len(new_routers),
+            summary="새 IPv6 라우터가 이웃 표에 나타났습니다 (%d개)." % len(new_routers),
             evidence={"new": [{"id": "ipv6", "v": a} for a in sorted(new_routers)],
                       "source": "ndp -rn"},
             attribution=attribution,
@@ -87,7 +87,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=INFO, kind="MULTIPLE_DEFAULT_ROUTES",
             confidence=CONFIRMED, severity="info",
-            summary="IPv4 기본 경로가 %d개다. VPN 이 켜졌을 때 정상적으로 나오는 모양이다." % n4,
+            summary="IPv4 기본 경로가 %d개입니다. VPN 이 켜져 있을 때 정상적으로 나오는 형태입니다." % n4,
             evidence={"routes": sorted(c4), "source": "netstat -rn -f inet"},
         ))
 

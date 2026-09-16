@@ -34,8 +34,8 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=INFO, kind="GATEWAY_ICMP_SILENT",
             confidence=CONFIRMED, severity=INFO_SEV,
-            summary="이 네트워크의 게이트웨이는 ICMP 에 응답하지 않는다. ARP 가 정상이므로 "
-                    "장애가 아니다. 도달성 판정을 ARP 기준으로 바꾼다.",
+            summary="이 네트워크의 게이트웨이는 ICMP 에 응답하지 않습니다. ARP 는 정상이므로 "
+                    "장애가 아닙니다. 도달성 판정을 ARP 기준으로 바꿉니다.",
             evidence={"cycles": ctx.state.get("cycles_on_network"),
                       "gateway_mac": cur.get("arp", "gateway_mac"),
                       "source": "ping + arp -an -x"},
@@ -44,7 +44,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=INFO, kind="GATEWAY_ICMP_OK",
             confidence=CONFIRMED, severity=INFO_SEV,
-            summary="게이트웨이가 ICMP 에 응답한다. 도달성과 지연을 ping 으로 판정한다.",
+            summary="게이트웨이가 ICMP 에 응답합니다. 도달성과 지연을 ping 으로 판정합니다.",
             evidence={"rtt_ms": cur.get("link", "gateway_rtt_ms"), "source": "ping"},
         ))
 
@@ -59,7 +59,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             out.append(Finding(
                 axis=QUALITY, kind="FIRST_HOP_UNREACHABLE",
                 confidence=CONFIRMED, severity=MEDIUM,
-                summary="첫 홉이 연속 %d회 죽어 있다 (%s 기준). 무선 구간 문제다."
+                summary="첫 홉이 연속 %d회 응답하지 않습니다 (%s 기준). 무선 구간 문제로 보입니다."
                         % (streak, METHOD_LABEL.get(method, method)),
                 evidence={"method": method, "streak": streak,
                           "signals": signals(cur),
@@ -70,7 +70,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=QUALITY, kind="FIRST_HOP_RECOVERED",
             confidence=CONFIRMED, severity=INFO_SEV,
-            summary="첫 홉이 돌아왔다 (%d회 실패 후, %s 기준)."
+            summary="첫 홉이 다시 응답합니다 (%d회 실패 후, %s 기준)."
                     % (streak, METHOD_LABEL.get(method, method)),
             evidence={"method": method, "streak": streak},
             attribution=attribution,
@@ -85,7 +85,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             out.append(Finding(
                 axis=QUALITY, kind="LATENCY_SPIKE",
                 confidence=SUSPECT, severity=LOW,
-                summary="게이트웨이 왕복 시간이 %.0fms 로 튀었다 (기준 %.0fms)." % (rtt, base),
+                summary="게이트웨이 왕복 시간이 %.0fms 로 크게 늘었습니다 (평소 %.0fms)." % (rtt, base),
                 evidence={"rtt_ms": rtt, "baseline_ms": round(base, 1), "source": "ping"},
                 attribution=attribution,
             ))
@@ -95,7 +95,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=INFO, kind="MEASUREMENT_GAP",
             confidence=CONFIRMED, severity=INFO_SEV,
-            summary="측정이 %.0f초 동안 멈췄다 (잠자기 또는 프로세스 정지)." % ctx.elapsed,
+            summary="측정이 %.0f초 동안 멈췄습니다 (잠자기 또는 프로세스 중단)." % ctx.elapsed,
             evidence={"elapsed_s": round(ctx.elapsed, 1), "interval_s": ctx.interval},
             attribution="sleep",
         ))

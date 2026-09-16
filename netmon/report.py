@@ -11,9 +11,9 @@ from typing import Any, Dict, Iterable, List, Optional
 from .model import CONFIRMED, POSSIBLE, QUALITY, SECURITY, SUSPECT
 
 CONF_LABEL = OrderedDict([
-    (CONFIRMED, "확정  — 관측만으로 사실이라고 말할 수 있다"),
-    (SUSPECT, "의심  — 기준선과 어긋난다. 양성 오류의 여지가 있다"),
-    (POSSIBLE, "가능  — 구조적으로 가능하다. 증거는 없다"),
+    (CONFIRMED, "확정  — 관측만으로 사실이라고 말할 수 있습니다"),
+    (SUSPECT, "의심  — 기준선과 어긋납니다. 양성 오류의 여지가 있습니다"),
+    (POSSIBLE, "가능  — 구조적으로 가능합니다. 증거는 없습니다"),
 ])
 SEV_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
 AXIS_LABEL = {SECURITY: "보안", QUALITY: "연결 품질", "info": "참고"}
@@ -73,7 +73,7 @@ def render(day: str, events: List[Dict[str, Any]], samples_count: int = 0,
     if invs:
         lines.append("")
         lines.append("-- 조사 --")
-        lines.append("   유의미한 신호가 잡히면 결론이 날 때까지 계속 본다.")
+        lines.append("   유의미한 신호가 잡히면 결론이 날 때까지 계속 지켜봅니다.")
         for e in invs:
             lines.append("    %s  %-26s %s" % (e.get("ts", "")[11:19],
                                                e.get("kind", "")[len("INVESTIGATION_"):],
@@ -83,7 +83,7 @@ def render(day: str, events: List[Dict[str, Any]], samples_count: int = 0,
         lines.append("")
         lines.append("-- 사용자 행동·환경으로 설명되어 억제된 판정 (%d건) --"
                      % len(s["suppressed"]))
-        lines.append("   지워지지 않고 남는다. 억제 판단이 틀렸다면 여기서 찾는다.")
+        lines.append("   지워지지 않고 남습니다. 억제 판단이 틀렸다면 여기서 찾을 수 있습니다.")
         for reason, n in s["attributions"].most_common():
             lines.append("    %-16s %d건" % (reason, n))
 
@@ -108,10 +108,10 @@ def exposure_notes(last_sample: Optional[Dict[str, Any]]) -> List[str]:
     if wifi.get("applicable"):
         if sec.startswith("wpa") and "enterprise" not in sec:
             out.append("공유 비밀번호 Wi-Fi(%s): 같은 비밀번호를 아는 사람은 같은 L2 에 있고, "
-                       "ARP·DHCP·RA 조작과 수동 복호가 가능하다." % (wifi.get("security") or "?"))
+                       "ARP·DHCP·RA 조작과 수동 복호가 가능합니다." % (wifi.get("security") or "?"))
         elif sec in ("none", "open", ""):
-            out.append("암호화 없는 Wi-Fi: 같은 공간의 누구나 평문을 읽을 수 있다.")
+            out.append("암호화 없는 Wi-Fi: 같은 공간에 있는 누구나 평문을 읽을 수 있습니다.")
     if (data.get("dns") or {}).get("via_loopback"):
-        out.append("DNS 가 로컬 프록시를 거친다. VPN·필터의 정상 동작일 수도, "
-                   "가로채기일 수도 있다 — 무엇이 듣고 있는지는 이 도구가 판별하지 못한다.")
+        out.append("DNS 가 로컬 프록시를 거칩니다. VPN·필터의 정상 동작일 수도, "
+                   "가로채기일 수도 있습니다 — 무엇이 듣고 있는지는 이 도구가 판별하지 못합니다.")
     return out

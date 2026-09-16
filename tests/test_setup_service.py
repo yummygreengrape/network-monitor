@@ -54,14 +54,15 @@ class TestWizardDefaults(unittest.TestCase):
         self.assertTrue(plan.confirmed, "마지막 확인의 기본값은 적용")
 
     def test_choices_are_applied_in_order(self):
-        # 간격 3초, 기록 위치 기본, 보존 30일, 위치 y, VPN y, 외부 n, 상시 y, 확인 y
-        plan, _ = wizard(["1", "", "3", "y", "y", "n", "y", "y"])
+        # 간격 3초, 기록 기본, 보존 30일, 위치 y, VPN y, 외부 n, 상시 y, 링크 y, 확인 y
+        plan, _ = wizard(["1", "", "3", "y", "y", "n", "y", "y", "y"])
         self.assertEqual(plan.interval, 3)
         self.assertEqual(plan.retention_days, 30)
         self.assertTrue(plan.want_location)
         self.assertTrue(plan.want_vpn)
         self.assertFalse(plan.want_external)
         self.assertTrue(plan.want_agent)
+        self.assertTrue(plan.want_link)
 
     def test_invalid_choice_is_reasked(self):
         plan, io = wizard(["99", "abc", "1"])
@@ -69,8 +70,20 @@ class TestWizardDefaults(unittest.TestCase):
         self.assertIn("번호를 넣으세요", io.transcript)
 
     def test_declining_at_the_end_leaves_plan_unconfirmed(self):
-        plan, _ = wizard(["", "", "", "n", "n", "n", "n", "n"])
+        # 위치·VPN·외부·상시·링크에 모두 n, 마지막 확인에도 n
+        plan, _ = wizard(["", "", "", "n", "n", "n", "n", "n", "n"])
         self.assertFalse(plan.confirmed)
+
+    def test_command_registration_is_offered_and_defaults_on(self):
+        """`./netmon.sh` 는 저장소 안에서만 통한다. 기본값은 링크를 거는 쪽이다."""
+        plan, io = wizard([])
+        self.assertTrue(plan.want_link)
+        self.assertIn("어디서나 netmon 으로 실행", io.transcript)
+        self.assertIn("netmon link remove", io.transcript)
+
+    def test_command_registration_can_be_declined(self):
+        plan, _ = wizard(["", "", "", "n", "n", "n", "n", "n"])
+        self.assertFalse(plan.want_link)
 
     def test_vpn_question_skipped_when_none_installed(self):
         plan, io = wizard([], vpn_installed=())

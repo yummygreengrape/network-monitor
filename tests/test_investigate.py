@@ -110,8 +110,8 @@ class TestL2Investigation(unittest.TestCase):
         self.assertIn("안정", inv.verdict)
         self.assertEqual(inv.confidence, "possible")
         c = by_kind(h.all, "INVESTIGATION_CONCLUDED")
-        self.assertIn("접속점 교체로 보인다", c.summary)
-        self.assertIn("배제하지는 못한다", c.summary)
+        self.assertIn("접속점 교체로 보입니다", c.summary)
+        self.assertIn("배제하지는 못합니다", c.summary)
 
     def test_flapping_mac_concludes_as_suspicious(self):
         """정상적인 접속점 교체는 되돌아가지 않는다."""

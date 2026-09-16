@@ -49,7 +49,7 @@ class Playbook:
         return Finding(
             axis=INFO, kind="INVESTIGATION_RETUNED",
             confidence=CONFIRMED, severity=INFO_SEV,
-            summary="조사 %s 의 기준을 바꿨다: %s" % (inv.id, change["reason"]),
+            summary="조사 %s 의 기준을 바꿨습니다: %s" % (inv.id, change["reason"]),
             evidence={"investigation": inv.id, "kind": inv.kind, **change},
         )
 
@@ -123,7 +123,7 @@ class L2Identity(Playbook):
             if not crit.get("widened"):
                 out.append(self._retuned(inv, inv.retune(
                     ts,
-                    "MAC 변경에 경로·이름 해석 변화가 겹쳤다. 감시 범위를 넓힌다.",
+                    "MAC 변경에 경로·이름 해석 변화가 겹쳤습니다. 감시 범위를 넓힙니다.",
                     widened=True,
                     watch_kinds=sorted(set(crit["watch_kinds"]) |
                                        {"DNS_LOCAL_PROXY_CHANGED", "IPV6_ROUTER_APPEARED",
@@ -136,19 +136,19 @@ class L2Identity(Playbook):
 
         if corr:
             inv.close(ts, CONCLUDED,
-                      "경로를 쥔 무언가가 바뀌었다 — 중간자 가능성", SUSPECT)
+                      "경로를 쥔 무언가가 바뀜 — 중간자 가능성", SUSPECT)
             out.append(self._concluded(
                 inv, SECURITY, HIGH, SUSPECT,
-                "첫 홉 정체가 바뀐 뒤 %s 가 함께 나타났다. 접속점 교체만으로는 "
-                "설명되지 않는다." % ", ".join(corr)))
+                "첫 홉의 정체가 바뀐 뒤 %s 가 함께 나타났습니다. 접속점 교체만으로는 "
+                "설명되지 않습니다." % ", ".join(corr)))
             return out
 
         if flaps >= self.FLAP_THRESHOLD:
-            inv.close(ts, CONCLUDED, "첫 홉 정체가 요동친다", SUSPECT)
+            inv.close(ts, CONCLUDED, "첫 홉의 정체가 요동침", SUSPECT)
             out.append(self._concluded(
                 inv, SECURITY, MEDIUM, SUSPECT,
-                "게이트웨이 MAC 이 %d번 바뀌었고 서로 다른 값 %d개를 봤다. "
-                "정상적인 접속점 교체는 이렇게 되돌아가지 않는다."
+                "게이트웨이 MAC 이 %d번 바뀌었고 서로 다른 값 %d개가 나타났습니다. "
+                "정상적인 접속점 교체는 이렇게 되돌아가지 않습니다."
                 % (flaps, len(crit.get("seen_macs", [])))))
             return out
 
@@ -156,8 +156,8 @@ class L2Identity(Playbook):
             inv.close(ts, CONCLUDED, "새 첫 홉으로 안정됨", POSSIBLE)
             out.append(self._concluded(
                 inv, SECURITY, LOW, POSSIBLE,
-                "새 게이트웨이 MAC 이 %d주기 동안 그대로이고 따라온 신호가 없다. "
-                "접속점 교체로 보인다. 공격을 배제하지는 못한다."
+                "새 게이트웨이 MAC 이 %d주기 동안 그대로이고 뒤따른 신호가 없습니다. "
+                "접속점 교체로 보입니다. 다만 공격을 배제하지는 못합니다."
                 % crit["stable_for"]))
         return out
 
@@ -225,20 +225,20 @@ class PathConfig(Playbook):
         # 계속 흔들리면 한 번의 변화가 아니라 경합이다. 기준을 그쪽으로 옮긴다.
         if crit["further_changes"] == 2 and not crit.get("contested"):
             out.append(self._retuned(inv, inv.retune(
-                ts, "설정이 반복해서 바뀐다. 한 번의 변조가 아니라 경합으로 본다.",
+                ts, "설정이 반복해서 바뀝니다. 한 번의 변조가 아니라 경합으로 봅니다.",
                 contested=True, persist_target=self.PERSIST_CYCLES * 2)))
 
         target = int(crit.get("persist_target", self.PERSIST_CYCLES))
         if int(crit["persisted_for"]) >= target:
             contested = bool(crit.get("contested"))
             inv.close(ts, CONCLUDED,
-                      "바뀐 설정이 자리 잡았다", CONFIRMED if not contested else SUSPECT)
+                      "바뀐 설정이 자리 잡음", CONFIRMED if not contested else SUSPECT)
             out.append(L2Identity._concluded(
                 inv, SECURITY, MEDIUM if not contested else LOW,
                 CONFIRMED if not contested else SUSPECT,
-                "바뀐 경로·이름 해석 설정이 %d주기 동안 유지된다%s."
+                "바뀐 경로·이름 해석 설정이 %d주기 동안 유지되고 있습니다%s."
                 % (crit["persisted_for"],
-                   " (그 전에 여러 번 흔들렸다)" if contested else "")))
+                   " (그 전에 여러 번 흔들렸습니다)" if contested else "")))
         return out
 
 
@@ -290,7 +290,7 @@ class VpnDrop(Playbook):
         # 끊김이 한 번일 때는 링크 잡음이 섞여 들어와 쓸모가 없다.
         if int(crit.get("drops", 0)) == 2 and not crit.get("watch_link"):
             out.append(self._retuned(inv, inv.retune(
-                ts, "끊김이 되풀이된다. 무선 구간 품질도 함께 본다.",
+                ts, "끊김이 되풀이되고 있습니다. 무선 구간 품질도 함께 봅니다.",
                 watch_link=True,
                 watch_kinds=sorted(set(crit["watch_kinds"]) |
                                    {"FIRST_HOP_UNREACHABLE", "LATENCY_SPIKE",
@@ -309,15 +309,15 @@ class VpnDrop(Playbook):
             alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
             tunnel_side = alive and all(alive)
             if tunnel_side and not link_events:
-                verdict = "터널 쪽 되풀이 끊김 — 무선 구간은 매번 정상이었다"
+                verdict = "터널 쪽에서 되풀이되는 끊김 — 무선 구간은 매번 정상"
             elif link_events:
                 verdict = "무선 구간 불안정과 함께 되풀이되는 끊김"
             else:
-                verdict = "되풀이되는 끊김 — 구간을 가르지 못했다"
+                verdict = "되풀이되는 끊김 — 구간을 가르지 못함"
             inv.close(ts, CONCLUDED, verdict, SUSPECT)
             out.append(L2Identity._concluded(
                 inv, QUALITY, MEDIUM, SUSPECT,
-                "%s 가 %d번 끊겼다. %s." % (provider, drops, verdict)))
+                "%s 가 %d번 끊겼습니다. %s." % (provider, drops, verdict)))
         return out
 
 

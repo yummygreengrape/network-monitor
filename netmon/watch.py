@@ -74,7 +74,7 @@ def render(now: datetime.datetime, agent: Dict[str, Any],
             parts.append("DNS 로컬 프록시")
         age_txt = "%.0f초 전" % age if age is not None else "?"
         if stale:
-            age_txt = YELLOW + age_txt + " ← 멈춘 듯" + OFF
+            age_txt = YELLOW + age_txt + " ← 갱신이 멈췄습니다" + OFF
         out.append("  %-10s %s   관측 %d주기, 마지막 %s"
                    % ("네트워크", " · ".join(p for p in parts if p),
                       sample_count, age_txt))
@@ -89,7 +89,7 @@ def render(now: datetime.datetime, agent: Dict[str, Any],
                 shown.append("%s%s %s%s" % (color, name, s, OFF))
             out.append("  %-10s %s" % ("VPN", " · ".join(shown)))
     else:
-        out.append("  " + DIM + "아직 기록이 없다" + OFF)
+        out.append("  " + DIM + "아직 기록이 없습니다" + OFF)
 
     # --- 조사 ---
     out.append("")
@@ -133,5 +133,5 @@ def render(now: datetime.datetime, agent: Dict[str, Any],
                       (" " + DIM + tag + OFF) if tag else ""))
 
     out.append("")
-    out.append("%sCtrl+C 로 닫습니다. 닫아도 감시는 계속됩니다.%s" % (DIM, OFF))
+    out.append("%sCtrl+C 로 닫습니다. 창을 닫아도 감시는 계속됩니다.%s" % (DIM, OFF))
     return "\n".join(out)

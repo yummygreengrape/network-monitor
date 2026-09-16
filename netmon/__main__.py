@@ -18,7 +18,7 @@ import sys
 import time
 from typing import List, Optional
 
-from . import (__version__, config as configmod, investigate,
+from . import (__version__, config as configmod, investigate, link as linkmod,
                redact as redactmod, service, setup as setupmod, vpn,
                watch as watchmod, wifi_helper)
 from .collect import REGISTRY as COLLECTORS
@@ -66,7 +66,7 @@ def cmd_doctor(args) -> int:
     print("주 인터페이스  %s (%s), 상태 %s" % (
         base.get("primary") or "없음", base.get("primary_kind"), base.get("primary_status")))
     if base.get("tunnel_iface"):
-        print("기본 경로가 터널 %s 에 있다. 물리 경로를 따로 찾아서 본다."
+        print("기본 경로가 터널 %s 에 있습니다. 물리 경로를 따로 찾아서 봅니다."
               % base["tunnel_iface"])
     print()
 
@@ -113,17 +113,17 @@ def cmd_doctor(args) -> int:
             "등록됨, 실행 대기" if svc["loaded"] else "등록 파일만 있고 launchd 에 없음")
         print("상시 실행     %s" % state)
         if svc["script_exists"] is False:
-            print("              └ 등록된 실행 파일이 없다: %s" % svc["script"])
-            print("                저장소를 옮겼다면 netmon.sh service install 로 다시 등록한다")
+            print("              └ 등록된 실행 파일이 없습니다: %s" % svc["script"])
+            print("                저장소를 옮겼다면 netmon.sh service install 로 다시 등록하세요")
     else:
-        print("상시 실행     등록 안 됨 — netmon.sh service install 로 켠다")
+        print("상시 실행     등록 안 됨 — netmon.sh service install 로 켤 수 있습니다")
 
     print()
     home = os.path.dirname(cfg.path)
     if wifi_helper.installed(home):
         print("위치 권한 헬퍼  설치됨, 상태 %s" % wifi_helper.status(home))
     else:
-        print("위치 권한 헬퍼  없음 — netmon.sh location setup 으로 만든다")
+        print("위치 권한 헬퍼  없음 — netmon.sh location setup 으로 만들 수 있습니다")
 
     print()
     print("동의")
@@ -148,7 +148,7 @@ def cmd_consent(args) -> int:
         return 0
 
     if args.item not in configmod.CONSENTS:
-        print("알 수 없는 동의 항목: %s" % args.item, file=sys.stderr)
+        print("알 수 없는 동의 항목입니다: %s" % args.item, file=sys.stderr)
         return 2
 
     if args.action == "grant":
@@ -162,16 +162,70 @@ def cmd_consent(args) -> int:
                 if feat in cfg.data.get("features", {}):
                     cfg.set_feature(feat, True)
         cfg.save()
-        print("동의를 기록했다 → %s" % cfg.path)
+        print("동의를 기록했습니다 → %s" % cfg.path)
         if not args.enable:
-            print("관련 기능은 아직 꺼져 있다. --enable 을 붙이거나 설정에서 켠다:")
+            print("관련 기능은 아직 꺼져 있습니다. --enable 을 붙이거나 설정에서 켜세요:")
             for feat in meta["enables"]:
                 print("    %s" % feat)
     else:
         cfg.revoke(args.item)
         cfg.save()
-        print("동의를 철회하고 관련 기능도 껐다 → %s" % cfg.path)
+        print("동의를 철회하고 관련 기능도 껐습니다 → %s" % cfg.path)
     return 0
+
+
+# ---------------------------------------------------------------- link
+def _report_link(result) -> int:
+    if not result.get("ok"):
+        print(result.get("error", "링크를 걸지 못했습니다."), file=sys.stderr)
+        return 2
+    print("이제 어디서나 `netmon` 으로 실행할 수 있습니다.")
+    print("  링크  %s" % result["path"])
+    print("  대상  %s" % result["target"])
+    if not result.get("on_path"):
+        directory = os.path.dirname(result["path"])
+        print()
+        print("다만 이 디렉터리는 PATH 에 없습니다. 아래 한 줄을 실행한 뒤")
+        print("터미널을 새로 열면 `netmon` 이 바로 잡힙니다:")
+        print("  %s" % linkmod.path_hint(directory))
+    return 0
+
+
+def cmd_link(args) -> int:
+    launcher = launcher_path()
+    if args.action == "status":
+        st = linkmod.status()
+        found = st["found"]
+        if not found:
+            print("PATH 에 netmon 링크가 없습니다.")
+            print("저장소 안에서는 ./netmon.sh 로 실행합니다:")
+            print("  %s" % launcher)
+            print("어디서나 쓰려면: netmon.sh link")
+            return 1
+        for entry in found:
+            mark = "" if entry["target"] == launcher else "  ← 다른 저장소를 가리킵니다"
+            print("%s → %s%s" % (entry["path"], entry["target"], mark))
+        return 0
+
+    if args.action == "remove":
+        r = linkmod.remove()
+        for p_ in r["removed"]:
+            print("지웠습니다: %s" % p_)
+        for p_ in r["skipped"]:
+            print("건너뛰었습니다(링크가 아님): %s" % p_, file=sys.stderr)
+        if not r["removed"] and not r["skipped"]:
+            print("지울 링크가 없습니다.")
+        return 0
+
+    directory = args.dir
+    if not directory:
+        directory, why = linkmod.choose_dir()
+        if directory is None:
+            print("링크를 걸 만한 디렉터리를 찾지 못했습니다. --dir 로 지정해 주세요.",
+                  file=sys.stderr)
+            return 2
+        print("링크를 걸 곳: %s (%s)" % (directory, why))
+    return _report_link(linkmod.install(launcher, directory))
 
 
 # ---------------------------------------------------------------- watch
@@ -236,7 +290,7 @@ def cmd_investigate(args) -> int:
             rules = dict(block.get("open_on") or {})
             for item in args.set:
                 if "=" not in item:
-                    print("형식은 키=값1,값2 이다: %s" % item, file=sys.stderr)
+                    print("형식은 키=값1,값2 입니다: %s" % item, file=sys.stderr)
                     return 2
                 key, _, raw = item.partition("=")
                 key = key.strip()
@@ -247,7 +301,7 @@ def cmd_investigate(args) -> int:
             block["open_on"] = rules
             cfg.data["investigate"] = block
             cfg.save()
-            print("조사를 여는 기준을 바꿨다 → %s" % cfg.path)
+            print("조사를 여는 기준을 바꿨습니다 → %s" % cfg.path)
         print()
         print("지금 기준:")
         print("  %s" % investigate.describe_rules(cfg.data.get("investigate")))
@@ -257,15 +311,15 @@ def cmd_investigate(args) -> int:
         print("  netmon.sh investigate rules --set kinds=GW_MAC_CHANGED,DUPLICATE_IP")
         print("  netmon.sh investigate rules --set include_attributed=yes")
         print()
-        print("조사가 열린 뒤에는 조사 자신의 기준이 쓰인다. 그 기준은 조사 중에")
-        print("바뀌며, 바뀔 때마다 이유와 함께 기록에 남는다.")
+        print("조사가 열린 뒤에는 조사 자신의 기준이 쓰입니다. 그 기준은 조사 중에")
+        print("바뀌며, 바뀔 때마다 이유와 함께 기록에 남습니다.")
         return 0
 
     state = store.load_state()
     invs = investigate.Investigator.load(state)
     if args.action == "list":
         if not invs:
-            print("조사 기록 없음 (%s)" % store.dir)
+            print("조사 기록이 없습니다 (%s)" % store.dir)
             return 1
         for inv in invs:
             mark = "진행" if inv.open else ("중단" if inv.status == "abandoned" else "완료")
@@ -282,7 +336,7 @@ def cmd_investigate(args) -> int:
     if args.action == "show":
         target = next((i for i in invs if i.id == args.id or i.kind == args.id), None)
         if target is None:
-            print("찾을 수 없다: %s" % args.id, file=sys.stderr)
+            print("찾을 수 없습니다: %s" % args.id, file=sys.stderr)
             return 1
         print("조사 %s (%s)" % (target.id, target.kind))
         print("  계기    %s" % target.trigger)
@@ -312,7 +366,7 @@ def launcher_path() -> str:
 def _install_agent(cfg: configmod.Config, log_dir: str, quiet: bool = False) -> int:
     script = launcher_path()
     if not os.path.exists(script):
-        print("실행기를 찾을 수 없다: %s" % script, file=sys.stderr)
+        print("실행기를 찾을 수 없습니다: %s" % script, file=sys.stderr)
         return 2
     env = {
         "NETMON_HOME": os.path.dirname(cfg.path),
@@ -323,12 +377,19 @@ def _install_agent(cfg: configmod.Config, log_dir: str, quiet: bool = False) -> 
         # launchd 기본 PATH 에는 /usr/local/bin 이 없어서 VPN 도구를 못 찾는다
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
     }
+    # 기록 경로를 설정 파일에도 남긴다. 에이전트는 환경변수로 받지만,
+    # 사용자가 그냥 친 `netmon report` 는 설정 파일을 본다. 둘이 어긋나면
+    # "기록이 없다"는 말을 듣게 된다.
+    if cfg.data.get("log_dir") != log_dir:
+        cfg.data["log_dir"] = log_dir
+        cfg.save()
+
     r = service.install(script, log_dir, env=env, interval=cfg.interval)
     if not r["ok"]:
-        print("등록 실패: %s" % r["error"], file=sys.stderr)
+        print("등록에 실패했습니다: %s" % r["error"], file=sys.stderr)
         return 2
     if not quiet:
-        print("상시 실행으로 등록했다.")
+        print("상시 실행으로 등록했습니다.")
         print("  정의 파일  %s" % r["plist"])
         print("  실행       %s run" % script)
         print("  기록       %s" % log_dir)
@@ -352,24 +413,24 @@ def cmd_setup(args) -> int:
         try:
             plan = wiz.run()
         except (KeyboardInterrupt, EOFError):
-            print("\n취소했다. 아무것도 바꾸지 않았다.")
+            print("\n취소했습니다. 아무것도 바꾸지 않았습니다.")
             return 1
 
     if not plan.confirmed:
-        print("취소했다. 아무것도 바꾸지 않았다.")
+        print("취소했습니다. 아무것도 바꾸지 않았습니다.")
         return 1
 
     todo = setupmod.apply(plan, cfg)
     print()
-    print("설정을 저장했다 → %s" % cfg.path)
+    print("설정을 저장했습니다 → %s" % cfg.path)
 
     if todo["needs_location_request"]:
         print()
-        print("위치 권한 헬퍼를 만든다...")
+        print("위치 권한 헬퍼를 만듭니다...")
         rc = cmd_location(argparse.Namespace(
             config=args.config, log_dir=args.log_dir, action="setup", timeout=120))
         if rc != 0:
-            print("위치 권한을 받지 못했다. 나머지 탐지는 그대로 동작한다.")
+            print("위치 권한을 받지 못했습니다. 나머지 탐지는 그대로 동작합니다.")
 
     if todo["needs_agent_install"]:
         print()
@@ -377,10 +438,22 @@ def cmd_setup(args) -> int:
         if rc != 0:
             return rc
 
+    linked = False
+    if todo.get("needs_link"):
+        print()
+        directory, why = linkmod.choose_dir()
+        if directory is None:
+            print("링크를 걸 만한 디렉터리를 찾지 못했습니다. "
+                  "저장소 안에서 ./netmon.sh 로 실행해 주세요.")
+        else:
+            print("링크를 걸 곳: %s (%s)" % (directory, why))
+            linked = _report_link(linkmod.install(launcher_path(), directory)) == 0
+
+    cmd = "netmon" if linked or linkmod.status()["found"] else "./netmon.sh"
     print()
-    print("끝났다. 확인:  netmon.sh doctor")
+    print("설정을 마쳤습니다. 확인:  %s doctor" % cmd)
     if not todo["needs_agent_install"]:
-        print("측정 시작:     netmon.sh run")
+        print("측정 시작:     %s run" % cmd)
     return 0
 
 
@@ -401,14 +474,14 @@ def cmd_service(args) -> int:
         return 0 if d["installed"] else 1
 
     if args.action == "install":
-        print("로그인할 때 자동으로 시작하고, 멈추면 다시 띄운다.")
-        print("~/Library/LaunchAgents 에 파일 하나를 만든다. sudo 는 쓰지 않는다.")
+        print("로그인할 때 자동으로 시작하고, 멈추면 다시 띄웁니다.")
+        print("~/Library/LaunchAgents 에 파일 하나를 만듭니다. sudo 는 쓰지 않습니다.")
         return _install_agent(cfg, log_dir)
 
     if args.action == "uninstall":
         r = service.uninstall()
-        print("해제했다." if r["removed"] else "등록되어 있지 않았다.")
-        print("기록은 %s 에 그대로 남아 있다." % log_dir)
+        print("해제했습니다." if r["removed"] else "등록되어 있지 않았습니다.")
+        print("기록은 %s 에 그대로 남아 있습니다." % log_dir)
         return 0
 
     if args.action == "restart":
@@ -427,7 +500,7 @@ def cmd_location(args) -> int:
 
     if args.action == "status":
         if not wifi_helper.installed(home):
-            print("헬퍼 앱 없음 — netmon.sh location setup")
+            print("헬퍼 앱이 없습니다 — netmon.sh location setup")
             return 1
         print("헬퍼 %s" % wifi_helper.app_path(home))
         print("상태 %s" % wifi_helper.status(home))
@@ -437,21 +510,21 @@ def cmd_location(args) -> int:
         script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               "tools", "location-helper", "build.sh")
         if not os.path.exists(script):
-            print("빌드 스크립트를 찾을 수 없다: %s" % script, file=sys.stderr)
+            print("빌드 스크립트를 찾을 수 없습니다: %s" % script, file=sys.stderr)
             return 2
-        print("헬퍼 앱을 만든다 → %s" % home)
+        print("헬퍼 앱을 만듭니다 → %s" % home)
         r = subprocess.run(["bash", script, home], capture_output=True, text=True)
         if r.returncode != 0:
             print(r.stderr.strip() or "빌드 실패", file=sys.stderr)
             return 2
-        print("만들었다: %s" % r.stdout.strip())
+        print("만들었습니다: %s" % r.stdout.strip())
         print()
-        print("이어서 권한을 요청한다. 창이 뜨면 허용을 누르세요.")
+        print("이어서 권한을 요청합니다. 창이 뜨면 허용을 누르세요.")
         args.action = "request"
 
     if args.action == "request":
         if not wifi_helper.installed(home):
-            print("헬퍼 앱 없음 — netmon.sh location setup", file=sys.stderr)
+            print("헬퍼 앱이 없습니다 — netmon.sh location setup", file=sys.stderr)
             return 2
         meta = configmod.CONSENTS["location"]
         print("무엇      %s" % meta["title"])
@@ -464,17 +537,17 @@ def cmd_location(args) -> int:
             cfg.grant("location", note="헬퍼 앱으로 요청, 결과 %s" % st)
             cfg.set_feature("detect.evil_twin", True)
             cfg.save()
-            print("동의를 기록하고 detect.evil_twin 을 켰다 → %s" % cfg.path)
+            print("동의를 기록하고 detect.evil_twin 을 켰습니다 → %s" % cfg.path)
             probe = wifi_helper.wifi(home, force=True)
             if probe and (probe.get("ssid") or probe.get("bssid")):
-                print("확인: SSID·BSSID 를 읽을 수 있다.")
+                print("확인: SSID·BSSID 를 읽을 수 있습니다.")
             else:
-                print("주의: 권한은 받았으나 Wi-Fi 값을 읽지 못했다 "
-                      "(유선 연결이거나 Wi-Fi 미접속일 수 있다).")
+                print("주의: 권한은 받았지만 Wi-Fi 값을 읽지 못했습니다 "
+                      "(유선 연결이거나 Wi-Fi 에 접속하지 않은 상태일 수 있습니다).")
             return 0
         if st == "denied":
             print("거부됨. 시스템 설정 > 개인정보 보호 및 보안 > 위치 서비스에서 "
-                  "'Network Monitor 위치 권한'을 켤 수 있다.")
+                  "'Network Monitor 위치 권한'을 켤 수 있습니다.")
         return 1
 
     return 2
@@ -513,7 +586,7 @@ def cmd_run(args) -> int:
     interval = args.interval or cfg.interval
     eng = Engine(cfg, store)
     store.prune(int(cfg.data.get("retention_days", 14)))
-    print("측정 시작 — 간격 %ds, 기록 %s  (Ctrl+C 로 종료)" % (interval, store.dir))
+    print("측정을 시작합니다 — 간격 %d초, 기록 %s  (Ctrl+C 로 종료)" % (interval, store.dir))
     n = 0
     last_prune_day = time.strftime("%Y-%m-%d")
     try:
@@ -535,12 +608,12 @@ def cmd_run(args) -> int:
                 break
             wait = eng.effective_interval(interval)
             if wait != interval and n % 10 == 1:
-                print("%s  조사 %d건 진행 중 — 측정 간격을 %.0f초로 줄인다"
+                print("%s  조사 %d건 진행 중 — 측정 간격을 %.0f초로 줄입니다"
                       % (obs.ts[11:19], eng.needs.get("open", 0), wait))
             time.sleep(max(0.0, wait - (time.time() - start)))
     except KeyboardInterrupt:
         print()
-    print("%d주기 기록함 → %s" % (n, store.dir))
+    print("%d주기를 기록했습니다 → %s" % (n, store.dir))
     return 0
 
 
@@ -551,7 +624,7 @@ def cmd_report(args) -> int:
     events = list(store.events(day))
     samples = list(store.samples(day))
     if not events and not samples:
-        print("%s 기록 없음 (%s)" % (day, store.dir))
+        print("%s 기록이 없습니다 (%s)" % (day, store.dir))
         return 1
 
     if args.redact:
@@ -562,7 +635,7 @@ def cmd_report(args) -> int:
     print(render(day, events, len(samples), exposure_notes(samples[-1] if samples else None)))
     if args.redact:
         print()
-        print("-- 식별자를 가린 출력이다. %s --" % redactmod.describe())
+        print("-- 식별자를 가린 출력입니다. %s --" % redactmod.describe())
     return 0
 
 
@@ -576,7 +649,7 @@ def cmd_capture(args) -> int:
     if args.redact:
         salt = redactmod.load_or_create_salt(os.path.join(configmod.config_home(), "salt"))
 
-    print("관측 %d주기를 %s 로 뜬다 (간격 %ds)%s"
+    print("관측 %d주기를 %s 로 저장합니다 (간격 %d초)%s"
           % (args.count, out_path, args.interval or cfg.interval,
              ", 식별자 가림" if salt else ""))
     with open(out_path, "w", encoding="utf-8") as fh:
@@ -591,14 +664,14 @@ def cmd_capture(args) -> int:
             print("  %d/%d" % (i + 1, args.count), end="\r", flush=True)
             if i + 1 < args.count:
                 time.sleep(max(0.0, (args.interval or cfg.interval) - (time.time() - start)))
-    print("\n저장함 → %s" % out_path)
+    print("\n저장했습니다 → %s" % out_path)
     return 0
 
 
 def cmd_replay(args) -> int:
     cfg = _cfg(args)
     obs_list = observations_from(args.path)
-    print("%d주기 재생 — %s" % (len(obs_list), args.path))
+    print("%d주기를 재생합니다 — %s" % (len(obs_list), args.path))
     total = 0
     for obs, findings in replay_engine(cfg, obs_list):
         for f in findings:
@@ -629,6 +702,12 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--enable", action="store_true", help="동의와 함께 관련 기능도 켠다")
     c.add_argument("--note", help="기록에 남길 메모")
     c.set_defaults(func=cmd_consent)
+
+    ln = sub.add_parser("link", help="어디서나 netmon 으로 실행되게 링크 걸기")
+    ln.add_argument("action", nargs="?", default="install",
+                    choices=["install", "remove", "status"])
+    ln.add_argument("--dir", help="링크를 걸 디렉터리 (기본: PATH 에 있는 쓸 수 있는 곳)")
+    ln.set_defaults(func=cmd_link)
 
     w = sub.add_parser("watch", help="실시간 화면 (감시는 에이전트가 계속한다)")
     w.add_argument("--refresh", type=int, default=3, help="새로 고침 간격(초)")

@@ -31,6 +31,7 @@ class Plan:
     vpn_providers: List[str] = field(default_factory=lambda: ["auto"])
     want_external: bool = False
     want_agent: bool = False
+    want_link: bool = True
     confirmed: bool = False
 
     def summary_lines(self) -> List[str]:
@@ -45,6 +46,7 @@ class Plan:
                                            ", ".join(self.vpn_providers) if self.want_vpn else "-"),
             "외부 점검 요청   %s  (DNS·TLS 가로채기, 공인 IP)" % mark(self.want_external),
             "상시 실행        %s  (로그인할 때 자동 시작)" % mark(self.want_agent),
+            "명령 등록        %s  (어디서나 netmon 으로 실행)" % mark(self.want_link),
         ]
 
 
@@ -152,7 +154,15 @@ class Wizard:
         self.say("  나중에 netmon.sh service uninstall 로 되돌릴 수 있습니다.")
         plan.want_agent = self._yes_no("  항상 켜 둘까요?", default=False)
 
-        # 8. 확인
+        # 8. 어디서나 실행
+        self.say("")
+        self.say("[명령 등록]  지금은 저장소 안에서 ./netmon.sh 로만 실행됩니다.")
+        self.say("  다른 디렉터리에서 치면 셸이 파일을 찾지 못합니다. PATH 에 있는")
+        self.say("  디렉터리에 링크를 걸어 두면 어디서나 netmon 으로 실행됩니다.")
+        self.say("  sudo 는 쓰지 않고, netmon link remove 로 되돌립니다.")
+        plan.want_link = self._yes_no("  어디서나 netmon 으로 실행할까요?", default=True)
+
+        # 9. 확인
         self.say("")
         self.say("이대로 적용합니다:")
         for line in plan.summary_lines():
@@ -191,6 +201,7 @@ def apply(plan: Plan, cfg: configmod.Config) -> Dict[str, Any]:
     return {
         "needs_location_request": plan.want_location,
         "needs_agent_install": plan.want_agent,
+        "needs_link": plan.want_link,
         "log_dir": plan.log_dir,
     }
 

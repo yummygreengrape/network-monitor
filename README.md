@@ -15,39 +15,72 @@ macOS용 감시 도구입니다.
 macOS와 Python 3.9 이상. 추가 설치는 없습니다. `python3`가 없으면 Xcode Command Line
 Tools를 설치하면 `/usr/bin/python3`가 생깁니다.
 
+## 어디서 실행하나
+
+받은 직후에는 **저장소 안에서만** 실행됩니다. 다른 디렉터리에서 치면
+셸이 파일을 찾지 못합니다.
+
+```
+$ cd ~
+$ ./netmon.sh setup
+zsh: no such file or directory: ./netmon.sh     ← 저장소 밖이라서 그렇습니다
+```
+
+세 가지 방법이 있습니다.
+
+```
+cd <저장소>/network-monitor && ./netmon.sh setup    저장소로 이동해서
+/전체/경로/netmon.sh setup                          전체 경로로
+./netmon.sh link                                    링크를 걸어 어디서나 netmon 으로
+```
+
+`link` 는 PATH 에 있는 쓸 수 있는 디렉터리에 심볼릭 링크를 만듭니다. sudo 는
+쓰지 않고, `netmon link remove` 로 되돌립니다. PATH 에 없는 곳밖에 없으면
+PATH 에 추가하는 방법을 알려 줍니다. 설정 마법사에서도 물어보며, 기본값은
+"건다" 입니다.
+
+```
+netmon link           어디서나 netmon 으로 실행되게 걸기
+netmon link status    지금 어디에 걸려 있는지
+netmon link remove    되돌리기
+```
+
+아래 예시는 링크를 건 뒤를 기준으로 `netmon` 이라고 씁니다. 링크를 걸지
+않았다면 저장소 안에서 `./netmon.sh` 로 바꿔 읽으세요.
+
 ## 처음 켤 때
 
 ```
-./netmon.sh setup
+netmon setup
 ```
 
 무엇을 켜고 끌지 하나씩 물어봅니다. 측정 간격, 기록 위치와 보존 기간, 위치 권한,
 VPN 감시, 외부 점검 요청, 상시 실행 여부입니다. **엔터만 눌러도 안전한 값**입니다 —
 sudo를 쓰지 않고, 외부로 요청을 보내지 않고, 상시 실행으로 등록하지도 않습니다.
 
-아무 인자 없이 `./netmon.sh`를 실행해도 설정이 없으면 마법사를 권합니다.
-묻지 않고 기본값만 쓰려면 `./netmon.sh setup --defaults`입니다.
+아무 인자 없이 `netmon`를 실행해도 설정이 없으면 마법사를 권합니다.
+묻지 않고 기본값만 쓰려면 `netmon setup --defaults`입니다.
 
 ## 쓰는 법
 
 ```
-./netmon.sh doctor           이 기계에서 무엇이 되고 무엇이 안 되는지
-./netmon.sh once             한 주기만 측정
-./netmon.sh run              계속 측정 (Ctrl+C로 종료)
-./netmon.sh report           오늘 요약
-./netmon.sh report --redact  식별자를 가려서 출력 (남에게 보낼 때)
-./netmon.sh location setup   위치 권한 헬퍼를 만들고 권한 요청 (evil twin 탐지)
-./netmon.sh service install  항상 켜 두기 (로그인할 때 자동 시작)
-./netmon.sh investigate list 이어지는 조사 보기
-./netmon.sh watch            실시간 화면 (감시는 에이전트가 계속합니다)
+netmon doctor           이 기계에서 무엇이 되고 무엇이 안 되는지
+netmon once             한 주기만 측정
+netmon run              계속 측정 (Ctrl+C로 종료)
+netmon report           오늘 요약
+netmon report --redact  식별자를 가려서 출력 (남에게 보낼 때)
+netmon location setup   위치 권한 헬퍼를 만들고 권한 요청 (evil twin 탐지)
+netmon service install  항상 켜 두기 (로그인할 때 자동 시작)
+netmon investigate list 이어지는 조사 보기
+netmon watch            실시간 화면 (감시는 에이전트가 계속합니다)
 ```
 
 ## 실시간으로 보기
 
 ```
-./netmon.sh watch                    지금 상태·열린 조사·최근 판정
-./netmon.sh watch --redact           식별자를 가려서 (화면 공유할 때)
-./netmon.sh watch -v                 억제된 판정도 함께
+netmon watch                    지금 상태·열린 조사·최근 판정
+netmon watch --redact           식별자를 가려서 (화면 공유할 때)
+netmon watch -v                 억제된 판정도 함께
 ```
 
 `watch`는 **스스로 측정하지 않습니다.** 상시 실행 에이전트가 남긴 기록을 읽어
@@ -75,9 +108,9 @@ netmon.sh investigate show <id>                    기준이 어떻게 움직였
 ## 항상 켜 두기
 
 ```
-./netmon.sh service install     등록
-./netmon.sh service status      상태 확인
-./netmon.sh service uninstall   해제 (기록은 남습니다)
+netmon service install     등록
+netmon service status      상태 확인
+netmon service uninstall   해제 (기록은 남습니다)
 ```
 
 `~/Library/LaunchAgents/io.github.network-monitor.plist` 파일 하나를 만듭니다.
@@ -96,8 +129,10 @@ netmon.sh investigate show <id>                    기준이 어떻게 움직였
 `doctor`는 **무엇이 왜 안 되는지**를 함께 알려줍니다. 남의 기계에서 탐지가 조용히
 빠지는 것이 이 도구의 가장 위험한 실패 방식이라, 안 되는 것을 숨기지 않습니다.
 
-기록 위치는 `--log-dir` 또는 `NETMON_LOG_DIR`로 바꿉니다. 기본은
-`~/.config/network-monitor/data`입니다.
+설정은 `~/.config/network-monitor/config.json`에, 기록은 기본적으로 그 옆
+`data/`에 둡니다. 기록 위치는 마법사에서 고르거나 `--log-dir`·`NETMON_LOG_DIR`로
+바꿉니다. 상시 실행으로 등록하면 고른 위치가 설정 파일에도 기록되므로,
+`netmon report`가 에이전트와 같은 곳을 봅니다.
 
 ## 권한과 동의
 
@@ -105,10 +140,10 @@ netmon.sh investigate show <id>                    기준이 어떻게 움직였
 나머지 탐지는 그대로 동작합니다.
 
 ```
-./netmon.sh consent list                       무엇을 왜 요구하는지 읽기
-./netmon.sh location setup                     위치 권한 헬퍼 생성 + 권한 요청
-./netmon.sh location status                    현재 권한 상태
-./netmon.sh consent revoke location            철회 (관련 기능도 함께 꺼집니다)
+netmon consent list                       무엇을 왜 요구하는지 읽기
+netmon location setup                     위치 권한 헬퍼 생성 + 권한 요청
+netmon location status                    현재 권한 상태
+netmon consent revoke location            철회 (관련 기능도 함께 꺼집니다)
 ```
 
 ### 위치 권한이 왜 별도 앱을 거치나
@@ -162,8 +197,8 @@ netmon/redact.py    식별자 가리기
 (`netmon.sh capture N --redact`) 이후 판정 수정은 네트워크 없이 재현합니다.
 
 ```
-./netmon.sh capture 60 -o /tmp/cafe.jsonl --redact
-./netmon.sh replay /tmp/cafe.jsonl
+netmon capture 60 -o /tmp/cafe.jsonl --redact
+netmon replay /tmp/cafe.jsonl
 ```
 
 ## 개발

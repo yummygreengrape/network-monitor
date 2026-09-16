@@ -22,17 +22,18 @@ APP = "network-monitor"
 CONSENTS = {
     "location": {
         "title": "위치 서비스 권한",
-        "why": "Wi-Fi SSID·BSSID 를 읽어 evil twin(같은 이름의 가짜 AP)과 "
-               "AP 전환을 구분한다. 권한이 없으면 macOS 가 두 값을 <redacted> 로 가린다.",
-        "sends_out": "없음. 값은 이 기계 밖으로 나가지 않는다.",
+        "why": "Wi-Fi 이름(SSID)과 접속점 식별자(BSSID)를 읽어, 같은 이름을 쓰는 "
+               "가짜 접속점(evil twin)과 정상적인 접속점 전환을 구분합니다. "
+               "권한이 없으면 macOS 가 두 값을 <redacted> 로 가립니다.",
+        "sends_out": "없습니다. 값은 이 기기 밖으로 나가지 않습니다.",
         "enables": ["wifi.bssid", "detect.evil_twin"],
     },
     "external_probes": {
         "title": "외부로 나가는 점검 요청",
         "why": "DNS 응답을 DoH 기준값과 비교하고(가로채기 탐지), 고정 호스트의 "
-               "TLS 발급자 변화와 공인 IP·ASN 변화를 본다.",
-        "sends_out": "고정된 조회 대상 이름과 이 기계의 출발지 IP. "
-                     "SSID·BSSID·MAC 등 네트워크 식별자는 보내지 않는다.",
+               "TLS 발급자 변화와 공인 IP·ASN 변화를 봅니다.",
+        "sends_out": "고정된 조회 대상 이름과 이 기기의 출발지 IP 입니다. "
+                     "SSID·BSSID·MAC 같은 네트워크 식별자는 보내지 않습니다.",
         "enables": ["detect.dns_intercept", "detect.tls_intercept", "detect.public_ip"],
     },
 }

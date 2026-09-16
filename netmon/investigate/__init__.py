@@ -82,11 +82,11 @@ class Investigator:
         # "중단했다"고 남긴다 — 무엇을 못 보고 넘어갔는지가 기록에 있어야 한다.
         for inv in invs:
             if inv.open and ctx.network and inv.network != ctx.network:
-                inv.close(cur.ts, ABANDONED, "네트워크가 바뀌어 중단", POSSIBLE)
+                inv.close(cur.ts, ABANDONED, "네트워크가 바뀌어 중단함", POSSIBLE)
                 out.append(Finding(
                     axis=INFO, kind="INVESTIGATION_ABANDONED",
                     confidence=CONFIRMED, severity=INFO_SEV,
-                    summary="조사 %s 를 중단했다. 네트워크가 바뀌어 대상이 사라졌다."
+                    summary="조사 %s 를 중단했습니다. 네트워크가 바뀌어 대상이 사라졌습니다."
                             % inv.id,
                     evidence={"investigation": inv.id, "kind": inv.kind,
                               "cycles": inv.cycles, "criteria": inv.criteria},
@@ -106,7 +106,7 @@ class Investigator:
                 out.append(Finding(
                     axis=INFO, kind="INVESTIGATION_ERROR",
                     confidence=CONFIRMED, severity=LOW,
-                    summary="조사 %s 가 예외로 멈췄다: %s" % (inv.id, str(exc)[:100]),
+                    summary="조사 %s 가 예외로 멈췄습니다: %s" % (inv.id, str(exc)[:100]),
                     evidence={"investigation": inv.id, "error": repr(exc)[:200]},
                 ))
             if not inv.open and inv.closed_at == cur.ts:
@@ -118,7 +118,7 @@ class Investigator:
                 out.append(Finding(
                     axis=INFO, kind="INVESTIGATION_CONCLUDED",
                     confidence=POSSIBLE, severity=INFO_SEV,
-                    summary="[%s] %d주기를 봤지만 가르지 못했다. 관측을 남기고 닫는다."
+                    summary="[%s] %d주기를 지켜봤지만 가르지 못했습니다. 관측을 남기고 닫습니다."
                             % (inv.kind, inv.cycles),
                     evidence={"investigation": inv.id, "trigger": inv.trigger,
                               "criteria": inv.criteria,
@@ -144,8 +144,8 @@ class Investigator:
                     out.append(Finding(
                         axis=INFO, kind="INVESTIGATION_COOLDOWN",
                         confidence=CONFIRMED, severity=INFO_SEV,
-                        summary="%s 조사를 방금 끝냈다. %d주기 동안 같은 종류를 "
-                                "다시 열지 않는다 (%s 신호는 기록에 남는다)."
+                        summary="%s 조사를 방금 끝냈습니다. %d주기 동안 같은 종류를 "
+                                "다시 열지 않습니다 (%s 신호는 기록에 남습니다)."
                                 % (pb.name, cooldown[pb.name], f.kind),
                         evidence={"playbook": pb.name, "trigger": f.kind,
                                   "cooldown_left": cooldown[pb.name]},
@@ -165,7 +165,7 @@ class Investigator:
             out.append(Finding(
                 axis=INFO, kind="INVESTIGATION_OPENED",
                 confidence=CONFIRMED, severity=INFO_SEV,
-                summary="%s 때문에 조사 %s 를 연다. 결론이 날 때까지 계속 본다."
+                summary="%s 때문에 조사 %s 를 엽니다. 결론이 날 때까지 계속 지켜봅니다."
                         % (f.kind, inv.id),
                 evidence={"investigation": inv.id, "kind": pb.name,
                           "trigger": f.kind, "criteria": inv.criteria,

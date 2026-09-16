@@ -38,10 +38,10 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             confidence=CONFIRMED,
             severity=LOW if attribution else HIGH,
             summary=(
-                "게이트웨이 MAC 이 바뀌었다. 같은 네트워크에 머문 채로 바뀌었으므로 "
-                "ARP 스푸핑이나 AP 교체를 의심할 수 있다."
+                "게이트웨이 MAC 이 바뀌었습니다. 같은 네트워크에 머물러 있는데 바뀐 것이라 "
+                "ARP 스푸핑이나 접속점 교체를 의심할 수 있습니다."
                 if not attribution else
-                "게이트웨이 MAC 이 바뀌었으나 같은 시점에 네트워크가 달라졌다."
+                "게이트웨이 MAC 이 바뀌었지만, 같은 시점에 네트워크도 달라졌습니다."
             ),
             evidence={
                 "gateway": cur.get("iface", "default4_gateway"),
@@ -59,7 +59,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=SECURITY, kind="DUPLICATE_IP",
             confidence=CONFIRMED, severity=MEDIUM,
-            summary="IP 충돌이 감지됐다 (Duplicate IP seen 카운터 증가 %d회)." % (c_dup - p_dup),
+            summary="IP 충돌이 감지됐습니다 (Duplicate IP seen 카운터가 %d회 늘었습니다)." % (c_dup - p_dup),
             evidence={"prev": p_dup, "cur": c_dup, "source": "netstat -s -p arp"},
         ))
 
@@ -73,7 +73,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             out.append(Finding(
                 axis=SECURITY, kind="ARP_REPLY_SPIKE",
                 confidence=SUSPECT, severity=MEDIUM,
-                summary="ARP 응답 수신이 평소의 %.0f배로 늘었다 (%d건/주기, 기준 %.1f)."
+                summary="ARP 응답 수신량이 평소의 %.0f배로 늘었습니다 (%d건/주기, 기준 %.1f)."
                         % (delta / base, delta, base),
                 evidence={"delta": delta, "baseline": round(base, 2),
                           "source": "netstat -s -p arp"},
@@ -91,8 +91,8 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.append(Finding(
             axis=SECURITY, kind="SHARED_MAC",
             confidence=POSSIBLE, severity=LOW,
-            summary="한 MAC 이 IP %d개를 동시에 쓰고 있다. ARP 스푸핑에서 나타나는 모양이지만 "
-                    "라우터의 대리 응답에서도 같은 모양이 나온다." % len(ips),
+            summary="한 MAC 이 IP %d개를 동시에 쓰고 있습니다. ARP 스푸핑에서 나타나는 형태이지만 "
+                    "라우터가 대리 응답하는 정상 구성에서도 같은 형태가 나옵니다." % len(ips),
             evidence={"mac": {"id": "mac", "v": mac}, "addresses": ips[:8],
                       "source": "arp -an -x"},
         ))
