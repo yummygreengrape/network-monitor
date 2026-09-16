@@ -28,7 +28,10 @@ RTT_SUSTAIN_CYCLES = 3
 # **결과는 원인보다 늦게 온다.** 실측에서 WARP 가 connecting 인 채로 리졸버를
 # 설치했고, 상태 전환과 리졸버 변화가 서로 다른 주기에 떨어졌다. 같은 주기만
 # 보는 억제는 그것을 놓친다.
-DISRUPTIONS = ("sleep", "network_change", "iface_change", "vpn_change")
+# **앞에 있을수록 근본 원인에 가깝다.** 잠자기에서 깨어나면 링크가 붙고,
+# 그 뒤에 VPN 이 다시 올라온다. 창이 열려 있는 동안 뒤따라온 약한 사유가
+# 강한 사유를 덮어쓰면, 깨어난 직후의 재연결이 "VPN 전환" 으로만 설명된다.
+DISRUPTIONS = ("sleep", "iface_change", "network_change", "link_restart", "vpn_change")
 SETTLE_SECONDS = 45.0
 
 
@@ -73,9 +76,13 @@ def update_counters(state: Dict[str, Any], cur: Observation,
 
     # 흔들림이 있었으면 창을 다시 연다. 없으면 흘려보낸다.
     step = float(elapsed) if elapsed and elapsed > 0 else float(interval)
-    if any(a in (attributions or []) for a in DISRUPTIONS):
+    fresh = [a for a in DISRUPTIONS if a in (attributions or [])]
+    if fresh:
         new["settle_left_s"] = SETTLE_SECONDS
-        new["settle_reason"] = next(a for a in DISRUPTIONS if a in (attributions or []))
+        open_reason = state.get("settle_reason") if state.get("settle_left_s") else None
+        candidates = fresh + ([open_reason] if open_reason else [])
+        # 열려 있던 사유와 새 사유 중 더 근본에 가까운 쪽을 남긴다
+        new["settle_reason"] = min(candidates, key=DISRUPTIONS.index)
     else:
         left = float(state.get("settle_left_s", 0.0)) - step
         if left > 0:

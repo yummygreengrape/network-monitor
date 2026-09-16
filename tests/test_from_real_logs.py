@@ -837,3 +837,44 @@ class TestExplanationUsesTheSettlingWindow(unittest.TestCase):
         self.assertIsNotNone(f)
         self.assertIsNone(f.attribution)
         self.assertEqual(f.severity, "medium")
+
+
+class TestSettlingReasonKeepsTheRootCause(unittest.TestCase):
+    """잠자기로 열린 창을 뒤따라온 VPN 전환이 덮어썼다.
+
+    실측 재생에서 16:48:58 잠자기 → 16:49:03 VPN 전환 순서였고, 사유가
+    sleep 에서 vpn_change 로 바뀌어 "깨어나는 중" 이라는 설명이 사라졌다.
+    """
+
+    def test_a_weaker_reason_does_not_overwrite_a_stronger_one(self):
+        from netmon import baseline
+        s = baseline.update_counters({}, obs(), ["sleep"], 5.0, 5.0)
+        self.assertEqual(s["settle_reason"], "sleep")
+        s = baseline.update_counters(s, obs(), ["vpn_change"], 5.0, 5.0)
+        self.assertEqual(s["settle_reason"], "sleep",
+                         "깨어난 뒤의 VPN 재연결은 같은 사건의 일부다")
+
+    def test_a_stronger_reason_replaces_a_weaker_one(self):
+        from netmon import baseline
+        s = baseline.update_counters({}, obs(), ["vpn_change"], 5.0, 5.0)
+        self.assertEqual(s["settle_reason"], "vpn_change")
+        s = baseline.update_counters(s, obs(), ["sleep"], 5.0, 5.0)
+        self.assertEqual(s["settle_reason"], "sleep")
+
+    def test_the_window_reopens_with_a_fresh_timer(self):
+        from netmon import baseline
+        s = baseline.update_counters({}, obs(), ["sleep"], 5.0, 5.0)
+        s = baseline.update_counters(s, obs(), [], 5.0, 5.0)
+        shortened = s["settle_left_s"]
+        s = baseline.update_counters(s, obs(), ["vpn_change"], 5.0, 5.0)
+        self.assertGreater(s["settle_left_s"], shortened)
+        self.assertEqual(s["settle_reason"], "sleep")
+
+    def test_a_closed_window_does_not_resurrect_its_reason(self):
+        from netmon import baseline
+        s = baseline.update_counters({}, obs(), ["sleep"], 5.0, 5.0)
+        for _ in range(int(baseline.SETTLE_SECONDS / 5) + 1):
+            s = baseline.update_counters(s, obs(), [], 5.0, 5.0)
+        self.assertIsNone(s.get("settle_reason"))
+        s = baseline.update_counters(s, obs(), ["vpn_change"], 5.0, 5.0)
+        self.assertEqual(s["settle_reason"], "vpn_change")
