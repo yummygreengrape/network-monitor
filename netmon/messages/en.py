@@ -314,3 +314,6 @@ EXPOSURE_IDENTITY_AMBIGUOUS = (
 # ─────────────────────────────────────────── Incomplete observation
 LINK_ABSENT = "No primary interface, so this cycle is not judged. The link is down."
 WHY_LINK_GONE = "the link itself went away"
+
+# ─────────────────────────────────────────── Day boundary
+DAY_IS_UTC = "Dates are in UTC (local time %s)."

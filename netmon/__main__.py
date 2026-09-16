@@ -26,7 +26,7 @@ from .collect import REGISTRY as COLLECTORS
 from .engine import Engine, replay as replay_engine
 from .model import Observation
 from .report import exposure_notes, render
-from .store import Store, observations_from
+from .store import Store, observations_from, today as utc_today
 from .util import NEEDS_CONSENT, NEEDS_SUDO, OK, UNSUPPORTED
 
 
@@ -290,7 +290,7 @@ def cmd_watch(args) -> int:
     try:
         while True:
             now = datetime.datetime.now(datetime.timezone.utc)
-            day = now.astimezone().strftime("%Y-%m-%d")
+            day = now.strftime("%Y-%m-%d")   # 기록 파일과 같은 UTC 기준
             samples = list(store.samples(day))
             events = list(store.events(day))
             state = store.load_state()
@@ -629,11 +629,11 @@ def cmd_run(args) -> int:
     store.prune(int(cfg.data.get("retention_days", 14)))
     print(msg.CLI_RUN_START % (interval, store.dir))
     n = 0
-    last_prune_day = time.strftime("%Y-%m-%d")
+    last_prune_day = utc_today()
     try:
         while True:
             start = time.time()
-            day = time.strftime("%Y-%m-%d")
+            day = utc_today()
             if day != last_prune_day:
                 store.prune(int(cfg.data.get("retention_days", 14)))
                 last_prune_day = day
@@ -660,7 +660,7 @@ def cmd_run(args) -> int:
 # ---------------------------------------------------------------- report
 def cmd_report(args) -> int:
     store = _store(args)
-    day = args.day or time.strftime("%Y-%m-%d")
+    day = args.day or utc_today()
     events = list(store.events(day))
     samples = list(store.samples(day))
     if not events and not samples:
@@ -673,6 +673,9 @@ def cmd_report(args) -> int:
         samples = [redactmod.redact(s, salt) for s in samples]
 
     print(render(day, events, len(samples), exposure_notes(samples[-1] if samples else None)))
+    import datetime as _dt
+    print()
+    print(msg.DAY_IS_UTC % _dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z"))
     if args.redact:
         print()
         print(msg.REPORT_REDACTED % redactmod.describe())

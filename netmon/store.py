@@ -13,8 +13,20 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional
 from .model import Finding, Observation
 
 
+def today() -> str:
+    """기록 파일이 쓰는 날짜. **UTC 기준이다.**
+
+    관측의 ts 가 UTC 이므로 파일 이름도 UTC 로 맞춘다. 읽는 쪽이 현지
+    날짜를 쓰면 시차만큼 어긋난 파일을 찾는다 — 한국 시간에서는 오전
+    9시부터 하루 종일 "기록이 없습니다" 가 나왔다.
+    """
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+
 def _day(ts: str) -> str:
-    return ts[:10] if len(ts) >= 10 else time.strftime("%Y-%m-%d")
+    return ts[:10] if len(ts) >= 10 else today()
 
 
 class Store:

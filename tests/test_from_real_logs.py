@@ -698,3 +698,50 @@ class TestLinkBlip(unittest.TestCase):
         before, gone, back = self._blip()
         attrs = attributions_for(before, back, 5.0, 5.0, anchor=before, link_gap=True)
         self.assertIn("link_restart", attrs)
+
+
+class TestDayBoundaryIsUtc(unittest.TestCase):
+    """기록 파일은 UTC 날짜로 이름 붙는데 읽는 쪽이 현지 날짜를 썼다.
+
+    한국(UTC+9)에서는 오전 9시부터 하루 종일 날짜가 갈려서
+    `netmon report` 가 "기록이 없습니다" 를 냈다.
+    """
+
+    def test_store_names_files_by_the_observation_date(self):
+        import tempfile
+        from netmon.store import Store
+        from netmon.model import Observation
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(d)
+            s.write_sample(Observation(ts="2026-09-16T23:30:00Z", data={"x": 1}))
+            s.write_sample(Observation(ts="2026-09-17T00:30:00Z", data={"x": 2}))
+            days = s.days()
+            self.assertEqual(days, ["2026-09-16", "2026-09-17"],
+                             "UTC 자정에 파일이 갈려야 한다")
+            self.assertEqual(len(list(s.samples("2026-09-16"))), 1)
+            self.assertEqual(len(list(s.samples("2026-09-17"))), 1)
+
+    def test_today_is_utc_not_local(self):
+        import datetime
+        from netmon.store import today
+        expected = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        self.assertEqual(today(), expected)
+
+    def test_a_reader_using_local_date_would_miss_the_file(self):
+        """회귀 방지: 현지 날짜를 쓰면 시차만큼 어긋난다.
+
+        UTC+9 에서는 현지 00:00~09:00 이 전날 UTC 에 해당한다. 그 구간에
+        현지 날짜로 파일을 찾으면 아직 만들어지지 않은 내일 파일을 찾는다.
+        """
+        import datetime
+        kst = datetime.timezone(datetime.timedelta(hours=9))
+        # 현지 05:00 = 전날 UTC 20:00
+        moment = datetime.datetime(2026, 9, 16, 20, 0, tzinfo=datetime.timezone.utc)
+        self.assertEqual(moment.astimezone(kst).strftime("%H"), "05")
+        self.assertNotEqual(moment.strftime("%Y-%m-%d"),
+                            moment.astimezone(kst).strftime("%Y-%m-%d"))
+
+        # 현지 10:00 = 같은 날 UTC 01:00 — 이때는 어긋나지 않는다
+        ok = datetime.datetime(2026, 9, 17, 1, 0, tzinfo=datetime.timezone.utc)
+        self.assertEqual(ok.strftime("%Y-%m-%d"),
+                         ok.astimezone(kst).strftime("%Y-%m-%d"))
