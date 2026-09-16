@@ -310,3 +310,7 @@ EXPOSURE_IDENTITY_AMBIGUOUS = (
     "No location permission, so the SSID cannot be read. Two different places using the "
     "same private range (192.168.0.0/24, say) look identical, which makes a first-hop "
     "change after moving hard to tell apart from an attack.")
+
+# ─────────────────────────────────────────── Incomplete observation
+LINK_ABSENT = "No primary interface, so this cycle is not judged. The link is down."
+WHY_LINK_GONE = "the link itself went away"

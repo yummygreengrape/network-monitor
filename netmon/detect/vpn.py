@@ -52,7 +52,10 @@ def _network_is_untrusted(cur: Observation,
     # 인터페이스라면 직전에 알던 값을 쓴다 — 모르는 것과 잠깐 못 읽은 것은
     # 다르다. 실측에서 이 때문에 "신뢰 여부 판단 불가" 가 나왔다.
     if not sec and prev is not None:
-        if prev.get("iface", "primary") == cur.get("iface", "primary"):
+        p_if, c_if = prev.get("iface", "primary"), cur.get("iface", "primary")
+        # 인터페이스가 같거나, 이번 관측에 인터페이스가 아예 없을 때(링크가
+        # 사라진 순간) 직전 값을 쓴다. 다른 인터페이스로 바뀐 경우만 제외한다.
+        if p_if == c_if or not c_if:
             pw = prev.get("wifi") or {}
             if pw.get("applicable"):
                 sec = pw.get("security") or ""

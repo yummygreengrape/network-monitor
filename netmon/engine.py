@@ -12,8 +12,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import baseline, investigate, messages, vpn
 from .collect import arp, dhcp, dns, iface, link, route, wifi
 from .config import Config
-from .detect import Context, attributions_for, network_key, run_all
-from .model import Finding, Observation, unwrap
+from .detect import (Context, attributions_for, is_complete, network_key,
+                     run_all)
+from . import messages as msg
+from .model import CONFIRMED, INFO, INFO_SEV, Finding, Observation, unwrap
 from .store import Store
 from .util import ts_now
 
@@ -37,6 +39,9 @@ class Engine:
         # 주 인터페이스가 있던 마지막 관측. 정체성 비교의 기준점이다 —
         # 링크가 끊긴 동안의 빈 관측과 비교하면 정체성이 두 번 뒤집힌다.
         self.anchor: Optional[Observation] = None
+        # 판정할 수 없는 주기를 지나왔는가. 다음 완전한 관측이 그것을
+        # "링크가 새로 붙었다" 로 읽을 근거가 된다.
+        self.link_gap: bool = False
         self.prev_wall: Optional[float] = None
         self.state: Dict[str, Any] = store.load_state()
         self.investigator = investigate.Investigator(cfg.data.get("investigate"))
@@ -103,7 +108,19 @@ class Engine:
     # --- 판정 ---
     def judge(self, obs: Observation, elapsed: float) -> List[Finding]:
         interval = float(self.cfg.interval)
-        attributions = attributions_for(self.prev, obs, elapsed, interval, self.anchor)
+
+        # 주 인터페이스가 없으면 비교할 상태가 아니다. 기록만 남기고 넘어간다.
+        # 기준선도 건드리지 않는다 — 링크가 없는 동안의 값은 기준이 될 수 없다.
+        if not is_complete(obs):
+            self.link_gap = True
+            return [Finding(axis=INFO, kind="LINK_ABSENT", confidence=CONFIRMED,
+                            severity=INFO_SEV, summary=msg.LINK_ABSENT,
+                            evidence={"iface": obs.get("iface") or {}},
+                            network=self.state.get("network"))]
+
+        attributions = attributions_for(self.prev, obs, elapsed, interval,
+                                        self.anchor, self.link_gap)
+        self.link_gap = False
         # 링크가 새로 붙었으면 다른 장소일 수 있다. 이전 기준선을 그대로 쓰면
         # 새 장소의 첫 몇 분이 통째로 오탐이 된다.
         changed = any(a in attributions for a in
@@ -133,8 +150,7 @@ class Engine:
         self.state = baseline.update_baselines(self.state, obs, elapsed, interval)
         self.state["network"] = ctx.network
         self.state["last_ts"] = obs.ts
-        if obs.get("iface", "primary"):
-            self.anchor = obs
+        self.anchor = obs
         return findings
 
     # --- 한 주기 ---
@@ -144,7 +160,10 @@ class Engine:
         elapsed = (now - self.prev_wall) if self.prev_wall else 0.0
         obs = self.observe()
         findings = self.judge(obs, elapsed)
-        self.prev, self.prev_wall = obs, now
+        # 판정할 수 없는 주기는 다음 비교의 기준이 되지 않는다.
+        if is_complete(obs):
+            self.prev = obs
+        self.prev_wall = now
         return obs, findings
 
     def effective_interval(self, configured: float) -> float:
@@ -172,6 +191,7 @@ def replay(cfg: Config, observations: List[Observation]) -> List[Tuple[Observati
     eng.store = None
     eng.prev = None
     eng.anchor = None
+    eng.link_gap = False
     eng.prev_wall = None
     eng.state = {}
     eng.investigator = investigate.Investigator(cfg.data.get("investigate"))
@@ -186,6 +206,8 @@ def replay(cfg: Config, observations: List[Observation]) -> List[Tuple[Observati
             wall = (eng.prev_wall or 0) + cfg.interval
         elapsed = (wall - eng.prev_wall) if eng.prev_wall else 0.0
         findings = eng.judge(obs, elapsed)
-        eng.prev, eng.prev_wall = obs, wall
+        if is_complete(obs):
+            eng.prev = obs
+        eng.prev_wall = wall
         out.append((obs, findings))
     return out

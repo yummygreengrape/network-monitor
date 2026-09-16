@@ -626,3 +626,75 @@ class TestSharedMacsBloat(unittest.TestCase):
         f = by_kind(judge(prev, cur), "SHARED_MAC")
         self.assertIsNotNone(f)
         self.assertIn("5", f.summary)
+
+
+class TestLinkBlip(unittest.TestCase):
+    """2026-09-16 10:03:07 — 한 주기 동안 인터페이스가 통째로 사라졌다 돌아왔다.
+
+      10:03:02  primary=en0   warp=connected     경로 3개
+      10:03:07  primary=None  warp=disconnected  경로 1개   ← 빈 관측
+      10:03:10  primary=en0   warp=connecting    경로 2개
+
+    그 빈 관측을 정상 상태로 보고 비교해서 네 가지가 한꺼번에 잘못됐다.
+      DEFAULT_ROUTE_CHANGED 가 high, 억제 없음
+      끊김 원인이 "판단 근거 부족"
+      보호 상실이 "신뢰 판단 불가"
+      엉뚱한 조사가 열렸다 3초 뒤 중단
+    """
+
+    def _blip(self):
+        full = dict(vpn=vpn_state("connected"), security="NONE", icmp_ok=True)
+        before = obs(ts="2026-01-01T00:00:00Z", **full)
+        gone = obs(ts="2026-01-01T00:00:05Z", gateway=None, gw_mac=None,
+                   icmp_ok=None, vpn=vpn_state("disconnected"))
+        gone.data["iface"]["primary"] = None
+        gone.data["iface"]["primary_kind"] = "unknown"
+        gone.data["wifi"] = {"applicable": False, "reason": "링크 없음"}
+        back = obs(ts="2026-01-01T00:00:10Z", vpn=vpn_state("connecting"),
+                   security="NONE", icmp_ok=True)
+        return before, gone, back
+
+    def test_an_incomplete_observation_is_not_judged(self):
+        from netmon import config as configmod
+        from netmon.engine import Engine
+        import os, tempfile
+        before, gone, back = self._blip()
+        with tempfile.TemporaryDirectory() as d:
+            eng = Engine.__new__(Engine)
+            eng.cfg = configmod.load(os.path.join(d, "c.json"))
+            eng.store = None; eng.prev = before; eng.anchor = before
+            eng.link_gap = False; eng.prev_wall = None; eng.state = {"icmp_gw": True}
+            from netmon import investigate
+            eng.investigator = investigate.Investigator({}); eng.needs = {}
+
+            found = eng.judge(gone, 5.0)
+            self.assertEqual([f.kind for f in found], ["LINK_ABSENT"])
+            self.assertTrue(eng.link_gap)
+
+            # 다음 완전한 관측은 빈 관측이 아니라 직전 정상 관측과 비교된다
+            found = eng.judge(back, 5.0)
+            kinds_ = [f.kind for f in found]
+            route = [f for f in found if f.kind == "DEFAULT_ROUTE_CHANGED"]
+            for f in route:
+                self.assertIsNotNone(f.attribution, "링크 복구의 결과다")
+            self.assertNotIn("INVESTIGATION_OPENED",
+                             [k for k in kinds_ if k == "INVESTIGATION_OPENED"] or [])
+
+    def test_the_drop_reason_is_not_lost_to_the_blank_cycle(self):
+        before, gone, back = self._blip()
+        f = by_kind(judge(before, back), "VPN_DISCONNECTED")
+        self.assertIsNotNone(f)
+        self.assertNotIn("판단 근거 부족", f.summary)
+
+    def test_security_is_inherited_when_the_interface_vanishes(self):
+        """링크가 사라진 순간에도 직전에 알던 암호화 방식을 쓴다."""
+        before, gone, _ = self._blip()
+        f = by_kind(judge(before, gone), "VPN_PROTECTION_LOST")
+        self.assertIsNotNone(f)
+        self.assertEqual(f.severity, "medium")
+        self.assertNotIn("판단 불가", f.summary)
+
+    def test_a_blip_makes_the_return_a_link_restart(self):
+        before, gone, back = self._blip()
+        attrs = attributions_for(before, back, 5.0, 5.0, anchor=before, link_gap=True)
+        self.assertIn("link_restart", attrs)

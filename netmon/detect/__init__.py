@@ -113,6 +113,17 @@ def network_key(obs: Observation) -> str:
     return "|".join(parts)
 
 
+def is_complete(obs: Observation) -> bool:
+    """판정할 수 있는 관측인가.
+
+    주 인터페이스가 없으면 링크가 끊긴 것이고, 그 순간의 경로·리졸버·ARP 는
+    "없음"일 뿐 무엇이 바뀌었다는 뜻이 아니다. 그것을 정상 상태로 보고
+    비교하면 링크가 깜빡일 때마다 high 가 쏟아진다 — 실측 10:03:07 에
+    한 주기 동안 인터페이스가 사라졌다 돌아왔고 그렇게 됐다.
+    """
+    return bool(obs.get("iface", "primary"))
+
+
 def ssid_known(obs: Observation) -> bool:
     """SSID 를 실제로 읽었는가. 위치 권한이 없으면 읽지 못한다."""
     return bool(unwrap(obs.get("wifi", "ssid")))
@@ -161,7 +172,8 @@ def _first_inet(obs: Observation) -> Optional[str]:
 
 def attributions_for(prev: Optional[Observation], cur: Observation,
                      elapsed: float, interval: float,
-                     anchor: Optional[Observation] = None) -> List[str]:
+                     anchor: Optional[Observation] = None,
+                     link_gap: bool = False) -> List[str]:
     """이번 주기의 변화 중 사용자 행동·환경으로 설명되는 것."""
     if prev is None:
         return [FIRST_SAMPLE]
@@ -188,7 +200,7 @@ def attributions_for(prev: Optional[Observation], cur: Observation,
     # 카페가 같은 네트워크로 보인다. SSID 를 읽을 수 있으면 그것으로 갈리지만,
     # 위치 권한이 없으면 갈 길이 없다. 그때는 링크 재시작을 근거로 쓴다.
     if (NETWORK_CHANGE not in out and IFACE_CHANGE not in out
-            and not ssid_known(cur) and link_restarted(prev, cur)):
+            and not ssid_known(cur) and (link_gap or link_restarted(prev, cur))):
         out.append(LINK_RESTART)
 
     if vpn_state_changed(prev, cur):
