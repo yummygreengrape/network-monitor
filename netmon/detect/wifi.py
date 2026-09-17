@@ -58,31 +58,42 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
     p_sec = prev.get("wifi", "security")
     c_sec = cur.get("wifi", "security")
+    p_bss, c_bss = unwrap(prev.get("wifi", "bssid")), unwrap(cur.get("wifi", "bssid"))
+    p_ssid, c_ssid = unwrap(prev.get("wifi", "ssid")), unwrap(cur.get("wifi", "ssid"))
+    # 이름을 둘 다 읽었을 때만 같다/다르다를 말할 수 있다. 하나라도 모르면 None.
+    same_name = (p_ssid == c_ssid) if (p_ssid and c_ssid) else None
 
     # --- 암호화 방식 변화 ---
     if p_sec and c_sec and p_sec != c_sec:
         p_rank, c_rank = rank(p_sec), rank(c_sec)
         downgrade = p_rank is not None and c_rank is not None and c_rank < p_rank
         attribution = ctx.identity_attribution()
+        if not downgrade:
+            template = msg.WIFI_SECURITY_CHANGED
+        elif same_name is True:
+            # 같은 이름, 약해진 암호화. 유인의 형태가 바로 이것이다.
+            template = msg.WIFI_SECURITY_DOWNGRADE
+        elif same_name is False:
+            # 이름이 다르면 "같은 이름으로 유인" 은 사실이 아니다.
+            template = msg.WIFI_SECURITY_DOWNGRADE_OTHER
+        else:
+            template = msg.WIFI_SECURITY_DOWNGRADE_UNKNOWN
         out.append(Finding(
             axis=SECURITY,
             kind="WIFI_SECURITY_DOWNGRADE" if downgrade else "WIFI_SECURITY_CHANGED",
             confidence=CONFIRMED,
             severity=HIGH if downgrade and not attribution else MEDIUM,
-            summary=((msg.WIFI_SECURITY_DOWNGRADE if downgrade else msg.WIFI_SECURITY_CHANGED)
-                     % (p_sec, c_sec)),
+            summary=template % (p_sec, c_sec),
             evidence={"prev": p_sec, "cur": c_sec, "known_ranks": [p_rank, c_rank],
+                      "same_ssid": same_name,
                       "source": "ipconfig getsummary"},
             attribution=attribution,
         ))
 
     # --- BSSID 변경 ---
     # 동의하지 않았으면 수집기가 값을 기록하지 않으므로 여기서 자동으로 건너뛴다.
-    p_bss, c_bss = unwrap(prev.get("wifi", "bssid")), unwrap(cur.get("wifi", "bssid"))
-    p_ssid, c_ssid = unwrap(prev.get("wifi", "ssid")), unwrap(cur.get("wifi", "ssid"))
     if p_bss and c_bss and p_bss != c_bss:
-        same_name = bool(p_ssid) and p_ssid == c_ssid
-        if same_name and ctx.enabled("detect.evil_twin"):
+        if same_name is True and ctx.enabled("detect.evil_twin"):
             # 같은 이름, 다른 AP. 정상 로밍이 압도적으로 흔하다.
             # 게이트웨이 MAC 이나 DHCP 서버까지 같이 바뀌었으면 의심을 올린다.
             gw_changed = unwrap(prev.get("arp", "gateway_mac")) != unwrap(cur.get("arp", "gateway_mac"))
@@ -98,11 +109,15 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                           "source": "ipconfig getsummary"},
                 attribution=None if corroborated else ctx.identity_attribution(),
             ))
-        elif not same_name:
+        elif same_name is False or same_name is None:
+            # 이름을 못 읽었으면 로밍인지 이동인지 가릴 수 없다. 이동이라고
+            # 단정하지 않고 접속점이 바뀐 사실만 적는다.
             out.append(Finding(
-                axis=QUALITY, kind="WIFI_NETWORK_SWITCHED",
+                axis=QUALITY,
+                kind="WIFI_NETWORK_SWITCHED" if same_name is False else "WIFI_AP_CHANGED",
                 confidence=CONFIRMED, severity="info",
-                summary=msg.WIFI_NETWORK_SWITCHED,
+                summary=(msg.WIFI_NETWORK_SWITCHED if same_name is False
+                         else msg.WIFI_AP_CHANGED_NAME_UNKNOWN),
                 evidence={"prev_ssid": prev.get("wifi", "ssid"), "ssid": cur.get("wifi", "ssid"),
                           "source": "ipconfig getsummary"},
                 attribution=ctx.identity_attribution(),

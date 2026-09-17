@@ -50,11 +50,17 @@ MULTIPLE_DEFAULT_ROUTES = "%d IPv4 default routes. Normal while a VPN is up."
 # ─────────────────────────────────────────── Findings: Wi-Fi
 WIFI_SECURITY_DOWNGRADE = ("Wi-Fi encryption weakened (%s → %s). This can mean being lured "
                            "onto a weaker access point using the same name.")
+WIFI_SECURITY_DOWNGRADE_OTHER = ("Wi-Fi encryption weakened (%s → %s). This was a move to a "
+                                 "differently named network, so a same-name lure is unlikely.")
+WIFI_SECURITY_DOWNGRADE_UNKNOWN = ("Wi-Fi encryption weakened (%s → %s). The network name could "
+                                   "not be read, so a same-name lure cannot be ruled in or out.")
 WIFI_SECURITY_CHANGED = "Wi-Fi encryption changed (%s → %s)."
 EVIL_TWIN_CANDIDATE = ("Access point, gateway and DHCP all changed under the same SSID. "
                        "Normal roaming usually keeps the same gateway.")
 WIFI_ROAM = "Access point changed within the same SSID (roaming)."
 WIFI_NETWORK_SWITCHED = "Moved to a different Wi-Fi network."
+WIFI_AP_CHANGED_NAME_UNKNOWN = ("Access point changed. The network name could not be read, so "
+                                "roaming and a move to another network cannot be told apart.")
 WIFI_LINK_CHANGED = "Wi-Fi link status changed (%s → %s)."
 
 # ─────────────────────────────────────────── Findings: connection quality

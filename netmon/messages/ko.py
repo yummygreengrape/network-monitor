@@ -46,11 +46,17 @@ MULTIPLE_DEFAULT_ROUTES = "IPv4 기본 경로 %d개. VPN 사용 시 정상적으
 # ─────────────────────────────────────────── 판정: Wi-Fi
 WIFI_SECURITY_DOWNGRADE = ("Wi-Fi 암호화 약화됨 (%s → %s). 같은 이름을 쓰는 약한 "
                            "접속점으로 유인됐을 수 있음.")
+WIFI_SECURITY_DOWNGRADE_OTHER = ("Wi-Fi 암호화 약화됨 (%s → %s). 다른 이름의 네트워크로 "
+                                 "이동한 것이라 같은 이름 유인으로 보기는 어려움.")
+WIFI_SECURITY_DOWNGRADE_UNKNOWN = ("Wi-Fi 암호화 약화됨 (%s → %s). 네트워크 이름을 읽지 못해 "
+                                   "같은 이름 유인인지는 판별 불가.")
 WIFI_SECURITY_CHANGED = "Wi-Fi 암호화 방식 변경됨 (%s → %s)."
 EVIL_TWIN_CANDIDATE = ("같은 SSID 에서 접속점과 게이트웨이·DHCP 가 함께 변경됨. "
                        "정상 로밍에서는 보통 게이트웨이가 그대로 유지됨.")
 WIFI_ROAM = "같은 SSID 안에서 접속점 변경됨 (로밍)."
 WIFI_NETWORK_SWITCHED = "다른 Wi-Fi 네트워크로 이동함."
+WIFI_AP_CHANGED_NAME_UNKNOWN = ("접속점 변경됨. 네트워크 이름을 읽지 못해 로밍인지 다른 "
+                                "네트워크로의 이동인지는 판별 불가.")
 WIFI_LINK_CHANGED = "Wi-Fi 링크 상태 변경됨 (%s → %s)."
 
 # ─────────────────────────────────────────── 판정: 연결 품질

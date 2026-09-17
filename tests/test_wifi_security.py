@@ -126,3 +126,51 @@ class TestVpnDropWording(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDowngradeWording(unittest.TestCase):
+    """"같은 이름으로 유인" 은 이름이 같을 때만 할 수 있는 말이다.
+
+    실측에서 이름이 다른 네트워크로 옮겼는데도 이 문구가 나왔다
+    (2026-09-17 01:26, 06:29 — 같은 주기에 WIFI_NETWORK_SWITCHED 동반).
+    """
+    def _find(self, prev_sec, cur_sec, prev_ssid, cur_ssid):
+        prev = obs(ssid=prev_ssid, bssid="00:00:5e:00:53:aa", security=prev_sec)
+        cur = obs(ssid=cur_ssid, bssid="00:00:5e:00:53:bb", security=cur_sec)
+        return by_kind(run_all(prev, cur, Context()), "WIFI_SECURITY_DOWNGRADE")
+
+    def test_same_name_keeps_the_lure_wording(self):
+        f = self._find("WPA2_PSK", "NONE", "ExampleNet", "ExampleNet")
+        self.assertEqual(f.summary, msg.WIFI_SECURITY_DOWNGRADE % ("WPA2_PSK", "NONE"))
+        self.assertIs(f.evidence["same_ssid"], True)
+
+    def test_different_name_does_not_claim_a_lure(self):
+        f = self._find("WPA2_PSK", "NONE", "ExampleNet", "ExampleNet-2")
+        self.assertEqual(f.summary, msg.WIFI_SECURITY_DOWNGRADE_OTHER % ("WPA2_PSK", "NONE"))
+        self.assertIs(f.evidence["same_ssid"], False)
+
+    def test_unknown_name_says_it_cannot_tell(self):
+        f = self._find("WPA2_PSK", "NONE", None, None)
+        self.assertEqual(f.summary, msg.WIFI_SECURITY_DOWNGRADE_UNKNOWN % ("WPA2_PSK", "NONE"))
+        self.assertIsNone(f.evidence["same_ssid"])
+
+    def test_downgrade_is_still_raised_in_every_case(self):
+        # 문구만 갈라진 것이지, 약화 사실 자체를 빠뜨리면 안 된다.
+        for a, b in ((("ExampleNet",), ("ExampleNet",)),
+                     (("ExampleNet",), ("ExampleNet-2",)),
+                     ((None,), (None,))):
+            with self.subTest(prev=a, cur=b):
+                f = self._find("WPA2_PSK", "NONE", a[0], b[0])
+                self.assertIsNotNone(f)
+                self.assertEqual(f.evidence["known_ranks"][1], 0)
+
+    def test_upgrade_is_not_called_a_downgrade(self):
+        self.assertIsNone(self._find("WPA2_PSK", "WPA3_SAE", "ExampleNet", "ExampleNet"))
+
+    def test_ap_change_without_a_readable_name_is_not_called_a_move(self):
+        prev = obs(ssid=None, bssid="00:00:5e:00:53:aa")
+        cur = obs(ssid=None, bssid="00:00:5e:00:53:bb")
+        found = run_all(prev, cur, Context())
+        self.assertIsNone(by_kind(found, "WIFI_NETWORK_SWITCHED"))
+        self.assertEqual(by_kind(found, "WIFI_AP_CHANGED").summary,
+                         msg.WIFI_AP_CHANGED_NAME_UNKNOWN)
