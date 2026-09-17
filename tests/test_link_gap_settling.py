@@ -14,6 +14,7 @@ from __future__ import annotations
 import unittest
 
 from netmon import baseline
+from netmon import messages as msg
 from netmon.detect import Context, attributions_for, network_key, run_all
 from tests.helpers import GW_MAC, GW_MAC_ALT, SSID, by_kind, obs, vpn_state
 
@@ -93,3 +94,35 @@ class TestVpnChangeDoesNotExcuseAnArpFlood(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLeaseRenewalDoesNotInventALinkDrop(unittest.TestCase):
+    """임대는 링크가 멀쩡해도 T1 에서 주기적으로 갱신된다.
+
+    2026-09-17 02:47:56 에 유선 데스크톱에서 실제로 난 일. 임대 시작이
+    정확히 36시간 간격으로 바뀌었는데(전형적 T1 갱신, 그날 LINK_ABSENT 는
+    한 건도 없었음) "링크가 한 번 끊겼다 다시 붙었다는 뜻" 이 붙었다.
+    """
+    def _renewal(self, state=None, attrs=None):
+        prev = obs(ssid=SSID, lease_start="2026-09-15 23:47:57")
+        cur = obs(ssid=SSID, lease_start="2026-09-17 11:47:57")
+        state = dict(state or {}); state.setdefault("icmp_gw", True)
+        return by_kind(run_all(prev, cur, _ctx(attrs or [], state, cur=cur)),
+                       "DHCP_LEASE_RENEWED")
+
+    def test_a_quiet_renewal_does_not_claim_a_link_drop(self):
+        f = self._renewal()
+        self.assertEqual(f.summary, msg.DHCP_LEASE_RENEWED)
+        self.assertNotIn("끊겼다", f.summary)
+
+    def test_a_renewal_inside_the_settling_window_does_say_so(self):
+        f = self._renewal(state={"settle_left_s": 40.0, "settle_reason": "link_restart"})
+        self.assertEqual(f.summary, msg.DHCP_LEASE_RENEWED_AFTER_LINK)
+
+    def test_a_renewal_after_moving_does_say_so(self):
+        self.assertEqual(self._renewal(attrs=["network_change"]).summary,
+                         msg.DHCP_LEASE_RENEWED_AFTER_LINK)
+
+    def test_a_vpn_settling_window_is_not_evidence_of_a_link_drop(self):
+        f = self._renewal(state={"settle_left_s": 40.0, "settle_reason": "vpn_change"})
+        self.assertEqual(f.summary, msg.DHCP_LEASE_RENEWED)

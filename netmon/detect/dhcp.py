@@ -68,14 +68,20 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         ))
 
     # --- 임대 갱신 ---
-    # 보안 사건이 아니라 "재접속이 있었다"는 품질 신호다.
+    # 보안 사건이 아니라 품질 신호다. 다만 임대는 링크가 멀쩡해도 T1 에서
+    # 주기적으로 갱신된다 — 실측에서 유선 데스크톱의 정상 T1 갱신(36시간
+    # 간격)에 "링크가 끊겼다 다시 붙었다" 가 붙었다. 근거가 있을 때만 그렇게
+    # 말한다.
     p_l = prev.get("dhcp", "lease_start")
     c_l = cur.get("dhcp", "lease_start")
     if p_l and c_l and p_l != c_l:
+        after_link = bool(ctx.moved) or ctx.settling in (
+            "sleep", "iface_change", "network_change", "link_restart")
         out.append(Finding(
             axis=QUALITY, kind="DHCP_LEASE_RENEWED",
             confidence=CONFIRMED, severity="info",
-            summary=msg.DHCP_LEASE_RENEWED,
+            summary=(msg.DHCP_LEASE_RENEWED_AFTER_LINK if after_link
+                     else msg.DHCP_LEASE_RENEWED),
             evidence={"prev": p_l, "cur": c_l, "source": "ipconfig getsummary"},
             attribution=ctx.quality_attribution(),
         ))

@@ -29,7 +29,10 @@ DHCP_SERVER_CHANGED_MOVED = "DHCP server changed, but the network changed at the
 DHCP_ROUTER_CHANGED = "The default router advertised by DHCP changed."
 DHCP_DNS_CHANGED = ("The DNS servers advertised by DHCP changed. This can be the first "
                     "step of name resolution hijacking.")
-DHCP_LEASE_RENEWED = "DHCP lease restarted, meaning the link dropped and came back."
+DHCP_LEASE_RENEWED = ("DHCP lease restarted. This can be a periodic renewal or a "
+                      "reconnection; this cycle alone cannot tell them apart.")
+DHCP_LEASE_RENEWED_AFTER_LINK = ("DHCP lease restarted, right after the link dropped and "
+                                 "came back.")
 OWN_IP_CHANGED = "The IP address assigned to this machine changed."
 
 # ─────────────────────────────────────────── Findings: DNS and proxy

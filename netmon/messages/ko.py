@@ -26,7 +26,9 @@ DHCP_SERVER_CHANGED = "같은 네트워크에서 DHCP 서버 변경됨. rogue DH
 DHCP_SERVER_CHANGED_MOVED = "DHCP 서버 변경됨. 같은 시점에 네트워크도 변경됨."
 DHCP_ROUTER_CHANGED = "DHCP 가 알리는 기본 라우터 변경됨."
 DHCP_DNS_CHANGED = "DHCP 가 알리는 DNS 서버 변경됨. 이름 해석 가로채기의 첫 단계일 수 있음."
-DHCP_LEASE_RENEWED = "DHCP 임대 재시작됨. 링크가 한 번 끊겼다 다시 붙었다는 뜻."
+DHCP_LEASE_RENEWED = ("DHCP 임대 재시작됨. 주기적 갱신일 수도, 재접속 때문일 수도 있음 — "
+                      "이 주기의 관측만으로는 구분 불가.")
+DHCP_LEASE_RENEWED_AFTER_LINK = "DHCP 임대 재시작됨. 링크가 끊겼다 다시 붙은 직후임."
 OWN_IP_CHANGED = "이 기기에 할당된 IP 변경됨."
 
 # ─────────────────────────────────────────── 판정: DNS·프록시
