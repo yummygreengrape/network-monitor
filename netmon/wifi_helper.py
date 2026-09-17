@@ -93,9 +93,10 @@ def request(config_home: str, timeout: float = 120.0) -> str:
 
 def wifi(config_home: str, min_interval: float = DEFAULT_MIN_INTERVAL,
          force: bool = False, timeout: float = 8.0) -> Optional[Dict[str, str]]:
-    """SSID 와 BSSID. 권한이 없거나 Wi-Fi 가 아니면 None.
+    """SSID·BSSID 와 내 링크의 물리 속성(채널·대역·폭·RSSI·잡음·전송률).
 
     min_interval 안에서는 캐시된 값을 돌려준다.
+    주변 AP 목록은 읽지 않는다 — 남의 네트워크는 필요 조건 밖이다.
     """
     now = time.time()
     if not force and _cache["value"] is not None:
@@ -110,6 +111,11 @@ def wifi(config_home: str, min_interval: float = DEFAULT_MIN_INTERVAL,
     if not ssid and not bssid:
         return None
     value = {"ssid": ssid, "bssid": bssid}
+    # 헬퍼가 주는 나머지도 그대로 넘긴다. 예전에는 여기서 버려서
+    # 밴드 전환이 보이지 않았다.
+    for k in ("channel", "band", "width", "rssi", "noise", "txrate"):
+        if r.get(k) not in (None, ""):
+            value[k] = r[k]
     _cache["at"] = now
     _cache["value"] = value
     return dict(value)

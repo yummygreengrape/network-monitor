@@ -51,6 +51,13 @@ def rank(security: Optional[str]) -> Optional[int]:
     return base
 
 
+def _band_value(band) -> float:
+    try:
+        return float(band)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     out: List[Finding] = []
     if prev is None or not cur.get("wifi", "applicable"):
@@ -92,6 +99,31 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
     # --- BSSID 변경 ---
     # 동의하지 않았으면 수집기가 값을 기록하지 않으므로 여기서 자동으로 건너뛴다.
+    # 밴드 전환은 로밍이 아니다. 같은 공유기의 다른 라디오로 옮긴 것이고,
+    # 속도 상한이 통째로 달라진다. 실측에서 5GHz→2.4GHz 전환이 "로밍" 으로만
+    # 기록돼, 상한이 1200→144 Mbps 로 떨어진 채 몇 시간이 지났다.
+    p_band, c_band = prev.get("wifi", "band"), cur.get("wifi", "band")
+    band_changed = bool(p_band and c_band and p_band != c_band)
+    if band_changed:
+        p_rate, c_rate = prev.get("wifi", "txrate"), cur.get("wifi", "txrate")
+        downward = _band_value(c_band) < _band_value(p_band)
+        if isinstance(p_rate, int) and isinstance(c_rate, int):
+            summary = msg.WIFI_BAND_CHANGED_RATE % (p_band, c_band, p_rate, c_rate)
+        else:
+            summary = msg.WIFI_BAND_CHANGED % (p_band, c_band)
+        out.append(Finding(
+            axis=QUALITY, kind="WIFI_BAND_CHANGED",
+            confidence=CONFIRMED,
+            severity=MEDIUM if downward else "info",
+            summary=summary,
+            evidence={"prev_band": p_band, "band": c_band,
+                      "prev_channel": prev.get("wifi", "channel"),
+                      "channel": cur.get("wifi", "channel"),
+                      "prev_txrate": p_rate, "txrate": c_rate,
+                      "source": "CoreWLAN"},
+            attribution=ctx.identity_attribution(),
+        ))
+
     if p_bss and c_bss and p_bss != c_bss:
         if same_name is True and ctx.enabled("detect.evil_twin"):
             # 같은 이름, 다른 AP. 정상 로밍이 압도적으로 흔하다.
@@ -99,16 +131,20 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             gw_changed = unwrap(prev.get("arp", "gateway_mac")) != unwrap(cur.get("arp", "gateway_mac"))
             srv_changed = unwrap(prev.get("dhcp", "server_identifier")) != unwrap(cur.get("dhcp", "server_identifier"))
             corroborated = gw_changed or srv_changed
-            out.append(Finding(
-                axis=SECURITY, kind="EVIL_TWIN_CANDIDATE" if corroborated else "WIFI_ROAM",
-                confidence=SUSPECT if corroborated else CONFIRMED,
-                severity=HIGH if corroborated else "info",
-                summary=(msg.EVIL_TWIN_CANDIDATE if corroborated else msg.WIFI_ROAM),
-                evidence={"prev_bssid": prev.get("wifi", "bssid"), "bssid": cur.get("wifi", "bssid"),
-                          "gateway_mac_changed": gw_changed, "dhcp_server_changed": srv_changed,
-                          "source": "ipconfig getsummary"},
-                attribution=None if corroborated else ctx.identity_attribution(),
-            ))
+            # 같은 이름·다른 BSSID 지만 밴드가 바뀐 것이면 위에서 이미 알렸다.
+            # 로밍으로 중복 보고하지 않는다. 다만 게이트웨이·DHCP 까지 바뀐
+            # 경우(corroborated)는 밴드와 무관하게 그대로 올린다.
+            if corroborated or not band_changed:
+                out.append(Finding(
+                    axis=SECURITY, kind="EVIL_TWIN_CANDIDATE" if corroborated else "WIFI_ROAM",
+                    confidence=SUSPECT if corroborated else CONFIRMED,
+                    severity=HIGH if corroborated else "info",
+                    summary=(msg.EVIL_TWIN_CANDIDATE if corroborated else msg.WIFI_ROAM),
+                    evidence={"prev_bssid": prev.get("wifi", "bssid"), "bssid": cur.get("wifi", "bssid"),
+                              "gateway_mac_changed": gw_changed, "dhcp_server_changed": srv_changed,
+                              "source": "ipconfig getsummary"},
+                    attribution=None if corroborated else ctx.identity_attribution(),
+                ))
         elif same_name is False or same_name is None:
             # 이름을 못 읽었으면 로밍인지 이동인지 가릴 수 없다. 이동이라고
             # 단정하지 않고 접속점이 바뀐 사실만 적는다.

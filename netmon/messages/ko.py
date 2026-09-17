@@ -74,6 +74,10 @@ WIFI_SECURITY_DOWNGRADE_UNKNOWN = ("Wi-Fi 암호화 약화됨 (%s → %s). 네�
 WIFI_SECURITY_CHANGED = "Wi-Fi 암호화 방식 변경됨 (%s → %s)."
 EVIL_TWIN_CANDIDATE = ("같은 SSID 에서 접속점과 게이트웨이·DHCP 가 함께 변경됨. "
                        "정상 로밍에서는 보통 게이트웨이가 그대로 유지됨.")
+WIFI_BAND_CHANGED = ("Wi-Fi 대역 %sGHz 에서 %sGHz 로 전환됨. 로밍이 아니라 같은 "
+                     "공유기의 다른 라디오로 옮긴 것임.")
+WIFI_BAND_CHANGED_RATE = ("Wi-Fi 대역 %sGHz 에서 %sGHz 로 전환됨. 전송률 상한 %d 에서 "
+                          "%d Mbps 로 바뀜. 로밍이 아니라 다른 라디오로 옮긴 것임.")
 WIFI_ROAM = "같은 SSID 안에서 접속점 변경됨 (로밍)."
 WIFI_NETWORK_SWITCHED = "다른 Wi-Fi 네트워크로 이동함."
 WIFI_AP_CHANGED_NAME_UNKNOWN = ("접속점 변경됨. 네트워크 이름을 읽지 못해 로밍인지 다른 "

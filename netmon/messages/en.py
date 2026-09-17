@@ -80,6 +80,10 @@ WIFI_SECURITY_DOWNGRADE_UNKNOWN = ("Wi-Fi encryption weakened (%s → %s). The n
 WIFI_SECURITY_CHANGED = "Wi-Fi encryption changed (%s → %s)."
 EVIL_TWIN_CANDIDATE = ("Access point, gateway and DHCP all changed under the same SSID. "
                        "Normal roaming usually keeps the same gateway.")
+WIFI_BAND_CHANGED = ("Wi-Fi band changed from %sGHz to %sGHz. This is not roaming - the "
+                     "client moved to a different radio on the same router.")
+WIFI_BAND_CHANGED_RATE = ("Wi-Fi band changed from %sGHz to %sGHz. The transmit-rate ceiling "
+                          "went from %d to %d Mbps. This is not roaming - it is a different radio.")
 WIFI_ROAM = "Access point changed within the same SSID (roaming)."
 WIFI_NETWORK_SWITCHED = "Moved to a different Wi-Fi network."
 WIFI_AP_CHANGED_NAME_UNKNOWN = ("Access point changed. The network name could not be read, so "

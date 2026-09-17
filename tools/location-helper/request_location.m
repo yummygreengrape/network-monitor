@@ -48,8 +48,33 @@ static int ExitFor(CLAuthorizationStatus s) {
     }
 }
 
-// Wi-Fi 이름과 접속점 식별자만 읽는다. 위치 좌표는 요청하지도 읽지도 않고,
-// 주변 AP 목록(scanForNetworks)도 건드리지 않는다. 필요한 두 값이 전부다.
+static const char *BandName(CWChannelBand b) {
+    switch (b) {
+        case kCWChannelBand2GHz: return "2.4";
+        case kCWChannelBand5GHz: return "5";
+        default: break;
+    }
+    // 6GHz 는 SDK 버전에 따라 상수가 없을 수 있어 숫자로 판별한다.
+    if ((int)b == 3) return "6";
+    return "";
+}
+
+static int WidthMHz(CWChannelWidth w) {
+    switch (w) {
+        case kCWChannelWidth20MHz:  return 20;
+        case kCWChannelWidth40MHz:  return 40;
+        case kCWChannelWidth80MHz:  return 80;
+        case kCWChannelWidth160MHz: return 160;
+        default: return 0;
+    }
+}
+
+// **자기 연결의 상태만 읽는다.** 위치 좌표는 요청하지도 읽지도 않고,
+// 주변 AP 목록(scanForNetworks)도 건드리지 않는다 — 남의 네트워크는
+// 필요 조건 밖이다. 채널·대역·신호는 내 링크의 속성이라 읽는다.
+// 이게 없으면 밴드 전환(2.4↔5GHz)이 그냥 "로밍" 으로 보인다. 실제로
+// 2026-09-17 10:58 에 5GHz 에서 2.4GHz 로 내려간 것을 놓쳤고,
+// 그 뒤로 속도 상한이 1200 에서 144 Mbps 로 떨어진 채 몇 시간이 갔다.
 static int PrintWifi(void) {
     CWInterface *iface = [[CWWiFiClient sharedWiFiClient] interface];
     if (!iface) {
@@ -59,9 +84,18 @@ static int PrintWifi(void) {
     }
     NSString *ssid = iface.ssid;
     NSString *bssid = iface.bssid;
+    CWChannel *ch = iface.wlanChannel;
     NSMutableString *line = [NSMutableString string];
     [line appendFormat:@"ssid=%@\n", ssid ?: @""];
     [line appendFormat:@"bssid=%@\n", bssid ?: @""];
+    if (ch) {
+        [line appendFormat:@"channel=%ld\n", (long)ch.channelNumber];
+        [line appendFormat:@"band=%s\n", BandName(ch.channelBand)];
+        [line appendFormat:@"width=%d\n", WidthMHz(ch.channelWidth)];
+    }
+    [line appendFormat:@"rssi=%ld\n", (long)iface.rssiValue];
+    [line appendFormat:@"noise=%ld\n", (long)iface.noiseMeasurement];
+    [line appendFormat:@"txrate=%.0f\n", iface.transmitRate];
     fputs(line.UTF8String, stdout);
     fflush(stdout);
     WriteOut(line.UTF8String);

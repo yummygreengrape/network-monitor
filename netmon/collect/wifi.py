@@ -85,6 +85,31 @@ def probe(ctx: Dict[str, Any] = None) -> Capability:
     return Capability(NAME, UNSUPPORTED, "Wi-Fi 연결 정보 없음 (미연결?)", provides=["security"])
 
 
+def radio_from(src: Dict[str, str]) -> Dict[str, Any]:
+    """채널·대역·신호. 식별자가 아니라 내 링크의 물리 속성이다.
+
+    이게 없으면 밴드 전환(2.4↔5GHz)이 그냥 "로밍" 으로 보인다. 실측에서
+    5GHz→2.4GHz 로 내려간 것을 놓쳤고, 속도 상한이 1200→144 Mbps 로
+    떨어진 채로 몇 시간이 지났다.
+    """
+    out: Dict[str, Any] = {}
+    for key, cast in (("channel", int), ("width", int),
+                      ("rssi", int), ("noise", int), ("txrate", int)):
+        v = src.get(key)
+        if v not in (None, ""):
+            try:
+                out[key] = cast(float(v))
+            except (TypeError, ValueError):
+                pass
+    band = src.get("band")
+    if band:
+        out["band"] = band
+    # 신호 대 잡음비. 둘 다 있을 때만 계산한다.
+    if "rssi" in out and "noise" in out:
+        out["snr"] = out["rssi"] - out["noise"]
+    return out
+
+
 def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
     ctx = ctx or {}
     if ctx.get("primary_kind") != "wifi":
@@ -114,6 +139,7 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         out["ssid"] = ident("ssid", parsed["ssid"])
         out["bssid"] = ident("bssid", parsed["bssid"]) if parsed.get("bssid") else None
         out["source"] = "ipconfig"
+        out.update(radio_from(parsed))
         return out
 
     # 흔한 경우: 이 프로세스에는 권한이 없다. 권한을 가진 헬퍼 앱에 물어본다.
@@ -127,6 +153,7 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         out["bssid"] = ident("bssid", helper["bssid"]) if helper.get("bssid") else None
         out["location"] = "granted-via-helper"
         out["source"] = "location-helper"
+        out.update(radio_from(helper))
     else:
         out["ssid"] = None
         out["bssid"] = None
