@@ -42,7 +42,7 @@ def rtt_elevated(rtt: Optional[float], base: Optional[float]) -> bool:
 
 # 네트워크가 바뀌면 기준선을 버린다. 이전 네트워크의 정상값을 새 네트워크에
 # 적용하면 첫 몇 분이 통째로 오탐이 된다.
-VOLATILE_KEYS = ("rtt_ewma", "rtt_high_run", "arp_reply_rate", "gw_fail_streak",
+VOLATILE_KEYS = ("rtt_ewma", "rtt_high_run", "arp_reply_rate", "gw_fail_streak", "gw_fail_streak_prev",
                  "arp_replies_last", "settle_left_s", "settle_reason",
                  # 게이트웨이가 ICMP 에 응답하는지는 네트워크마다 다르다.
                  "icmp_gw", "cycles_on_network", "_liveness_decided", "icmp_fail_run")
@@ -109,9 +109,15 @@ def update_counters(state: Dict[str, Any], cur: Observation,
 
     _, alive = evaluate(cur, new)
     if alive is True:
+        # **초기화 직전 값을 남긴다.** 이 함수는 판정보다 먼저 돌므로, 그냥
+        # 0 으로 만들면 복구 판정이 "얼마나 끊겼었는지" 를 영영 알 수 없다.
+        # 실제로 그래서 FIRST_HOP_RECOVERED 가 한 번도 뜨지 않았다
+        # (양쪽 기계 전체 기록: 무응답 10건, 복구 0건).
+        new["gw_fail_streak_prev"] = int(state.get("gw_fail_streak", 0))
         new["gw_fail_streak"] = 0
     elif alive is False:
         new["gw_fail_streak"] = int(state.get("gw_fail_streak", 0)) + 1
+        new["gw_fail_streak_prev"] = 0
     return new
 
 

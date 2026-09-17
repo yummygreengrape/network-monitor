@@ -63,14 +63,20 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                           "gateway": cur.get("iface", "default4_gateway")},
                 attribution=attribution,
             ))
-    elif alive is True and streak >= FAIL_STREAK_ALERT:
-        out.append(Finding(
-            axis=QUALITY, kind="FIRST_HOP_RECOVERED",
-            confidence=CONFIRMED, severity=INFO_SEV,
-            summary=msg.FIRST_HOP_RECOVERED % (streak, METHOD_LABEL.get(method, method)),
-            evidence={"method": method, "streak": streak},
-            attribution=attribution,
-        ))
+    else:
+        # **복구는 초기화 직전 값으로 판정한다.** 기준선 갱신이 판정보다 먼저
+        # 돌면서 streak 을 0 으로 만들기 때문에, 현재 값으로 보면 조건이
+        # 영원히 거짓이다 — 실제로 양쪽 기계 전체 기록에서 무응답 10건에
+        # 복구 0건이었다.
+        was = int(ctx.state.get("gw_fail_streak_prev", 0))
+        if alive is True and was >= FAIL_STREAK_ALERT:
+            out.append(Finding(
+                axis=QUALITY, kind="FIRST_HOP_RECOVERED",
+                confidence=CONFIRMED, severity=INFO_SEV,
+                summary=msg.FIRST_HOP_RECOVERED % (was, METHOD_LABEL.get(method, method)),
+                evidence={"method": method, "streak": was},
+                attribution=attribution,
+            ))
 
     # --- 지연 급변 ---
     # ICMP 를 쓸 수 있는 네트워크에서만 의미가 있다.
