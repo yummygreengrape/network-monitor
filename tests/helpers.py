@@ -58,6 +58,9 @@ def obs(
     shared_macs: Optional[Dict[str, Any]] = None,
     link_active: str = "TRUE",
     vpn: Optional[Dict[str, Any]] = None,
+    static_routes: Optional[Dict[str, Any]] = None,
+    tunnel_default=(),
+    offered_egress=(),
 ) -> Observation:
     o = Observation(ts=ts)
     o.data["iface"] = {
@@ -85,6 +88,8 @@ def obs(
         "subnet_mask": subnet,
         "yiaddr": ident("ipv4", my_ip) if my_ip else None,
         "lease_start": lease_start,
+        "static_routes": static_routes or {"present": False, "option": None,
+                                           "parsed": True, "routes": []},
     }
     o.data["route"] = {
         "default4": [{"gateway": ident("ipv4", gateway), "iface": iface, "flags": "UGScg"}],
@@ -94,6 +99,10 @@ def obs(
         "default6_count": len(default6),
         "ipv6_routers": [{"addr": ident("ipv6", a), "if": i, "pref": "medium"}
                          for a, i in ipv6_routers],
+        "tunnel_default": list(tunnel_default),
+        "offered_egress": [{"dest": ident("ipv4", d), "iface": i,
+                            "matched_default": False}
+                           for d, i in offered_egress],
     }
     o.data["dns"] = {
         "resolvers": [ident("ipv4", r) for r in resolvers],

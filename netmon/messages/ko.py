@@ -43,6 +43,14 @@ DEFAULT_ROUTE_CHANGED = "IPv4 기본 경로 변경됨."
 IPV6_DEFAULT_ROUTE_APPEARED = ("물리 인터페이스에 IPv6 기본 경로 생성됨. 같은 네트워크의 "
                                "누군가가 라우터 광고를 보냈을 수 있음 (rogue RA).")
 IPV6_ROUTER_APPEARED = "이웃 표에 새 IPv6 라우터 출현 (%d개)."
+DHCP_STATIC_ROUTES = ("DHCP 가 정적 경로 %d개를 제공함. 가정용 네트워크에서는 드묾. "
+                      "VPN 기본 경로보다 구체적인 경로를 밀어 넣어 터널을 우회시키는 "
+                      "수단이기도 함 (CVE-2024-3661).")
+DHCP_STATIC_ROUTES_UNREAD = ("DHCP 가 정적 경로 옵션을 제공했으나 형식을 해석하지 못함. "
+                             "경로가 없다는 뜻이 아님.")
+TUNNEL_BYPASS_ROUTE = ("DHCP 가 제공한 대역 %d개가 터널이 아닌 인터페이스로 나감. "
+                       "해당 대역의 트래픽은 VPN 보호 밖임. 분할 터널 설정일 수도, "
+                       "경로 주입일 수도 있음 — 이 도구가 판별 불가.")
 MULTIPLE_DEFAULT_ROUTES = "IPv4 기본 경로 %d개. VPN 사용 시 정상적으로 나타나는 형태."
 
 # ─────────────────────────────────────────── 판정: Wi-Fi

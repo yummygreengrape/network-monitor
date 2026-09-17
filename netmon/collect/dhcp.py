@@ -49,6 +49,72 @@ def parse_getpacket(text: str) -> Dict[str, Any]:
     return {"header": head, "options": opts}
 
 
+# RFC 3442 option 121 (과 MS 변종 249, 그리고 구식 classful option 33).
+# 이 옵션으로 밀어 넣은 경로는 VPN 기본 경로보다 구체적일 수 있어 터널을 우회한다
+# — CVE-2024-3661(TunnelVision). 가정용 네트워크에서는 거의 쓰이지 않는다.
+STATIC_ROUTE_OPTIONS = ("classless_static_route", "ms_classless_static_route",
+                        "option_121", "option_249", "static_route", "option_33")
+
+
+def _hex_bytes(value: str) -> Optional[List[int]]:
+    """`0x1820c000...` 또는 `18 20 c0 00` 형태를 바이트 목록으로. 아니면 None."""
+    v = value.strip().replace(" ", "").replace(":", "")
+    if v.lower().startswith("0x"):
+        v = v[2:]
+    if not v or len(v) % 2 or any(c not in "0123456789abcdefABCDEF" for c in v):
+        return None
+    return [int(v[i:i + 2], 16) for i in range(0, len(v), 2)]
+
+
+def decode_classless_routes(value: str) -> Optional[List[Dict[str, str]]]:
+    """RFC 3442 와이어 포맷을 (목적지 프리픽스, 게이트웨이) 목록으로 푼다.
+
+    각 항목은 [프리픽스 길이 1바이트][유효 옥텟 ceil(len/8)][게이트웨이 4바이트].
+    형식을 못 알아보면 None 을 준다 — **빈 목록과 구분해야 한다.**
+    옵션이 있었는데 못 읽은 것을 "정적 경로 없음"으로 보고하면 안 된다.
+    """
+    data = _hex_bytes(value)
+    if data is None:
+        return None
+    out: List[Dict[str, str]] = []
+    i = 0
+    while i < len(data):
+        plen = data[i]
+        if plen > 32:
+            return None
+        i += 1
+        need = (plen + 7) // 8
+        if i + need + 4 > len(data):
+            return None
+        octets = data[i:i + need] + [0] * (4 - need)
+        i += need
+        gw = data[i:i + 4]
+        i += 4
+        out.append({"dest": "%s/%d" % (".".join(str(o) for o in octets), plen),
+                    "gateway": ".".join(str(o) for o in gw)})
+    return out
+
+
+def static_routes_from(opts: Dict[str, Any]) -> Dict[str, Any]:
+    """제공된 정적 경로. 옵션 유무와 해석 성공 여부를 따로 보고한다."""
+    for name in STATIC_ROUTE_OPTIONS:
+        if name not in opts:
+            continue
+        raw = opts[name]
+        if isinstance(raw, list):
+            raw = ",".join(raw)
+        routes = decode_classless_routes(str(raw))
+        if routes is None:
+            # 옵션은 왔는데 형식을 못 읽었다. 없다고 말하지 않는다.
+            return {"present": True, "option": name, "parsed": False, "routes": []}
+        return {"present": True, "option": name, "parsed": True,
+                "routes": [{"dest": ident("ipv4", r["dest"]),
+                            "gateway": ident("ipv4", r["gateway"])} for r in routes]}
+    # 평시(옵션 없음)에는 최소 형태만 남긴다. 주기당 바이트가 쌓이면
+    # 하루 단위로는 큰 값이 된다 — 이 저장소에 shared_macs 전례가 있다.
+    return {"present": False}
+
+
 def parse_getsummary(text: str) -> Dict[str, str]:
     """`ipconfig getsummary <dev>` 에서 `키 : 값` 줄만 평평하게 모은다.
 
@@ -106,4 +172,5 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         "lease_expire": summ.get("LeaseExpirationTime"),
         "router_arp_verified": summ.get("RouterARPVerified"),
         "state": summ.get("State"),
+        "static_routes": static_routes_from(opts),
     }

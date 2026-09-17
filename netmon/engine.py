@@ -75,6 +75,10 @@ class Engine:
 
         step(arp, "arp")
         step(dhcp, "dhcp")
+        # DHCP 가 정적 경로를 제공했으면 경로 수집기가 그 대역의 실제 송신
+        # 인터페이스를 조회한다. 기본 경로만 봐서는 터널 우회가 보이지 않는다.
+        ctx["dhcp_static_routes"] = ((obs.data["dhcp"].get("static_routes") or {})
+                                     .get("routes") or [])
         step(route, "route")
         step(dns, "dns")
         # 헬퍼 앱 호출은 0.5초쯤 걸려서 매 주기 부르지 않는다. 다만 첫 주기이거나

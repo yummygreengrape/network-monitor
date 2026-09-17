@@ -6,9 +6,10 @@ IPv4 만 보면 통째로 놓치는 것이 있다. 같은 L2 에 있는 누구�
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from ..model import ident
+from ..model import ident, unwrap
+from .iface import is_tunnel
 from ..util import OK, Capability, run
 
 NAME = "route"
@@ -61,6 +62,40 @@ def probe() -> Capability:
                       provides=["default_routes", "ipv6_routers"])
 
 
+def parse_route_get_match(text: str) -> Dict[str, Optional[str]]:
+    """실제 송신 인터페이스와 **어떤 경로에 매칭됐는지**.
+
+    매칭된 경로를 함께 봐야 한다. 제공된 대역이 설치되지 않았으면 조회가
+    기본 경로로 떨어지는데, 기본 경로가 물리 인터페이스면 "터널 밖"으로
+    잘못 읽힌다 — 이 기기에서 실제로 그렇게 나왔다.
+    """
+    out: Dict[str, Optional[str]] = {"iface": None, "destination": None}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("interface:"):
+            out["iface"] = line.split(":", 1)[1].strip() or None
+        elif line.startswith("destination:"):
+            out["destination"] = line.split(":", 1)[1].strip() or None
+    return out
+
+
+def egress_for(dests: List[str]) -> List[Dict[str, Any]]:
+    """각 목적지가 실제로 어느 인터페이스로 나가는지 조회한다.
+
+    **기본 경로만 봐서는 알 수 없다.** 더 구체적인 경로가 깔리면 기본 경로는
+    그대로인 채 트래픽만 다른 곳으로 간다 — 이 기기에서 VPN 이 그렇게 동작하는
+    것을 확인했고, CVE-2024-3661 이 같은 메커니즘을 공격에 쓴다.
+    """
+    out: List[Dict[str, Any]] = []
+    for dest in dests[:16]:          # rogue 가 목록을 부풀려 주기를 늘리지 못하게 상한
+        probe = dest.split("/", 1)[0]
+        r = run(["route", "-n", "get", probe], timeout=4)
+        m = parse_route_get_match(r.out) if r.rc == 0 else {"iface": None, "destination": None}
+        out.append({"dest": ident("ipv4", dest), "iface": m["iface"],
+                    "matched_default": m["destination"] == "default"})
+    return out
+
+
 def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
     v4 = parse_netstat_routes(run(["netstat", "-rn", "-f", "inet"], timeout=8).out, "inet")
     v6 = parse_netstat_routes(run(["netstat", "-rn", "-f", "inet6"], timeout=10).out, "inet6")
@@ -76,11 +111,22 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
             out.append({"gateway": wrapped, "iface": r["iface"], "flags": r["flags"]})
         return out
 
+    # 터널로 나가는 기본 경로가 있는가. 있으면 "그보다 구체적인 경로"가
+    # 터널 우회를 뜻할 수 있다.
+    tunnel_default = [r["iface"] for r in v4 if is_tunnel(r["iface"])]
+
+    # DHCP 가 정적 경로를 제공했을 때만 조회한다. 평소에는 비용이 0 이다.
+    offered = [unwrap(r["dest"]) for r in ((ctx or {}).get("dhcp_static_routes") or [])]
+    offered_egress = egress_for([d for d in offered if d]) if offered else []
+
     return {
         "default4": norm(v4),
         "default6": norm(v6),
         "default4_count": len(v4),
         "default6_count": len(v6),
+        "tunnel_default": tunnel_default,
+        # 제공된 경로가 없으면 키 자체를 넣지 않는다 (평시 비용 0)
+        **({"offered_egress": offered_egress} if offered_egress else {}),
         "ipv6_routers": [
             {"addr": ident("ipv6", r["addr"]), "if": r.get("if"), "pref": r.get("pref")}
             for r in routers

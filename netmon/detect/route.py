@@ -113,4 +113,50 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             evidence={"routes": sorted(c4), "source": "netstat -rn -f inet"},
         ))
 
+    # --- DHCP 가 밀어 넣은 정적 경로 (CVE-2024-3661 벡터) ---
+    p_sr = prev.get("dhcp", "static_routes") or {}
+    c_sr = cur.get("dhcp", "static_routes") or {}
+    if c_sr.get("present") and not p_sr.get("present"):
+        attribution = ctx.identity_attribution()
+        parsed = c_sr.get("parsed", True)
+        routes = c_sr.get("routes") or []
+        out.append(Finding(
+            axis=SECURITY, kind="DHCP_STATIC_ROUTES",
+            confidence=CONFIRMED,
+            severity=LOW if attribution else MEDIUM,
+            summary=(msg.DHCP_STATIC_ROUTES % len(routes) if parsed
+                     else msg.DHCP_STATIC_ROUTES_UNREAD),
+            evidence={"option": c_sr.get("option"), "parsed": parsed,
+                      "routes": routes, "source": "ipconfig getpacket"},
+            attribution=attribution,
+        ))
+
+    # --- 제공된 경로가 터널 밖으로 나간다 ---
+    # 기본 경로만 봐서는 보이지 않는다. 터널 기본 경로가 있는데 DHCP 가 준
+    # 대역이 터널이 아닌 인터페이스로 나가면, 그 대역은 보호 밖이다.
+    tunnels = cur.get("route", "tunnel_default") or []
+    if tunnels:
+        # **매칭된 경로가 기본 경로면 세지 않는다.** 제공된 대역이 설치되지
+        # 않아 조회가 기본 경로로 떨어진 것일 수 있고, 그때 기본 경로가 물리
+        # 인터페이스면 없는 우회를 만들어 낸다. 실제로 설치되어 매칭된
+        # 경우만 사실로 말한다. (0.0.0.0/0 제공 자체는 DHCP_STATIC_ROUTES 가 알림)
+        outside = [e for e in (cur.get("route", "offered_egress") or [])
+                   if e.get("iface") and e["iface"] not in tunnels
+                   and not e.get("matched_default")]
+        prev_outside = {unwrap(e.get("dest")) for e in (prev.get("route", "offered_egress") or [])
+                        if e.get("iface") and e["iface"] not in (prev.get("route", "tunnel_default") or [])
+                        and not e.get("matched_default")}
+        fresh = [e for e in outside if unwrap(e.get("dest")) not in prev_outside]
+        if fresh:
+            out.append(Finding(
+                axis=SECURITY, kind="TUNNEL_BYPASS_ROUTE",
+                confidence=CONFIRMED, severity=HIGH,
+                summary=msg.TUNNEL_BYPASS_ROUTE % len(fresh),
+                evidence={"routes": fresh, "tunnel_default": tunnels,
+                          "source": "route -n get"},
+                # 이동으로 설명되지 않는다. 새 네트워크라도 DHCP 가 준 대역이
+                # 터널 밖으로 나가는 것은 그 자체로 봐야 할 사실이다.
+                attribution=None,
+            ))
+
     return out

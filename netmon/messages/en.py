@@ -48,6 +48,14 @@ IPV6_DEFAULT_ROUTE_APPEARED = ("An IPv6 default route appeared on a physical int
                                "Someone on this network may have sent a router "
                                "advertisement (rogue RA).")
 IPV6_ROUTER_APPEARED = "New IPv6 router in the neighbour table (%d)."
+DHCP_STATIC_ROUTES = ("DHCP offered %d static route(s). This is rare on home networks. "
+                      "It is also the means by which routes more specific than a VPN's "
+                      "default are pushed to bypass the tunnel (CVE-2024-3661).")
+DHCP_STATIC_ROUTES_UNREAD = ("DHCP offered a static-route option whose format could not be "
+                             "decoded. This does not mean there are no routes.")
+TUNNEL_BYPASS_ROUTE = ("%d prefix(es) offered by DHCP egress through a non-tunnel interface. "
+                       "Traffic for those prefixes is outside the VPN. This can be a "
+                       "split-tunnel configuration or route injection - this tool cannot tell.")
 MULTIPLE_DEFAULT_ROUTES = "%d IPv4 default routes. Normal while a VPN is up."
 
 # ─────────────────────────────────────────── Findings: Wi-Fi
