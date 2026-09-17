@@ -48,6 +48,9 @@ IPV6_DEFAULT_ROUTE_APPEARED = ("An IPv6 default route appeared on a physical int
                                "Someone on this network may have sent a router "
                                "advertisement (rogue RA).")
 IPV6_ROUTER_APPEARED = "New IPv6 router in the neighbour table (%d)."
+ROUTES_OUTSIDE_TUNNEL = ("%d new route(s) appeared on a non-tunnel interface (%s). Traffic "
+                         "for those prefixes leaves outside the VPN. This change is not "
+                         "visible in the default route alone.")
 DHCP_STATIC_ROUTES = ("DHCP offered %d static route(s). This is rare on home networks. "
                       "It is also the means by which routes more specific than a VPN's "
                       "default are pushed to bypass the tunnel (CVE-2024-3661).")

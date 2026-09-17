@@ -176,3 +176,46 @@ class TestTunnelBypass(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRoutesOutsideTunnel(unittest.TestCase):
+    """터널 기본 경로가 있는데 물리 인터페이스 경로가 늘면 그만큼 빠져나간 것이다.
+
+    기본 경로만 보면 터널이 멀쩡해 보인다. 실측에서 이 기기는 기본 경로가 3개이고
+    실제 트래픽은 1,230개의 구체적 경로로 터널을 탄다 — 개수 변화가 유일한 단서다.
+    """
+    def _pair(self, before, after, tunnels=("utun8",), attrs=None):
+        p = obs(tunnel_default=tunnels, route_counts=before)
+        c = obs(tunnel_default=tunnels, route_counts=after)
+        return by_kind(run_all(p, c, _ctx(c, attrs)), "ROUTES_OUTSIDE_TUNNEL")
+
+    def test_growth_on_a_physical_iface_is_reported(self):
+        f = self._pair({"utun8": 1230, "en0": 2}, {"utun8": 1230, "en0": 6})
+        self.assertIsNotNone(f)
+        self.assertEqual(f.severity, "medium")
+        self.assertEqual(f.evidence["grew"]["en0"], {"prev": 2, "cur": 6})
+
+    def test_growth_inside_the_tunnel_is_silent(self):
+        self.assertIsNone(self._pair({"utun8": 1230, "en0": 2}, {"utun8": 1400, "en0": 2}))
+
+    def test_shrinking_is_silent(self):
+        self.assertIsNone(self._pair({"utun8": 1230, "en0": 6}, {"utun8": 1230, "en0": 2}))
+
+    def test_no_tunnel_default_means_nothing_to_leave(self):
+        self.assertIsNone(self._pair({"en0": 2}, {"en0": 9}, tunnels=()))
+
+    def test_vpn_transition_explains_it_but_keeps_the_record(self):
+        f = self._pair({"utun8": 1230, "en0": 2}, {"utun8": 1230, "en0": 6},
+                       attrs=["vpn_change"])
+        self.assertEqual(f.attribution, "vpn_change")
+        self.assertEqual(f.severity, "low")
+
+    def test_moving_networks_explains_it(self):
+        f = self._pair({"utun8": 1230, "en0": 2}, {"utun8": 1230, "en0": 6},
+                       attrs=["network_change"])
+        self.assertEqual(f.attribution, "network_change")
+
+    def test_a_brand_new_physical_iface_counts(self):
+        f = self._pair({"utun8": 1230}, {"utun8": 1230, "en1": 3})
+        self.assertIsNotNone(f)
+        self.assertEqual(f.evidence["grew"]["en1"], {"prev": 0, "cur": 3})

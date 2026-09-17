@@ -113,6 +113,29 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             evidence={"routes": sorted(c4), "source": "netstat -rn -f inet"},
         ))
 
+    # --- 터널 밖 인터페이스에 경로가 새로 생김 ---
+    # 터널 기본 경로가 있는데 물리 인터페이스 쪽 경로가 늘면, 그만큼의 대역이
+    # 터널에서 빠져나간 것이다. 기본 경로만 봐서는 보이지 않는 모양이다.
+    tun = cur.get("route", "tunnel_default") or []
+    p_counts = prev.get("route", "route_counts") or {}
+    c_counts = cur.get("route", "route_counts") or {}
+    if tun and c_counts and p_counts:
+        grew = {i: (p_counts.get(i, 0), n) for i, n in c_counts.items()
+                if i not in tun and n > p_counts.get(i, 0)}
+        if grew:
+            attribution = ctx.identity_attribution() or (
+                "vpn_change" if ctx.has("vpn_change") else None)
+            added = sum(n - p for p, n in grew.values())
+            out.append(Finding(
+                axis=SECURITY, kind="ROUTES_OUTSIDE_TUNNEL",
+                confidence=CONFIRMED,
+                severity=LOW if attribution else MEDIUM,
+                summary=msg.ROUTES_OUTSIDE_TUNNEL % (added, ", ".join(sorted(grew))),
+                evidence={"grew": {i: {"prev": p, "cur": n} for i, (p, n) in grew.items()},
+                          "tunnel_default": tun, "source": "netstat -rn -f inet"},
+                attribution=attribution,
+            ))
+
     # --- DHCP 가 밀어 넣은 정적 경로 (CVE-2024-3661 벡터) ---
     p_sr = prev.get("dhcp", "static_routes") or {}
     c_sr = cur.get("dhcp", "static_routes") or {}

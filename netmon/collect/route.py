@@ -62,6 +62,29 @@ def probe() -> Capability:
                       provides=["default_routes", "ipv6_routers"])
 
 
+IFACE_PREFIXES = ("en", "utun", "ipsec", "ppp", "bridge", "awdl", "tun")
+
+
+def count_routes_by_iface(text: str) -> Dict[str, int]:
+    """기본 경로가 아닌 경로를 인터페이스별로 센다.
+
+    **기본 경로만 봐서는 터널 우회가 보이지 않는다.** 더 구체적인 경로가
+    깔리면 기본 경로는 그대로인 채 트래픽만 빠져나간다. 경로 전체를 기록하면
+    주기당 수십 KB 가 되므로 개수만 남긴다. 루프백은 세지 않는다 — 로컬이라
+    터널 밖으로 나가는 트래픽이 아니다.
+    """
+    counts: Dict[str, int] = {}
+    for raw in text.splitlines():
+        parts = raw.split()
+        if len(parts) < 4 or parts[0] in ("default", "::/0"):
+            continue
+        netif = parts[-1]
+        if netif.startswith("lo") or not any(netif.startswith(p) for p in IFACE_PREFIXES):
+            continue
+        counts[netif] = counts.get(netif, 0) + 1
+    return counts
+
+
 def parse_route_get_match(text: str) -> Dict[str, Optional[str]]:
     """실제 송신 인터페이스와 **어떤 경로에 매칭됐는지**.
 
@@ -97,7 +120,8 @@ def egress_for(dests: List[str]) -> List[Dict[str, Any]]:
 
 
 def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
-    v4 = parse_netstat_routes(run(["netstat", "-rn", "-f", "inet"], timeout=8).out, "inet")
+    v4_text = run(["netstat", "-rn", "-f", "inet"], timeout=8).out
+    v4 = parse_netstat_routes(v4_text, "inet")
     v6 = parse_netstat_routes(run(["netstat", "-rn", "-f", "inet6"], timeout=10).out, "inet6")
     routers = parse_ndp_routers(run(["ndp", "-rn"], timeout=6).out)
 
@@ -125,6 +149,7 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         "default4_count": len(v4),
         "default6_count": len(v6),
         "tunnel_default": tunnel_default,
+        "route_counts": count_routes_by_iface(v4_text),
         # 제공된 경로가 없으면 키 자체를 넣지 않는다 (평시 비용 0)
         **({"offered_egress": offered_egress} if offered_egress else {}),
         "ipv6_routers": [

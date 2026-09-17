@@ -60,6 +60,7 @@ def obs(
     vpn: Optional[Dict[str, Any]] = None,
     static_routes: Optional[Dict[str, Any]] = None,
     tunnel_default=(),
+    route_counts=None,
     offered_egress=(),
 ) -> Observation:
     o = Observation(ts=ts)
@@ -100,6 +101,7 @@ def obs(
         "ipv6_routers": [{"addr": ident("ipv6", a), "if": i, "pref": "medium"}
                          for a, i in ipv6_routers],
         "tunnel_default": list(tunnel_default),
+        "route_counts": dict(route_counts or {}),
         "offered_egress": [{"dest": ident("ipv4", d), "iface": i,
                             "matched_default": False}
                            for d, i in offered_egress],

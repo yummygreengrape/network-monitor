@@ -43,6 +43,8 @@ DEFAULT_ROUTE_CHANGED = "IPv4 기본 경로 변경됨."
 IPV6_DEFAULT_ROUTE_APPEARED = ("물리 인터페이스에 IPv6 기본 경로 생성됨. 같은 네트워크의 "
                                "누군가가 라우터 광고를 보냈을 수 있음 (rogue RA).")
 IPV6_ROUTER_APPEARED = "이웃 표에 새 IPv6 라우터 출현 (%d개)."
+ROUTES_OUTSIDE_TUNNEL = ("터널 밖 인터페이스에 경로 %d개가 새로 생김 (%s). 그만큼의 대역이 "
+                         "VPN 보호 밖으로 나감. 기본 경로만 봐서는 보이지 않는 변화임.")
 DHCP_STATIC_ROUTES = ("DHCP 가 정적 경로 %d개를 제공함. 가정용 네트워크에서는 드묾. "
                       "VPN 기본 경로보다 구체적인 경로를 밀어 넣어 터널을 우회시키는 "
                       "수단이기도 함 (CVE-2024-3661).")

@@ -78,6 +78,21 @@ def cmd_doctor(args) -> int:
     if base.get("tunnel_iface"):
         print("기본 경로가 터널 %s 에 있습니다. 물리 경로를 따로 찾아서 봅니다."
               % base["tunnel_iface"])
+    # `route -n get default` 는 실제 송신 경로가 아니다. 더 구체적인 경로가
+    # 깔리면 기본 경로는 그대로인 채 트래픽만 빠져나간다 — 그래서 경로 표를
+    # 따로 보여 준다. 이것이 없으면 터널이 트래픽을 나르는데도 "터널 없음"으로
+    # 읽힌다.
+    from .collect import route as route_mod
+    rt = route_mod.collect({})
+    tun = rt.get("tunnel_default") or []
+    counts = rt.get("route_counts") or {}
+    print("기본 경로  IPv4 %d개%s" % (
+        rt.get("default4_count") or 0,
+        (", 터널 경유 " + ", ".join(tun)) if tun else ""))
+    if counts:
+        print("경로 분포  %s" % "  ".join(
+            "%s=%d%s" % (i, n, " (터널)" if i in tun else "")
+            for i, n in sorted(counts.items(), key=lambda kv: -kv[1])))
     print()
 
     print("수집기")
