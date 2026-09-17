@@ -97,9 +97,12 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                           "per_second": round(rate, 3), "baseline_per_second": round(base, 3),
                           "source": "netstat -s -p arp"},
                 # 네트워크에 새로 붙으면 ARP 를 몰아친다. 흔들림 직후의
-                # 폭주는 그 과정으로 설명된다.
+                # 폭주는 그 과정으로 설명된다. 다만 VPN 은 L2 를 흔들지 않는다 —
+                # 터널이 오르내린다고 세그먼트에 ARP 응답이 쏟아지지는 않으므로
+                # vpn_change 로는 이것을 설명하지 않는다. 설명으로 쓰면 VPN 이
+                # 한 번 끊길 때마다 ARP 스푸핑을 숨길 창이 열린다.
                 attribution=(ctx.quality_attribution() if ctx.moved
-                             else ctx.settling),
+                             else (ctx.settling if ctx.settling != "vpn_change" else None)),
             ))
 
     # --- 한 MAC 이 여러 IP 를 쥐고 있음 ---

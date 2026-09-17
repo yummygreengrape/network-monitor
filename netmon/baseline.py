@@ -64,7 +64,8 @@ def reset_for_new_network(state: Dict[str, Any]) -> Dict[str, Any]:
 def update_counters(state: Dict[str, Any], cur: Observation,
                     attributions: Optional[List[str]] = None,
                     elapsed: Optional[float] = None,
-                    interval: float = 5.0) -> Dict[str, Any]:
+                    interval: float = 5.0,
+                    disrupted: Optional[str] = None) -> Dict[str, Any]:
     """판정 전에 갱신한다. 이번 주기를 포함한 값이어야 하는 것들.
 
     연속 실패 횟수는 ICMP 가 아니라 liveness 가 고른 방법으로 센다. 그러지
@@ -76,7 +77,14 @@ def update_counters(state: Dict[str, Any], cur: Observation,
 
     # 흔들림이 있었으면 창을 다시 연다. 없으면 흘려보낸다.
     step = float(elapsed) if elapsed and elapsed > 0 else float(interval)
+    # disrupted 는 귀속 목록에 넣지 않고 안정화 창만 여는 사유다. 링크가
+    # 실제로 끊겼다 붙은 것은 물리적 사건이라 ARP 폭주·리졸버 재설치를
+    # 동반한다. 하지만 이것을 귀속으로 쓰면 SSID 를 아는데도 정체성 판정이
+    # 통째로 덮인다 (evil twin 이 링크를 한 번 끊고 들어오면 끝난다).
+    # 그래서 "설명" 이 아니라 "안정화 중" 으로만 쓴다.
     fresh = [a for a in DISRUPTIONS if a in (attributions or [])]
+    if disrupted in DISRUPTIONS and disrupted not in fresh:
+        fresh.append(disrupted)
     if fresh:
         new["settle_left_s"] = SETTLE_SECONDS
         open_reason = state.get("settle_reason") if state.get("settle_left_s") else None

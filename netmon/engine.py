@@ -118,8 +118,9 @@ class Engine:
                             evidence={"iface": obs.get("iface") or {}},
                             network=self.state.get("network"))]
 
+        link_gap = self.link_gap
         attributions = attributions_for(self.prev, obs, elapsed, interval,
-                                        self.anchor, self.link_gap)
+                                        self.anchor, link_gap)
         self.link_gap = False
         # 링크가 새로 붙었으면 다른 장소일 수 있다. 이전 기준선을 그대로 쓰면
         # 새 장소의 첫 몇 분이 통째로 오탐이 된다.
@@ -128,8 +129,12 @@ class Engine:
         if changed:
             self.state = baseline.reset_for_new_network(self.state)
 
+        # 링크가 끊겼다 붙은 사실 자체로 안정화 창을 연다. SSID 를 알면
+        # link_restart 는 귀속되지 않지만(정체성 검사를 지키려고), 재접속
+        # 직후의 ARP 폭주와 리졸버 재설치는 SSID 를 알든 모르든 똑같이 일어난다.
         self.state = baseline.update_counters(self.state, obs, attributions,
-                                              elapsed, interval)
+                                              elapsed, interval,
+                                              disrupted="link_restart" if link_gap else None)
 
         ctx = Context(
             elapsed=elapsed,
