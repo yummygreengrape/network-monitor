@@ -30,6 +30,10 @@ def _external_resolver(dns_block: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+# 비교 기준을 디스크에 남기는 주기. 매 주기 쓰면 쓰기량이 20배가 된다.
+BASELINE_SAVE_SECONDS = 60.0
+
+
 class Engine:
     def __init__(self, cfg: Config, store: Store) -> None:
         self.cfg = cfg
@@ -44,9 +48,48 @@ class Engine:
         self.link_gap: bool = False
         self.prev_wall: Optional[float] = None
         self.state: Dict[str, Any] = store.load_state()
+        # **비교 기준을 디스크에서 되살린다.** 이것이 없으면 재시작 경계에
+        # 걸친 변화가 통째로 사라진다 — 게이트웨이 MAC 과 DHCP 서버가 동시에
+        # 바뀌어도 판정이 하나도 나지 않는 것을 실험으로 확인했다.
+        # launchd 가 KeepAlive 로 되살리므로 의도치 않은 재시작도 잦다.
+        self._baseline_saved_at: Optional[float] = None
+        self._restore_baseline()
         self.investigator = investigate.Investigator(cfg.data.get("investigate"))
         # 조사가 요청한 측정 변화. 다음 주기에 반영된다.
         self.needs: Dict[str, Any] = {}
+
+    # --- 재시작을 건너뛰는 비교 기준 ---
+    def _restore_baseline(self) -> None:
+        saved = self.store.load_baseline()
+        if not isinstance(saved, dict) or not saved.get("ts"):
+            return
+        try:
+            obs = Observation(ts=saved["ts"], data=saved.get("data") or {})
+        except Exception:
+            return
+        if not is_complete(obs):
+            return
+        self.prev = obs
+        self.anchor = obs
+        wall = saved.get("wall")
+        self.prev_wall = float(wall) if isinstance(wall, (int, float)) else None
+        # 에이전트가 멈춰 있던 시간은 측정 공백이다. 다음 주기에서 elapsed 가
+        # 크게 벌어져 sleep 으로 귀속되는데, sleep 은 품질만 설명하고
+        # 정체성 판정은 그대로 판정된다 — 원하는 동작이다.
+
+    def _keep_baseline(self, obs: Observation, wall: Optional[float]) -> None:
+        """기준을 디스크에 남긴다. 매 주기 쓰지 않는다 — 60초면 충분하다.
+
+        재시작이 기준을 60초까지 뒤처진 것으로 만들 수 있으나, 그 기준으로도
+        보안 비교는 그대로 성립한다. 아무것도 없는 것과는 전혀 다르다.
+        """
+        if not is_complete(obs):
+            return
+        last = self._baseline_saved_at
+        if last is not None and wall is not None and wall - last < BASELINE_SAVE_SECONDS:
+            return
+        self.store.save_baseline({"ts": obs.ts, "data": obs.data, "wall": wall})
+        self._baseline_saved_at = wall
 
     # --- 수집 ---
     def observe(self) -> Observation:
@@ -173,6 +216,8 @@ class Engine:
         if is_complete(obs):
             self.prev = obs
         self.prev_wall = now
+        # 다음 실행이 이어서 비교할 수 있도록 남긴다.
+        self._keep_baseline(obs, now)
         return obs, findings
 
     def effective_interval(self, configured: float) -> float:
@@ -201,6 +246,7 @@ def replay(cfg: Config, observations: List[Observation]) -> List[Tuple[Observati
     eng.prev = None
     eng.anchor = None
     eng.link_gap = False
+    eng._baseline_saved_at = None
     eng.prev_wall = None
     eng.state = {}
     eng.investigator = investigate.Investigator(cfg.data.get("investigate"))

@@ -99,6 +99,32 @@ class Store:
         except (OSError, ValueError):
             return {}
 
+    @property
+    def baseline_path(self) -> str:
+        return os.path.join(self.dir, "baseline.json")
+
+    def load_baseline(self) -> Dict[str, Any]:
+        """재시작을 건너뛸 비교 기준. 없거나 깨졌으면 빈 dict."""
+        if not os.path.exists(self.baseline_path):
+            return {}
+        try:
+            with open(self.baseline_path, encoding="utf-8") as fh:
+                got = json.load(fh)
+            return got if isinstance(got, dict) else {}
+        except (ValueError, OSError):
+            return {}
+
+    def save_baseline(self, data: Dict[str, Any]) -> None:
+        """관측 하나(6KB 남짓)라 state.json 과 섞지 않는다.
+
+        state.json 은 매 주기 다시 쓰이므로, 여기에 관측을 넣으면 쓰기량이
+        20배가 된다. 파일을 나누고 저장 주기도 따로 둔다.
+        """
+        tmp = self.baseline_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False)
+        os.replace(tmp, self.baseline_path)
+
     def save_state(self, state: Dict[str, Any]) -> None:
         tmp = self.state_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
