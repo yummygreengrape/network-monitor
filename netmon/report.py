@@ -9,6 +9,7 @@ from collections import Counter, OrderedDict
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import messages as msg
+from . import wifi_security
 from .model import CONFIRMED, POSSIBLE, QUALITY, SECURITY, SUSPECT
 
 def conf_labels() -> "OrderedDict[str, str]":
@@ -106,12 +107,16 @@ def exposure_notes(last_sample: Optional[Dict[str, Any]]) -> List[str]:
     out = []
     data = last_sample.get("data", {})
     wifi = data.get("wifi") or {}
-    sec = (wifi.get("security") or "").lower()
     if wifi.get("applicable"):
-        if sec.startswith("wpa") and "enterprise" not in sec:
-            out.append(msg.EXPOSURE_SHARED_PSK % (wifi.get("security") or "?"))
-        elif sec in ("none", "open", ""):
+        kind = wifi_security.classify(wifi.get("security"))
+        label = wifi.get("security") or "?"
+        if kind == wifi_security.OPEN:
             out.append(msg.EXPOSURE_OPEN)
+        elif kind == wifi_security.SHARED_PASSIVE:
+            out.append(msg.EXPOSURE_SHARED_PSK % label)
+        elif kind == wifi_security.SHARED_SAE:
+            # 수동 복호가 안 되는 것을 "복호 가능" 이라고 적으면 사실이 아니다
+            out.append(msg.EXPOSURE_SHARED_SAE % label)
     if wifi.get("applicable") and wifi.get("location") not in ("granted", "granted-via-helper"):
         out.append(msg.EXPOSURE_IDENTITY_AMBIGUOUS)
     if (data.get("dns") or {}).get("via_loopback"):

@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .. import messages as msg
+from .. import wifi_security
 from ..liveness import evaluate
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, QUALITY, SECURITY,
                      Finding, Observation)
@@ -27,10 +28,6 @@ CONNECTED = "connected"
 # 사용자가 직접 끊은 것으로 보이는 사유. 공급자마다 표기가 다르다.
 USER_ACTION_HINTS = ("manual", "user", "disabled_by_user", "stopped")
 
-# 개인별 자격증명을 쓰는 방식. 이것만 "다른 사람이 내 트래픽을 볼 수 없다"고
-# 말할 수 있다. 나머지는 전부 공유 자격증명이거나 암호화가 없다.
-PER_USER_CREDENTIAL = ("enterprise", "eap", "802.1x", "8021x")
-
 
 def _user_action(reason: Optional[str]) -> bool:
     if not reason:
@@ -39,11 +36,12 @@ def _user_action(reason: Optional[str]) -> bool:
     return any(h in low for h in USER_ACTION_HINTS)
 
 
-def _network_is_untrusted(cur: Observation,
-                          prev: Optional[Observation] = None) -> Optional[bool]:
-    """이 네트워크에서 보호가 사라지는 것이 얼마나 위험한가.
+def _security_kind(cur: Observation,
+                   prev: Optional[Observation] = None) -> str:
+    """이 네트워크에서 보호가 사라지면 누가 무엇을 볼 수 있는가.
 
-    None 은 "모른다"다. 유선이거나 암호화 방식을 못 읽은 경우다.
+    wifi_security 의 분류값을 돌려준다. UNKNOWN 은 "모른다"다 — 유선이거나
+    암호화 방식을 못 읽은 경우이고, 이때는 노출을 단정하지 않는다.
     """
     wifi = cur.get("wifi") or {}
     sec = (wifi.get("security") or "") if wifi.get("applicable") else ""
@@ -60,14 +58,7 @@ def _network_is_untrusted(cur: Observation,
             if pw.get("applicable"):
                 sec = pw.get("security") or ""
 
-    sec = sec.lower()
-    if not sec:
-        return None
-    # 접미사 없는 "WPA2" 도 사실상 Personal 이다. 개인별 자격증명이라는 근거가
-    # 있을 때만 신뢰 쪽으로 보낸다 — 모르면 위험한 쪽으로 친다.
-    if any(t in sec for t in PER_USER_CREDENTIAL):
-        return False
-    return True
+    return wifi_security.classify(sec)
 
 
 def _down_reason(cur: Observation, ctx, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -156,17 +147,27 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
             # 보호가 사라진 것은 별개 사건이다. 사용자가 직접 끊었어도
             # "지금 보호받고 있지 않다"는 사실은 남는다.
-            untrusted = _network_is_untrusted(cur, prev)
-            if untrusted is not False:
+            kind = _security_kind(cur, prev)
+            if kind != wifi_security.PER_USER:
+                if kind in (wifi_security.OPEN, wifi_security.SHARED_PASSIVE):
+                    summary = msg.VPN_PROTECTION_LOST % name
+                    severity = LOW if user else MEDIUM
+                elif kind == wifi_security.SHARED_SAE:
+                    # 조용히 읽히지는 않는다. 능동적 가로채기만 가능하므로
+                    # 개방형·WPA2 때와 같은 등급으로 올리지 않는다.
+                    summary = msg.VPN_PROTECTION_LOST_SAE % name
+                    severity = LOW
+                else:
+                    summary = msg.VPN_PROTECTION_LOST_UNKNOWN % name
+                    severity = LOW
                 out.append(Finding(
                     axis=SECURITY, kind="VPN_PROTECTION_LOST",
-                    confidence=CONFIRMED,
-                    severity=LOW if (user or untrusted is None) else MEDIUM,
-                    summary=((msg.VPN_PROTECTION_LOST if untrusted
-                              else msg.VPN_PROTECTION_LOST_UNKNOWN) % name),
+                    confidence=CONFIRMED, severity=severity, summary=summary,
                     evidence={"provider": name,
                               "wifi_security": (cur.get("wifi") or {}).get("security"),
-                              "untrusted_network": untrusted,
+                              "security_kind": kind,
+                              "passively_readable":
+                                  kind in (wifi_security.OPEN, wifi_security.SHARED_PASSIVE),
                               "user_action": user},
                     attribution="user_action" if user else None,
                 ))

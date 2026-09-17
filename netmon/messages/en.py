@@ -324,3 +324,11 @@ WHY_LINK_GONE = "the link itself went away"
 DAY_IS_UTC = "Dates are in UTC (local time %s)."
 WHY_WOKE = "waking from sleep"
 WHY_LINK_BACK = "the link had just come back"
+
+# ─────────────────────────────────────────── Exposure by encryption type
+EXPOSURE_SHARED_SAE = ("WPA3-SAE Wi-Fi (%s): anyone who knows the password can join the same "
+                       "L2 segment and forge ARP, DHCP and RA. Keys differ per session, "
+                       "though, so knowing the password does not decrypt others' traffic.")
+VPN_PROTECTION_LOST_SAE = ("%s dropped, so traffic is leaving outside the tunnel. WPA3-SAE means "
+                           "it is not readable passively, but a device that joined the segment "
+                           "could still intercept the path and see it.")
