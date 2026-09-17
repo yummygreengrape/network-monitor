@@ -33,6 +33,11 @@ def _external_resolver(dns_block: Dict[str, Any]) -> Optional[str]:
 # 비교 기준을 디스크에 남기는 주기. 매 주기 쓰면 쓰기량이 20배가 된다.
 BASELINE_SAVE_SECONDS = 60.0
 
+# 커널 ARP 로그를 읽는 간격과 조회 창. `log show` 는 고정 1초쯤 들고 창이
+# 커지면 더 든다(1시간치 8.9초). 간격보다 창을 넉넉히 잡아 빈틈을 막는다.
+ARP_LOG_EVERY_SECONDS = 60.0
+ARP_LOG_WINDOW_SECONDS = 90.0
+
 
 class Engine:
     def __init__(self, cfg: Config, store: Store) -> None:
@@ -53,6 +58,7 @@ class Engine:
         # 바뀌어도 판정이 하나도 나지 않는 것을 실험으로 확인했다.
         # launchd 가 KeepAlive 로 되살리므로 의도치 않은 재시작도 잦다.
         self._baseline_saved_at: Optional[float] = None
+        self._arp_log_read_at: Optional[float] = None
         self._restore_baseline()
         self.investigator = investigate.Investigator(cfg.data.get("investigate"))
         # 조사가 요청한 측정 변화. 다음 주기에 반영된다.
@@ -116,6 +122,13 @@ class Engine:
             unwrap(obs.data["iface"].get("scoped_gateway"))
         ctx["gateway"] = gw
 
+        # 커널 ARP 로그는 비싸다. 간격을 두고 읽는다.
+        now_wall = self.prev_wall or 0.0
+        due = (self._arp_log_read_at is None
+               or now_wall - self._arp_log_read_at >= ARP_LOG_EVERY_SECONDS)
+        ctx["read_arp_log"] = ARP_LOG_WINDOW_SECONDS if due else None
+        if due:
+            self._arp_log_read_at = now_wall
         step(arp, "arp")
         step(dhcp, "dhcp")
         # DHCP 가 정적 경로를 제공했으면 경로 수집기가 그 대역의 실제 송신
@@ -247,6 +260,7 @@ def replay(cfg: Config, observations: List[Observation]) -> List[Tuple[Observati
     eng.anchor = None
     eng.link_gap = False
     eng._baseline_saved_at = None
+    eng._arp_log_read_at = None
     eng.prev_wall = None
     eng.state = {}
     eng.investigator = investigate.Investigator(cfg.data.get("investigate"))

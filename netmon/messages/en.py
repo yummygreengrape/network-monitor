@@ -18,6 +18,15 @@ GW_MAC_CHANGED = ("Gateway MAC changed while staying on the same network. "
                   "ARP spoofing or an access point swap is suspected.")
 GW_MAC_CHANGED_MOVED = "Gateway MAC changed, but the network changed at the same time."
 DUPLICATE_IP = "IP conflict detected (Duplicate IP seen counter rose by %d)."
+HINT_ARP_LOG_OFF = ("Kernel ARP warnings are off, so MAC substitutions are recorded "
+                    "nowhere. `sudo sysctl -w %s=1` records the old and new MAC together "
+                    "and catches substitutions that happen between polls. Resets on reboot.")
+ARP_MAC_SUBSTITUTED = ("The kernel recorded %d ARP entry MAC substitution(s), including "
+                       "changes that happen between polls and leave no trace in the cache.")
+ARP_MAC_SUBSTITUTED_GW = ("The kernel recorded %d ARP entry MAC substitution(s), and the "
+                          "gateway was among them. This is the classic shape of ARP spoofing.")
+ARP_PERMANENT_DENIED = ("The kernel refused %d attempt(s) to modify a permanent ARP entry. "
+                        "Normal operation does not produce this.")
 ARP_REPLY_SPIKE = "ARP replies received rose to %.0fx the usual rate (%d per cycle, average %.1f)."
 SHARED_MAC = ("One MAC is holding %d addresses at once. This is the shape of ARP "
               "spoofing, but a router answering by proxy looks the same.")

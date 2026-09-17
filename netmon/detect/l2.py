@@ -105,6 +105,49 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                              else (ctx.settling if ctx.settling != "vpn_change" else None)),
             ))
 
+    # --- 커널이 기록한 MAC 치환 ---
+    # 폴링은 "지금 값"만 본다. 두 주기 사이에 바뀌었다가 되돌아간 치환은
+    # 캐시에 흔적이 없다. 커널 로그는 그 순간을 옛 MAC·새 MAC 과 함께 남긴다.
+    # 기본값에서는 꺼져 있다 — 이 기기에서 24시간 동안 0건을 확인했다.
+    events = cur.get("arp", "log_events")
+    if events:
+        seen = set(ctx.state.get("arp_log_seen") or [])
+        gw = unwrap(cur.get("arp", "gateway_mac"))
+        fresh = []
+        for e in events:
+            key = "%s|%s|%s" % (e.get("ts"), unwrap(e.get("ip")), unwrap(e.get("cur")))
+            if key in seen:
+                continue
+            seen.add(key)
+            fresh.append(e)
+        # 창이 겹치므로 본 것을 기억한다. 무한정 쌓이지 않게 잘라 둔다.
+        ctx.state["arp_log_seen"] = sorted(seen)[-200:]
+
+        moved = [e for e in fresh if e.get("kind") == "moved"]
+        denied = [e for e in fresh if e.get("kind") == "permanent_denied"]
+        if moved:
+            # 게이트웨이가 섞여 있으면 등급을 올린다.
+            hits_gw = any(unwrap(e.get("prev")) == gw or unwrap(e.get("cur")) == gw
+                          for e in moved) if gw else False
+            out.append(Finding(
+                axis=SECURITY, kind="ARP_MAC_SUBSTITUTED",
+                confidence=CONFIRMED,
+                severity=HIGH if hits_gw else MEDIUM,
+                summary=(msg.ARP_MAC_SUBSTITUTED_GW if hits_gw
+                         else msg.ARP_MAC_SUBSTITUTED) % len(moved),
+                evidence={"events": moved, "source": "log show (kernel)"},
+                # 이동으로 설명되지 않는다. 커널이 기록한 사실이다.
+                attribution=None,
+            ))
+        if denied:
+            out.append(Finding(
+                axis=SECURITY, kind="ARP_PERMANENT_DENIED",
+                confidence=CONFIRMED, severity=HIGH,
+                summary=msg.ARP_PERMANENT_DENIED % len(denied),
+                evidence={"events": denied, "source": "log show (kernel)"},
+                attribution=None,
+            ))
+
     # --- 한 MAC 이 여러 IP 를 쥐고 있음 ---
     # 라우터가 대리 응답하는 정상 구성에서도 나온다. 그래서 '가능'에 머문다.
     prev_shared = set((prev.get("arp", "shared_macs") or {}).keys())

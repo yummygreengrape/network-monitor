@@ -49,6 +49,8 @@ def obs(
     rtt: Optional[float] = 3.0,
     arp_replies: int = 1000,
     duplicate_ip: int = 0,
+    arp_log=None,
+    arp_log_enabled: bool = False,
     lease_start: str = "2026-01-01 00:00:00",
     default6=(),
     ipv6_routers=(),
@@ -80,6 +82,8 @@ def obs(
         "replies_received": arp_replies,
         "requests_received": arp_replies * 3,
         "shared_macs": shared_macs or {},
+        "log_enabled": arp_log_enabled,
+        **({"log_events": list(arp_log)} if arp_log else {}),
     }
     o.data["dhcp"] = {
         "available": True,

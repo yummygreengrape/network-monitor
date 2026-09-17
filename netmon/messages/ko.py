@@ -17,6 +17,15 @@ GW_MAC_CHANGED = ("게이트웨이 MAC 변경됨. 같은 네트워크에 머문 
                   "ARP 스푸핑 또는 접속점 교체 의심.")
 GW_MAC_CHANGED_MOVED = "게이트웨이 MAC 변경됨. 같은 시점에 네트워크도 변경됨."
 DUPLICATE_IP = "IP 충돌 감지됨 (Duplicate IP seen 카운터 %d회 증가)."
+HINT_ARP_LOG_OFF = ("커널 ARP 경고가 꺼져 있어 MAC 치환이 어디에도 기록되지 않음. "
+                    "`sudo sysctl -w %s=1` 로 켜면 옛 MAC 과 새 MAC 이 함께 남고, "
+                    "폴링 사이에 일어난 치환도 잡힘. 재부팅하면 꺼짐.")
+ARP_MAC_SUBSTITUTED = ("커널이 ARP 항목의 MAC 치환 %d건을 기록함. 폴링 사이에 일어나 "
+                       "캐시에는 남지 않는 변화도 포함됨.")
+ARP_MAC_SUBSTITUTED_GW = ("커널이 ARP 항목의 MAC 치환 %d건을 기록했고 그중 게이트웨이가 "
+                          "포함됨. ARP 스푸핑의 전형적 형태임.")
+ARP_PERMANENT_DENIED = ("고정 ARP 항목을 바꾸려는 시도 %d건이 커널에 의해 거부됨. "
+                        "정상 동작에서는 나오지 않는 형태임.")
 ARP_REPLY_SPIKE = "ARP 응답 수신량이 평소의 %.0f배로 증가 (%d건/주기, 평균 %.1f)."
 SHARED_MAC = ("MAC 하나가 IP %d개를 동시 사용 중. ARP 스푸핑에서 나타나는 형태이나 "
               "라우터 대리 응답에서도 같은 형태로 나타남.")

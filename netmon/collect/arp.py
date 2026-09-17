@@ -5,8 +5,11 @@
 """
 from __future__ import annotations
 
+import re
+
 from typing import Any, Dict, List, Optional
 
+from .. import messages as msg
 from ..model import ident
 from ..util import OK, BROKEN, Capability, run
 
@@ -102,14 +105,94 @@ def lookup(rows: List[Dict[str, Any]], ip: str, iface: Optional[str] = None) -> 
     return None
 
 
+# 커널이 ARP 엔트리의 MAC 을 덮어쓸 때 남기는 경고. **기본값에서는 꺼져 있어
+# 아무 흔적도 남지 않는다** — 이 기기에서 24시간 동안 `arp:` 커널 메시지 0건을
+# 확인했다. 켜면 옛 MAC 과 새 MAC 을 모두 담은 타임스탬프 사건이 생기는데,
+# 이것은 5초 폴링으로는 만들 수 없는 증거다. 폴링은 "지금 값"만 본다.
+ARP_LOG_SYSCTL = "net.link.ether.inet.log_arp_warnings"
+
+# `arp: <ip> moved from <old> to <new> on <iface>`
+# compact 형식의 앞머리: `2026-09-17 21:03:33.513 Df kernel[0:1a2b] ...`
+_STAMP = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)")
+
+_MOVED = re.compile(
+    r"arp:\s+(?P<ip>[0-9.]+)\s+moved\s+from\s+(?P<old>[0-9a-fA-F:]+)"
+    r"\s+to\s+(?P<new>[0-9a-fA-F:]+)(?:\s+on\s+(?P<iface>\w+))?")
+# `arp: <mac> attempts to modify permanent entry for <ip> on <iface>`
+_PERMANENT = re.compile(
+    r"arp:\s+(?P<mac>[0-9a-fA-F:]+)\s+attempts to modify permanent entry for"
+    r"\s+(?P<ip>[0-9.]+)(?:\s+on\s+(?P<iface>\w+))?")
+
+
+def arp_logging_enabled() -> Optional[bool]:
+    """커널 ARP 경고가 켜져 있는가. 못 읽으면 None."""
+    r = run(["sysctl", "-n", ARP_LOG_SYSCTL], timeout=3)
+    if r.rc != 0:
+        return None
+    v = r.out.strip()
+    return v not in ("", "0") if v.isdigit() or v == "" else None
+
+
+def parse_arp_log(text: str) -> List[Dict[str, Any]]:
+    """커널 로그 줄에서 MAC 치환·영구 엔트리 변경 시도만 뽑는다.
+
+    형식을 못 읽은 `arp:` 줄은 버리지 않고 raw 로 남긴다 — 못 읽은 것을
+    없는 것으로 만들면 안 된다.
+    """
+    out: List[Dict[str, Any]] = []
+    for raw in text.splitlines():
+        if "arp:" not in raw:
+            continue
+        st = _STAMP.match(raw.strip())
+        when = st.group("ts") if st else None
+        m = _MOVED.search(raw)
+        if m:
+            out.append({"kind": "moved", "ts": when,
+                        "ip": ident("ipv4", m.group("ip")),
+                        "prev": ident("mac", normalize_mac(m.group("old"))),
+                        "cur": ident("mac", normalize_mac(m.group("new"))),
+                        "iface": m.group("iface")})
+            continue
+        m = _PERMANENT.search(raw)
+        if m:
+            out.append({"kind": "permanent_denied", "ts": when,
+                        "ip": ident("ipv4", m.group("ip")),
+                        "cur": ident("mac", normalize_mac(m.group("mac"))),
+                        "iface": m.group("iface")})
+            continue
+        out.append({"kind": "unparsed", "ts": when, "raw": raw.strip()[-160:]})
+    return out
+
+
+def read_arp_log(seconds: float) -> List[Dict[str, Any]]:
+    """최근 N초의 커널 ARP 메시지. 비root 로 읽힌다.
+
+    `log show` 는 창 크기와 무관하게 약 1초가 든다(고정 오버헤드). 5초 주기에
+    매번 넣을 수 없으므로 엔진이 빈도를 조절한다.
+    """
+    r = run(["log", "show", "--last", "%ds" % max(1, int(seconds)), "--style", "compact",
+             "--predicate", 'process == "kernel" AND eventMessage BEGINSWITH "arp:"'],
+            timeout=20)
+    return parse_arp_log(r.out) if r.rc == 0 else []
+
+
 def probe() -> Capability:
     r = run(["arp", "-an", "-x"], timeout=4)
     if r.not_found:
         return Capability(NAME, BROKEN, "arp 명령 없음")
     if r.rc != 0:
         return Capability(NAME, BROKEN, "arp -an -x 실패: %s" % (r.err.strip()[:60]))
+    enabled = arp_logging_enabled()
+    provides = ["gateway_mac", "duplicate_ip", "arp_rates"]
+    hint = ""
+    if enabled:
+        provides.append("arp_mac_substitution")
+    elif enabled is False:
+        # 꺼져 있으면 MAC 치환이 카운터에도 로그에도 남지 않는다. 폴링은
+        # "지금 값"만 보므로, 주기 사이에 바뀌었다 되돌아간 것은 놓친다.
+        hint = msg.HINT_ARP_LOG_OFF % ARP_LOG_SYSCTL
     return Capability(NAME, OK, "%d개 이웃 항목" % len(parse_arp_table(r.out)),
-                      provides=["gateway_mac", "duplicate_ip", "arp_rates"])
+                      provides=provides, hint=hint)
 
 
 def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -147,4 +230,9 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         },
         "shared_mac_total": len(shared),
         "stats_keys": len(stats),
+        # 커널 ARP 경고. 꺼져 있으면 MAC 치환이 어디에도 기록되지 않는다.
+        "log_enabled": arp_logging_enabled(),
+        # 로그 조회는 고정 1초쯤 들어 매 주기 하지 않는다. 엔진이 시킬 때만.
+        **({"log_events": read_arp_log(ctx["read_arp_log"])}
+           if ctx.get("read_arp_log") else {}),
     }
