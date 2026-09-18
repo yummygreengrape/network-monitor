@@ -90,9 +90,16 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             ))
 
     # --- IPv6 라우터 목록 변화 ---
+    # **"새" 는 이 네트워크에서 한 번도 본 적 없다는 뜻이어야 한다.** 직전
+    # 관측과만 비교하면 이웃 표에서 잠깐 빠졌다 돌아온 라우터가 새 라우터가
+    # 된다. 실측 이틀간 이 판정 2건이 전부 그랬다 — 하나는 OS 업데이트로
+    # 종료되던 순간의 이웃 표가 비교 기준으로 남아서였다.
     p_r, c_r = _router_addrs(prev), _router_addrs(cur)
-    new_routers = c_r - p_r
-    if new_routers and p_r:
+    known = set(ctx.state.get("ipv6_routers_known") or []) | p_r
+    new_routers = c_r - known
+    # 본 것을 기억한다. 네트워크가 바뀌면 baseline 이 이 목록을 비운다.
+    ctx.state["ipv6_routers_known"] = sorted(known | c_r)[-64:]
+    if new_routers and known:
         out.append(Finding(
             axis=SECURITY, kind="IPV6_ROUTER_APPEARED",
             confidence=SUSPECT,

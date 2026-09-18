@@ -43,6 +43,8 @@ def rtt_elevated(rtt: Optional[float], base: Optional[float]) -> bool:
 # 네트워크가 바뀌면 기준선을 버린다. 이전 네트워크의 정상값을 새 네트워크에
 # 적용하면 첫 몇 분이 통째로 오탐이 된다.
 VOLATILE_KEYS = ("rtt_ewma", "rtt_high_run", "arp_reply_rate", "gw_fail_streak", "gw_fail_streak_prev",
+                 # 네트워크가 바뀌면 그곳의 라우터를 새로 배운다
+                 "ipv6_routers_known",
                  "arp_replies_last", "settle_left_s", "settle_reason",
                  # 게이트웨이가 ICMP 에 응답하는지는 네트워크마다 다르다.
                  "icmp_gw", "cycles_on_network", "_liveness_decided", "icmp_fail_run")
