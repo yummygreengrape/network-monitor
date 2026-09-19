@@ -113,3 +113,19 @@ class Observation:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Observation":
         return cls(ts=d["ts"], data=d.get("data", {}), errors=d.get("errors", {}))
+
+
+def local_stamp(ts: str) -> str:
+    """기록 시각(UTC, `2026-09-20T15:37:13Z`)을 이 기계의 현지 시각으로.
+
+    화면 머리의 시계는 현지 시각인데 로그 줄은 UTC 를 표시 없이 찍어서,
+    언제 올라온 줄인지 알 수 없었다 — KST 새벽 1시 32분 경보가 "16:32" 로
+    보였다. 날짜가 바뀌는 경계에서 헷갈리지 않도록 월-일도 함께 붙인다.
+    읽을 수 없는 값이면 원래 문자열의 시각 부분을 그대로 쓴다.
+    """
+    import datetime as _dt
+    try:
+        t = _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
+    except (TypeError, ValueError):
+        return (ts or "")[11:19]
+    return t.astimezone().strftime("%m-%d %H:%M:%S")

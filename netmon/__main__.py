@@ -23,6 +23,7 @@ from . import (__version__, config as configmod, investigate, link as linkmod,
                setup as setupmod, vpn,
                watch as watchmod, wifi_helper)
 from .collect import REGISTRY as COLLECTORS
+from .model import local_stamp
 from .engine import Engine, replay as replay_engine
 from .model import Observation
 from .report import exposure_notes, render
@@ -659,12 +660,12 @@ def cmd_run(args) -> int:
                 if f.attribution and not args.verbose:
                     continue
                 tag = " (억제: %s)" % f.attribution if f.attribution else ""
-                print("%s  [%s/%s] %s%s" % (obs.ts[11:19], f.axis, f.severity, f.summary, tag))
+                print("%s  [%s/%s] %s%s" % (local_stamp(obs.ts), f.axis, f.severity, f.summary, tag))
             if args.count and n >= args.count:
                 break
             wait = eng.effective_interval(interval)
             if wait != interval and n % 10 == 1:
-                print(msg.CLI_RUN_FASTER % (obs.ts[11:19], eng.needs.get("open", 0), wait))
+                print(msg.CLI_RUN_FASTER % (local_stamp(obs.ts), eng.needs.get("open", 0), wait))
             time.sleep(max(0.0, wait - (time.time() - start)))
     except KeyboardInterrupt:
         print()

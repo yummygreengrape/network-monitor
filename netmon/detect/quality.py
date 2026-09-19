@@ -18,7 +18,12 @@ from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, QUALITY, SUSPECT,
 FEATURE = "detect.quality"
 
 # 왕복 시간 급변 기준은 baseline 이 갖는다. 연속 횟수를 거기서 세기 때문이다.
-FAIL_STREAK_ALERT = 2
+# 첫 홉이 이만큼 연속으로 무응답이면 알린다. 예전에는 2(10초)였다.
+# 2026-09-20 실측: 2회짜리 공백이 30분 간격으로 되풀이됐는데, 같은 순간
+# 공유기를 지나 외부로 나가는 ping 은 전부 성공했다 — 공유기가 자기 앞으로
+# 온 ICMP 를 가끔 무시한 것이지 연결이 끊긴 것이 아니었다. 실제 열화
+# (2026-09-17, 2.4GHz 혼잡)의 끊김은 4·6·11회 연속이었으므로 3 으로도 잡힌다.
+FAIL_STREAK_ALERT = 3
 
 METHOD_LABEL = {ARP: "ARP 해석", ICMP: "ICMP 응답", LINK: "링크 상태"}
 

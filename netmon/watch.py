@@ -11,7 +11,7 @@ import datetime
 from typing import Any, Dict, List, Optional
 
 from . import messages as msg
-from .model import QUALITY, SECURITY, unwrap
+from .model import local_stamp, QUALITY, SECURITY, unwrap
 
 CLEAR = "\033[H\033[2J"
 DIM = "\033[2m"
@@ -110,7 +110,7 @@ def render(now: datetime.datetime, agent: Dict[str, Any],
             for e in recent:
                 if e.get("what") == msg.INV_NOTE_RETUNE:
                     continue
-                out.append("    %s%s  %s%s" % (DIM, e.get("ts", "")[11:19],
+                out.append("    %s%s  %s%s" % (DIM, local_stamp(e.get("ts", "")),
                                                e.get("what", ""), OFF))
     else:
         out.append("  %s%s%s" % (DIM, msg.WATCH_NO_INVESTIGATION, OFF))
@@ -126,11 +126,11 @@ def render(now: datetime.datetime, agent: Dict[str, Any],
         color = SEV_COLOR.get(e.get("severity"), "")
         tag = msg.WATCH_SUPPRESSED_TAG if e.get("attribution") else ""
         summary = e.get("summary", "")
-        room = width - 34
+        room = width - 40
         if len(summary) > room:
             summary = summary[:room - 1] + "…"
         out.append("  %s  %s%-4s %-6s%s %-24s %s%s"
-                   % (e.get("ts", "")[11:19],
+                   % (local_stamp(e.get("ts", "")),
                       color, AXIS_LABEL.get(e.get("axis"), "?"),
                       e.get("severity", ""), OFF,
                       e.get("kind", ""), summary,

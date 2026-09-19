@@ -52,9 +52,9 @@ class TestRecoveryFires(unittest.TestCase):
         return seen
 
     def test_outage_then_recovery_both_appear(self):
-        seen = self._run([False, False, True])
-        self.assertIn("FIRST_HOP_UNREACHABLE", seen[1], "두 번째 실패에서 알린다")
-        self.assertIn("FIRST_HOP_RECOVERED", seen[2], "복구도 기록돼야 한다")
+        seen = self._run([False, False, False, True])
+        self.assertIn("FIRST_HOP_UNREACHABLE", seen[2], "세 번째 실패에서 알린다")
+        self.assertIn("FIRST_HOP_RECOVERED", seen[3], "복구도 기록돼야 한다")
 
     def test_recovery_reports_how_long_it_was_down(self):
         prev = _up("2026-01-01T00:00:00Z")
@@ -69,6 +69,13 @@ class TestRecoveryFires(unittest.TestCase):
         self.assertIsNotNone(f)
         self.assertEqual(f.evidence["streak"], 4, "끊겼던 주기 수를 그대로 말해야 한다")
 
+    def test_a_two_cycle_gap_is_now_silent(self):
+        # 2026-09-20: 10초짜리 공백이 30분마다 되풀이됐는데 같은 순간 외부 경로는
+        # 멀쩡했다. 공유기의 ICMP 무시였지 연결 끊김이 아니었다.
+        seen = self._run([False, False, True])
+        self.assertFalse(any("FIRST_HOP_UNREACHABLE" in s for s in seen))
+        self.assertFalse(any("FIRST_HOP_RECOVERED" in s for s in seen))
+
     def test_a_single_blip_does_not_log_recovery(self):
         # 한 주기만 실패한 것은 알리지도 않았으므로 복구도 알리지 않는다.
         seen = self._run([False, True])
@@ -76,12 +83,12 @@ class TestRecoveryFires(unittest.TestCase):
         self.assertNotIn("FIRST_HOP_RECOVERED", seen[1])
 
     def test_recovery_is_not_repeated_while_healthy(self):
-        seen = self._run([False, False, True, True, True])
+        seen = self._run([False, False, False, True, True, True])
         self.assertEqual(sum("FIRST_HOP_RECOVERED" in s for s in seen), 1)
 
     def test_a_second_outage_alerts_again(self):
         # 2026-09-17 14:39~14:41 실측: 끊김과 복구가 번갈아 반복됐다.
-        seen = self._run([False, False, True, False, False, True])
+        seen = self._run([False, False, False, True, False, False, False, True])
         self.assertEqual(sum("FIRST_HOP_UNREACHABLE" in s for s in seen), 2)
         self.assertEqual(sum("FIRST_HOP_RECOVERED" in s for s in seen), 2)
 
