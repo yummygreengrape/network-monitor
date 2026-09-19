@@ -32,6 +32,7 @@
 | `WIFI_SECURITY_DOWNGRADE` | 보안 | 확정 | `ipconfig getsummary` |
 | `WIFI_SECURITY_CHANGED` | 보안 | 확정 | `ipconfig getsummary` |
 | `FIRST_HOP_UNREACHABLE` / `FIRST_HOP_RECOVERED` | 품질 | 확정 | ARP 또는 ping |
+| `FIRST_HOP_BRIEF_GAP` | 품질 | 확정 | ARP 또는 ping |
 | `LATENCY_SPIKE` | 품질 | 의심 | ping (연속 3주기) |
 | `DHCP_LEASE_RENEWED` | 품질 | 확정 | `ipconfig getsummary` |
 | `WIFI_LINK_CHANGED` | 품질 | 확정 | `ipconfig getsummary` |

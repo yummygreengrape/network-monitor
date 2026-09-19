@@ -95,6 +95,7 @@ FIRST_HOP_CAUSE_STRONG = ("무선 신호는 정상(RSSI %d dBm)이라 전파 문
 FIRST_HOP_CAUSE_WIRED = "유선 연결임. 원인은 이 관측만으로 판별 불가."
 FIRST_HOP_CAUSE_UNKNOWN = "신호 세기를 읽지 못해 원인 판별 불가."
 FIRST_HOP_RECOVERED = "첫 홉 응답 복구됨 (%d회 실패 후, %s 기준)."
+FIRST_HOP_BRIEF_GAP = "첫 홉 %d회 연속 무응답 뒤 복구됨 (%s 기준, 경보 기준 미달)."
 LATENCY_SPIKE = "게이트웨이 왕복 시간이 %.0fms 로 크게 증가함 (평균 %.0fms)."
 MEASUREMENT_GAP = "측정이 %.0f초 동안 중단됨 (잠자기 또는 프로세스 중단)."
 

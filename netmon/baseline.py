@@ -50,6 +50,21 @@ VOLATILE_KEYS = ("rtt_ewma", "rtt_high_run", "arp_reply_rate", "gw_fail_streak",
                  "icmp_gw", "cycles_on_network", "_liveness_decided", "icmp_fail_run")
 
 
+def fail_count(value: Any) -> int:
+    """상태에 남은 연속 실패 횟수를 읽는다. 믿을 수 없는 값은 0 으로 본다.
+
+    state.json 은 사람이 고치거나 이전 판이 남긴 값일 수 있다. 그대로 int()
+    에 넣으면 문자열·None 에서 예외가 나 판정이 통째로 멈춘다. 숫자 문자열
+    ("2")도 받지 않는다 — 이 값을 문자열로 쓰는 경로는 없으므로 받아 줄
+    이유가 없고, 받아 주면 깨진 상태가 경보를 만들 수 있다.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if value != value or value in (float("inf"), float("-inf")) or value < 0:
+        return 0
+    return int(value)
+
+
 def _ewma(prev: Optional[float], value: float, alpha: float = EWMA_ALPHA) -> float:
     if prev is None:
         return value
@@ -115,10 +130,10 @@ def update_counters(state: Dict[str, Any], cur: Observation,
         # 0 으로 만들면 복구 판정이 "얼마나 끊겼었는지" 를 영영 알 수 없다.
         # 실제로 그래서 FIRST_HOP_RECOVERED 가 한 번도 뜨지 않았다
         # (양쪽 기계 전체 기록: 무응답 10건, 복구 0건).
-        new["gw_fail_streak_prev"] = int(state.get("gw_fail_streak", 0))
+        new["gw_fail_streak_prev"] = fail_count(state.get("gw_fail_streak"))
         new["gw_fail_streak"] = 0
     elif alive is False:
-        new["gw_fail_streak"] = int(state.get("gw_fail_streak", 0)) + 1
+        new["gw_fail_streak"] = fail_count(state.get("gw_fail_streak")) + 1
         new["gw_fail_streak_prev"] = 0
     return new
 

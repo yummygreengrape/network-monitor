@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .. import messages as msg
-from ..baseline import RTT_SUSTAIN_CYCLES
+from ..baseline import RTT_SUSTAIN_CYCLES, fail_count
 from ..liveness import ARP, ICMP, LINK, evaluate, signals
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, QUALITY, SUSPECT,
                      Finding, Observation)
@@ -24,6 +24,10 @@ FEATURE = "detect.quality"
 # 온 ICMP 를 가끔 무시한 것이지 연결이 끊긴 것이 아니었다. 실제 열화
 # (2026-09-17, 2.4GHz 혼잡)의 끊김은 4·6·11회 연속이었으므로 3 으로도 잡힌다.
 FAIL_STREAK_ALERT = 3
+# 경보 기준에 못 미친 짧은 끊김도 흔적은 남긴다. 기준을 3 으로 올리면서 복구
+# 판정도 같은 기준을 쓰게 되어, 2회짜리 끊김이 기록에서 통째로 사라졌다.
+# 경보(medium)가 아니라 복구 시점의 info 한 건이다. 조사는 열지 않는다.
+FAIL_STREAK_BRIEF = 2
 
 METHOD_LABEL = {ARP: "ARP 해석", ICMP: "ICMP 응답", LINK: "링크 상태"}
 
@@ -74,7 +78,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         return out
 
     method, alive = evaluate(cur, ctx.state)
-    streak = int(ctx.state.get("gw_fail_streak", 0))
+    streak = fail_count(ctx.state.get("gw_fail_streak"))
 
     if alive is False:
         if streak == FAIL_STREAK_ALERT:
@@ -94,12 +98,20 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         # 돌면서 streak 을 0 으로 만들기 때문에, 현재 값으로 보면 조건이
         # 영원히 거짓이다 — 실제로 양쪽 기계 전체 기록에서 무응답 10건에
         # 복구 0건이었다.
-        was = int(ctx.state.get("gw_fail_streak_prev", 0))
+        was = fail_count(ctx.state.get("gw_fail_streak_prev"))
         if alive is True and was >= FAIL_STREAK_ALERT:
             out.append(Finding(
                 axis=QUALITY, kind="FIRST_HOP_RECOVERED",
                 confidence=CONFIRMED, severity=INFO_SEV,
                 summary=msg.FIRST_HOP_RECOVERED % (was, METHOD_LABEL.get(method, method)),
+                evidence={"method": method, "streak": was},
+                attribution=attribution,
+            ))
+        elif alive is True and FAIL_STREAK_BRIEF <= was < FAIL_STREAK_ALERT:
+            out.append(Finding(
+                axis=QUALITY, kind="FIRST_HOP_BRIEF_GAP",
+                confidence=CONFIRMED, severity=INFO_SEV,
+                summary=msg.FIRST_HOP_BRIEF_GAP % (was, METHOD_LABEL.get(method, method)),
                 evidence={"method": method, "streak": was},
                 attribution=attribution,
             ))

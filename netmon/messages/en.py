@@ -101,6 +101,7 @@ FIRST_HOP_CAUSE_STRONG = ("Wireless signal is fine (RSSI %d dBm), so radio troub
 FIRST_HOP_CAUSE_WIRED = "Wired connection. The cause cannot be told from this observation alone."
 FIRST_HOP_CAUSE_UNKNOWN = "Signal strength unavailable, so the cause cannot be told."
 FIRST_HOP_RECOVERED = "First hop answering again (after %d failures, by %s)."
+FIRST_HOP_BRIEF_GAP = "First hop silent %d cycles in a row, then answering again (by %s, below the alert threshold)."
 LATENCY_SPIKE = "Gateway round-trip time rose to %.0fms (average %.0fms)."
 MEASUREMENT_GAP = "Measurement stopped for %.0f seconds (sleep or a halted process)."
 
