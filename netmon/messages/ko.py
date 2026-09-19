@@ -88,7 +88,12 @@ WIFI_LINK_CHANGED = "Wi-Fi 링크 상태 변경됨 (%s → %s)."
 GATEWAY_ICMP_SILENT = ("이 네트워크의 게이트웨이는 ICMP 무응답. ARP 는 정상이므로 장애 아님. "
                        "도달성 판정을 ARP 기준으로 전환함.")
 GATEWAY_ICMP_OK = "게이트웨이 ICMP 응답 확인. 도달성과 지연을 ping 으로 판정함."
-FIRST_HOP_UNREACHABLE = "첫 홉 연속 %d회 무응답 (%s 기준). 무선 구간 문제로 추정."
+FIRST_HOP_UNREACHABLE = "첫 홉 연속 %d회 무응답 (%s 기준). %s"
+FIRST_HOP_CAUSE_WEAK = "무선 신호 약함(RSSI %d dBm) — 무선 구간 문제로 추정."
+FIRST_HOP_CAUSE_STRONG = ("무선 신호는 정상(RSSI %d dBm)이라 전파 문제로 보기 어려움. "
+                          "원인은 이 관측만으로 판별 불가.")
+FIRST_HOP_CAUSE_WIRED = "유선 연결임. 원인은 이 관측만으로 판별 불가."
+FIRST_HOP_CAUSE_UNKNOWN = "신호 세기를 읽지 못해 원인 판별 불가."
 FIRST_HOP_RECOVERED = "첫 홉 응답 복구됨 (%d회 실패 후, %s 기준)."
 LATENCY_SPIKE = "게이트웨이 왕복 시간이 %.0fms 로 크게 증가함 (평균 %.0fms)."
 MEASUREMENT_GAP = "측정이 %.0f초 동안 중단됨 (잠자기 또는 프로세스 중단)."
@@ -107,7 +112,7 @@ VPN_SINCE = " (%s 부터 끊김)"
 WHY_USER = "사용자가 직접 끊음"
 WHY_SLEEP = "잠자기"
 WHY_MOVED = "네트워크 이동"
-WHY_LINK = "첫 홉 무응답 — 무선 구간 문제"
+WHY_LINK = "첫 홉 무응답 — 이 기기와 공유기 사이 구간 문제"
 WHY_TUNNEL = "첫 홉은 정상 — 터널 경로 문제"
 WHY_UNKNOWN = "판단 근거 부족"
 
@@ -145,15 +150,15 @@ INV_PATH_CONTESTED_NOTE = " (그 전에 여러 번 흔들림)"
 INV_PATH_VERDICT = "바뀐 설정이 자리 잡음"
 
 # 조사 지침 — VPN 끊김
-INV_VPN_WIDEN = "끊김이 되풀이됨. 무선 구간 품질도 함께 관측함."
+INV_VPN_WIDEN = "끊김이 되풀이됨. 첫 홉 구간 품질도 함께 관측함."
 INV_VPN_REPEATED = "%s 가 %d번 끊김. %s."
 # 어느 구간이 문제였나. **"되풀이" 같은 틀을 여기 넣지 않는다** — 단발 결론에
 # 그대로 쓰면 "한 번 끊겼다 … 되풀이되는 끊김" 같은 자기모순이 된다.
 INV_VPN_LEG_TUNNEL = "끊길 때마다 첫 홉은 정상이었음 — 터널 쪽 문제"
-INV_VPN_LEG_LINK = "끊길 때 무선 구간도 불안정했음"
+INV_VPN_LEG_LINK = "끊길 때 첫 홉 구간도 불안정했음"
 INV_VPN_LEG_UNKNOWN = "구간 판별 실패"
 INV_VPN_VERDICT_TUNNEL = "터널 쪽에서 되풀이되는 끊김"
-INV_VPN_VERDICT_LINK = "무선 구간 불안정과 함께 되풀이되는 끊김"
+INV_VPN_VERDICT_LINK = "첫 홉 구간 불안정과 함께 되풀이되는 끊김"
 INV_VPN_VERDICT_UNKNOWN = "되풀이되는 끊김 — 구간 판별 실패"
 
 # 조사 기록에 남는 짧은 표시

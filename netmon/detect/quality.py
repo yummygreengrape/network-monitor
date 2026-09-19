@@ -22,6 +22,25 @@ FAIL_STREAK_ALERT = 2
 
 METHOD_LABEL = {ARP: "ARP 해석", ICMP: "ICMP 응답", LINK: "링크 상태"}
 
+# "무선 구간 문제" 라고 말할 근거가 있는가. 경보 기준이 아니라 문구를 고르는
+# 기준이다. 흔히 쓰는 대략값으로, RSSI -75 dBm 이하나 SNR 20 dB 미만이면
+# 약하다고 본다. 예전에는 근거 없이 늘 "무선 구간 문제로 추정" 이라고 적었다
+# — 2026-09-20 실측에서 RSSI -33 dBm 그대로인 15초 무응답에도 그렇게 적혔고,
+# 유선 기계에서 떴다면 문장 자체가 틀렸다.
+WEAK_RSSI_DBM = -75
+WEAK_SNR_DB = 20
+
+
+def cause_note(cur) -> str:
+    if not cur.get("wifi", "applicable"):
+        return msg.FIRST_HOP_CAUSE_WIRED
+    rssi, snr = cur.get("wifi", "rssi"), cur.get("wifi", "snr")
+    if not isinstance(rssi, int):
+        return msg.FIRST_HOP_CAUSE_UNKNOWN
+    if rssi <= WEAK_RSSI_DBM or (isinstance(snr, int) and snr < WEAK_SNR_DB):
+        return msg.FIRST_HOP_CAUSE_WEAK % rssi
+    return msg.FIRST_HOP_CAUSE_STRONG % rssi
+
 
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     out: List[Finding] = []
@@ -57,9 +76,11 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             out.append(Finding(
                 axis=QUALITY, kind="FIRST_HOP_UNREACHABLE",
                 confidence=CONFIRMED, severity=MEDIUM,
-                summary=msg.FIRST_HOP_UNREACHABLE % (streak, METHOD_LABEL.get(method, method)),
+                summary=msg.FIRST_HOP_UNREACHABLE % (streak, METHOD_LABEL.get(method, method),
+                                                  cause_note(cur)),
                 evidence={"method": method, "streak": streak,
                           "signals": signals(cur),
+                          "rssi": cur.get("wifi", "rssi"), "snr": cur.get("wifi", "snr"),
                           "gateway": cur.get("iface", "default4_gateway")},
                 attribution=attribution,
             ))

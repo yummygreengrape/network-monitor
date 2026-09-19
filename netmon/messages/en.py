@@ -94,7 +94,12 @@ WIFI_LINK_CHANGED = "Wi-Fi link status changed (%s → %s)."
 GATEWAY_ICMP_SILENT = ("This gateway does not answer ICMP. ARP is healthy, so this is not "
                        "a fault. Reachability now judged from ARP instead.")
 GATEWAY_ICMP_OK = "Gateway answers ICMP. Reachability and latency judged from ping."
-FIRST_HOP_UNREACHABLE = "First hop silent %d cycles in a row (by %s). Likely a wireless problem."
+FIRST_HOP_UNREACHABLE = "First hop silent %d cycles in a row (by %s). %s"
+FIRST_HOP_CAUSE_WEAK = "Wireless signal is weak (RSSI %d dBm) - likely a wireless problem."
+FIRST_HOP_CAUSE_STRONG = ("Wireless signal is fine (RSSI %d dBm), so radio trouble is unlikely. "
+                          "The cause cannot be told from this observation alone.")
+FIRST_HOP_CAUSE_WIRED = "Wired connection. The cause cannot be told from this observation alone."
+FIRST_HOP_CAUSE_UNKNOWN = "Signal strength unavailable, so the cause cannot be told."
 FIRST_HOP_RECOVERED = "First hop answering again (after %d failures, by %s)."
 LATENCY_SPIKE = "Gateway round-trip time rose to %.0fms (average %.0fms)."
 MEASUREMENT_GAP = "Measurement stopped for %.0f seconds (sleep or a halted process)."
@@ -113,7 +118,7 @@ VPN_SINCE = " (down since %s)"
 WHY_USER = "disconnected by the user"
 WHY_SLEEP = "sleep"
 WHY_MOVED = "network change"
-WHY_LINK = "first hop silent — wireless problem"
+WHY_LINK = "first hop silent — problem between this device and the router"
 WHY_TUNNEL = "first hop healthy — tunnel path problem"
 WHY_UNKNOWN = "not enough evidence to tell"
 
@@ -151,15 +156,15 @@ INV_PATH_CONTESTED_NOTE = " (after flipping several times)"
 INV_PATH_VERDICT = "the changed settings took hold"
 
 # Playbook: VPN drops
-INV_VPN_WIDEN = "Drops keep repeating. Watching wireless quality as well."
+INV_VPN_WIDEN = "Drops keep repeating. Watching first-hop quality as well."
 INV_VPN_REPEATED = "%s dropped %d times. %s."
 # Which leg was at fault. Keep the "repeated" framing out of these — reusing
 # them in a single-drop conclusion produces "dropped once … repeated drops".
 INV_VPN_LEG_TUNNEL = "the first hop was healthy each time — a tunnel-side problem"
-INV_VPN_LEG_LINK = "the wireless link was unstable at the same time"
+INV_VPN_LEG_LINK = "the first hop was unstable at the same time"
 INV_VPN_LEG_UNKNOWN = "could not tell which leg"
 INV_VPN_VERDICT_TUNNEL = "repeated drops on the tunnel side"
-INV_VPN_VERDICT_LINK = "repeated drops alongside an unstable wireless link"
+INV_VPN_VERDICT_LINK = "repeated drops alongside an unstable first hop"
 INV_VPN_VERDICT_UNKNOWN = "repeated drops — could not tell which leg"
 
 # Short labels kept in the investigation record
