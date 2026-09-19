@@ -80,9 +80,10 @@ class TestRecoveryFires(unittest.TestCase):
         self.assertEqual(f.evidence["streak"], 4, "끊겼던 주기 수를 그대로 말해야 한다")
 
     def test_a_two_cycle_gap_is_logged_as_info_not_alerted(self):
-        # 2026-09-20: 10초짜리 공백이 30분마다 되풀이됐는데 같은 순간 외부 경로는
-        # 멀쩡했다. 공유기의 ICMP 무시였지 연결 끊김이 아니었다.
-        # (위 근거 문장은 측정된 범위로 따로 고친다. 2회 공백은 이제 info 로 남긴다.)
+        # 2회 공백은 경보(medium) 없이 복구 시점에 info 한 건으로 남긴다.
+        # 기준을 3 으로 올릴 때 적은 근거는 측정 범위를 넘었다. 외부 ping 기록과
+        # 시간이 겹친 게이트웨이 실패는 1회짜리 3건뿐이었고, 2회 이상 구간과는
+        # 겹치지 않았다. 2회 공백의 원인과 주기성은 확인되지 않았다.
         seen = self._run([False, False, True])
         self.assertFalse(any("FIRST_HOP_UNREACHABLE" in s for s in seen))
         self.assertFalse(any("FIRST_HOP_RECOVERED" in s for s in seen))
