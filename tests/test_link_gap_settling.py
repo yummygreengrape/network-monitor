@@ -126,3 +126,50 @@ class TestLeaseRenewalDoesNotInventALinkDrop(unittest.TestCase):
     def test_a_vpn_settling_window_is_not_evidence_of_a_link_drop(self):
         f = self._renewal(state={"settle_left_s": 40.0, "settle_reason": "vpn_change"})
         self.assertEqual(f.summary, msg.DHCP_LEASE_RENEWED)
+
+    def test_a_measurement_gap_is_not_evidence_of_a_link_drop(self):
+        """2026-09-20 맥북: 임대 갱신 4건에 "링크가 끊겼다 다시 붙었다" 가 붙었는데,
+        공백 전후 샘플은 모두 link_active 였고 LINK_ABSENT 는 0건이었다.
+        sleep 은 "측정 간격이 임계를 넘었다" 는 뜻뿐이고, launchd 가 프로세스만
+        되살린 경우에도 붙는다."""
+        f = self._renewal(state={"settle_left_s": 40.0, "settle_reason": "sleep"})
+        self.assertEqual(f.summary, msg.DHCP_LEASE_RENEWED_AFTER_GAP)
+        self.assertNotIn("끊겼다", f.summary)
+
+    def test_the_gap_wording_says_the_link_was_not_observed(self):
+        f = self._renewal(state={"settle_left_s": 40.0, "settle_reason": "sleep"})
+        self.assertIn("관측되지 않았", f.summary)
+
+    def test_an_observed_link_gap_outranks_a_measurement_gap(self):
+        """잠자기와 관측된 링크 단절이 같은 창에 겹치면 settle_reason 은 sleep 만
+        남는다(baseline.DISRUPTIONS 순서). 그래도 LINK_ABSENT 를 실제로 본 주기이므로
+        "관측되지 않았음" 이라고 말하면 안 된다. 상태는 baseline 규칙으로 직접 만든다."""
+        state = baseline.update_counters(
+            {"icmp_gw": True}, obs(ssid=SSID), attributions=["sleep"],
+            elapsed=600, interval=5, disrupted="link_restart")
+        self.assertEqual(state.get("settle_reason"), "sleep")
+        f = self._renewal(state=state)
+        self.assertEqual(f.summary, msg.DHCP_LEASE_RENEWED_AFTER_LINK)
+
+    def test_a_new_network_forgets_the_observed_link_gap(self):
+        """옮긴 뒤의 갱신이 옛 네트워크에서 본 단절을 근거로 말하면 안 된다."""
+        self.assertIn("settle_saw_link_gap", baseline.VOLATILE_KEYS)
+        cleared = baseline.reset_for_new_network({"settle_saw_link_gap": True,
+                                                  "settle_left_s": 40.0,
+                                                  "settle_reason": "sleep"})
+        self.assertNotIn("settle_saw_link_gap", cleared)
+
+    def test_a_closed_window_forgets_the_observed_link_gap(self):
+        state = baseline.update_counters(
+            {"icmp_gw": True}, obs(ssid=SSID), attributions=["sleep"],
+            elapsed=600, interval=5, disrupted="link_restart")
+        for _ in range(12):  # 창(45초)이 닫힐 때까지 조용한 주기를 흘려보낸다
+            state = baseline.update_counters(state, obs(ssid=SSID), attributions=[],
+                                             elapsed=5, interval=5)
+        self.assertIsNone(state.get("settle_saw_link_gap"))
+        self.assertEqual(self._renewal(state=state).summary, msg.DHCP_LEASE_RENEWED)
+
+    def test_moving_still_outranks_a_measurement_gap(self):
+        f = self._renewal(attrs=["network_change"],
+                          state={"settle_left_s": 40.0, "settle_reason": "sleep"})
+        self.assertEqual(f.summary, msg.DHCP_LEASE_RENEWED_AFTER_LINK)

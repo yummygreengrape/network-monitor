@@ -38,6 +38,8 @@ DHCP_DNS_CHANGED = "DHCP 가 알리는 DNS 서버 변경됨. 이름 해석 가�
 DHCP_LEASE_RENEWED = ("DHCP 임대 재시작됨. 주기적 갱신일 수도, 재접속 때문일 수도 있음 — "
                       "이 주기의 관측만으로는 구분 불가.")
 DHCP_LEASE_RENEWED_AFTER_LINK = "DHCP 임대 재시작됨. 링크가 끊겼다 다시 붙은 직후임."
+DHCP_LEASE_RENEWED_AFTER_GAP = ("DHCP 임대 재시작됨. 측정이 비어 있던 직후임(예: 잠자기, 프로세스 "
+                                "중단, 수집 지연). 그동안 링크가 어땠는지는 관측되지 않았음.")
 OWN_IP_CHANGED = "이 기기에 할당된 IP 변경됨."
 
 # ─────────────────────────────────────────── 판정: DNS·프록시

@@ -42,6 +42,9 @@ DHCP_LEASE_RENEWED = ("DHCP lease restarted. This can be a periodic renewal or a
                       "reconnection; this cycle alone cannot tell them apart.")
 DHCP_LEASE_RENEWED_AFTER_LINK = ("DHCP lease restarted, right after the link dropped and "
                                  "came back.")
+DHCP_LEASE_RENEWED_AFTER_GAP = ("DHCP lease restarted, right after a gap in measurement "
+                                "(e.g. sleep, a stopped process, slow collection). What the link did during "
+                                "that gap was not observed.")
 OWN_IP_CHANGED = "The IP address assigned to this machine changed."
 
 # ─────────────────────────────────────────── Findings: DNS and proxy

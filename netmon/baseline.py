@@ -45,7 +45,7 @@ def rtt_elevated(rtt: Optional[float], base: Optional[float]) -> bool:
 VOLATILE_KEYS = ("rtt_ewma", "rtt_high_run", "arp_reply_rate", "gw_fail_streak", "gw_fail_streak_prev",
                  # 네트워크가 바뀌면 그곳의 라우터를 새로 배운다
                  "ipv6_routers_known",
-                 "arp_replies_last", "settle_left_s", "settle_reason",
+                 "arp_replies_last", "settle_left_s", "settle_reason", "settle_saw_link_gap",
                  # 게이트웨이가 ICMP 에 응답하는지는 네트워크마다 다르다.
                  "icmp_gw", "cycles_on_network", "_liveness_decided", "icmp_fail_run")
 
@@ -104,6 +104,12 @@ def update_counters(state: Dict[str, Any], cur: Observation,
         fresh.append(disrupted)
     if fresh:
         new["settle_left_s"] = SETTLE_SECONDS
+        # **창의 사유 하나로는 "링크가 끊긴 것을 봤는가" 를 알 수 없다.**
+        # settle_reason 은 가장 근본에 가까운 사유 하나만 남기므로, 잠자기와
+        # 링크 단절이 겹치면 link_restart 가 지워진다. 그 뒤에 "링크가 끊겼다"
+        # 고 말해도 되는지 판단하려면 관측 사실을 따로 실어야 한다.
+        if "link_restart" in fresh:
+            new["settle_saw_link_gap"] = True
         open_reason = state.get("settle_reason") if state.get("settle_left_s") else None
         candidates = fresh + ([open_reason] if open_reason else [])
         # 열려 있던 사유와 새 사유 중 더 근본에 가까운 쪽을 남긴다
@@ -115,6 +121,7 @@ def update_counters(state: Dict[str, Any], cur: Observation,
         else:
             new.pop("settle_left_s", None)
             new.pop("settle_reason", None)
+            new.pop("settle_saw_link_gap", None)
     new["_liveness_decided"] = decided
 
     # 지연이 이만큼 연속으로 높았는가. 판정 시점에 이번 주기가 포함돼야 하므로

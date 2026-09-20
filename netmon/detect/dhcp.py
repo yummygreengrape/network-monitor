@@ -75,13 +75,30 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     p_l = prev.get("dhcp", "lease_start")
     c_l = cur.get("dhcp", "lease_start")
     if p_l and c_l and p_l != c_l:
-        after_link = bool(ctx.moved) or ctx.settling in (
-            "sleep", "iface_change", "network_change", "link_restart")
+        # 링크가 끊겼다 붙은 것을 **실제로 본** 경우에만 그렇게 말한다.
+        # sleep 은 링크를 본 것이 아니라 "측정 간격이 임계(interval*3+10초)를
+        # 넘었다" 는 뜻뿐이다(detect/__init__.py 의 SLEEP).
+        # launchd 가 프로세스만 되살린 경우에도
+        # 같은 라벨이 붙으므로, 그것으로 링크 단절을 단정하면 없는 사건을
+        # 사실로 적게 된다 — 2026-09-20 맥북에서 4건이 그렇게 나왔다.
+        # 창의 사유는 하나만 남으므로(baseline.DISRUPTIONS 순서상 sleep 이
+        # link_restart 를 이긴다), 링크 단절을 실제로 봤다는 사실은 따로 읽는다.
+        # 창이 열려 있을 때만 본다 — "창 안에서만 유효" 라는 불변식을
+        # Context.settling 과 같은 자리에 둔다.
+        saw_link_gap = bool(ctx.settling) and bool(ctx.state.get("settle_saw_link_gap"))
+        after_link = bool(ctx.moved) or saw_link_gap or ctx.settling in (
+            "iface_change", "network_change", "link_restart")
+        after_gap = not after_link and ctx.settling == "sleep"
+        if after_link:
+            summary = msg.DHCP_LEASE_RENEWED_AFTER_LINK
+        elif after_gap:
+            summary = msg.DHCP_LEASE_RENEWED_AFTER_GAP
+        else:
+            summary = msg.DHCP_LEASE_RENEWED
         out.append(Finding(
             axis=QUALITY, kind="DHCP_LEASE_RENEWED",
             confidence=CONFIRMED, severity="info",
-            summary=(msg.DHCP_LEASE_RENEWED_AFTER_LINK if after_link
-                     else msg.DHCP_LEASE_RENEWED),
+            summary=summary,
             evidence={"prev": p_l, "cur": c_l, "source": "ipconfig getsummary"},
             attribution=ctx.quality_attribution(),
         ))
