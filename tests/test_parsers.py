@@ -247,5 +247,89 @@ class TestLink(unittest.TestCase):
         self.assertEqual(r["loss_pct"], 100.0)
 
 
+
+
+class TestCandidateStatesWhenThereIsNoPrimary(unittest.TestCase):
+    """2026-09-20 맥북: 주 인터페이스 없는 주기 56건에서 후보 상태가 기록되지
+    않아, 무선이 끊겨 있었는지 붙어 있었는데 IPv4 만 없었는지 가릴 수 없었다."""
+
+    PORTS = [{"dev": "en0", "kind": "wifi"}, {"dev": "en1", "kind": "ethernet"},
+             {"dev": "utun4", "kind": "tunnel"}]
+
+    def test_it_keeps_status_for_each_physical_candidate(self):
+        st = {"en0": {"status": "inactive", "flags_up": True, "inet": [], "inet6": []},
+              "en1": {"status": "active", "flags_up": True,
+                      "inet": [{"addr": "192.0.2.10"}], "inet6": []}}
+        got = iface.candidate_states(self.PORTS, st)
+        self.assertEqual([c["kind"] for c in got], ["wifi", "ethernet"])
+        self.assertEqual(got[0]["status"], "inactive")
+        self.assertFalse(got[0]["has_inet"])
+        self.assertTrue(got[1]["has_inet"])
+
+    def test_it_tells_a_dead_radio_from_one_that_is_up_without_an_address(self):
+        dead = iface.candidate_states(
+            self.PORTS[:1], {"en0": {"status": "inactive", "flags_up": False,
+                                     "inet": [], "inet6": []}})[0]
+        up_no_ip = iface.candidate_states(
+            self.PORTS[:1], {"en0": {"status": "active", "flags_up": True,
+                                     "inet": [], "inet6": []}})[0]
+        self.assertNotEqual((dead["status"], dead["flags_up"]),
+                            (up_no_ip["status"], up_no_ip["flags_up"]))
+
+    def test_it_records_no_addresses(self):
+        st = {"en0": {"status": "active", "flags_up": True,
+                      "inet": [{"addr": "192.0.2.10"}],
+                      "inet6": [{"addr": "2001:db8::1"}], "ether": "00:00:5e:00:53:01"}}
+        got = iface.candidate_states(self.PORTS[:1], st)[0]
+        self.assertNotIn("192.0.2.10", repr(got))
+        self.assertNotIn("2001:db8::1", repr(got))
+        self.assertNotIn("00:00:5e:00:53:01", repr(got))
+
+
+class TestCollectWiresCandidatesToTheMissingPrimary(unittest.TestCase):
+    """후보 상태는 **주 인터페이스가 없을 때만** 실린다. 배선 자체를 검사한다."""
+
+    WIFI_DOWN = ("en0: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500\n"
+                 "\tether 00:00:5e:00:53:0a\n\tstatus: inactive\n")
+    WIFI_UP = ("en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+               "\tether 00:00:5e:00:53:0a\n\tinet 192.0.2.50 netmask 0xffffff00\n"
+               "\tstatus: active\n")
+
+    def _collect(self, ifconfig_out, route_out):
+        from netmon.util import CmdResult
+
+        def fake_run(argv, timeout=None, stdin=""):
+            cmd = " ".join(argv)
+            if "listallhardwareports" in cmd:
+                return CmdResult(argv, 0, HW_PORTS, "")
+            if "listnetworkserviceorder" in cmd:
+                return CmdResult(argv, 0, "", "")
+            if argv[0] == "ifconfig":
+                return CmdResult(argv, 0, ifconfig_out if argv[1] == "en0" else "", "")
+            if argv[0] == "route":
+                return CmdResult(argv, 0, route_out, "")
+            return CmdResult(argv, 0, "", "")
+
+        orig = iface.run
+        iface.run = fake_run
+        try:
+            return iface.collect()
+        finally:
+            iface.run = orig
+
+    def test_a_missing_primary_carries_candidate_states(self):
+        got = self._collect(self.WIFI_DOWN, "")
+        self.assertIsNone(got["primary"])
+        self.assertEqual([c["kind"] for c in got["candidates"]], ["wifi"])
+        self.assertEqual(got["candidates"][0]["status"], "inactive")
+        self.assertFalse(got["candidates"][0]["flags_up"])
+
+    def test_a_present_primary_carries_none(self):
+        route = "   route to: default\n destination: default\n    gateway: 192.0.2.1\n  interface: en0\n"
+        got = self._collect(self.WIFI_UP, route)
+        self.assertEqual(got["primary"], "en0")
+        self.assertIsNone(got["candidates"])
+
+
 if __name__ == "__main__":
     unittest.main()

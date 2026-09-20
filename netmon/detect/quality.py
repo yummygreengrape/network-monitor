@@ -54,6 +54,23 @@ def cause_note(cur) -> str:
     return msg.FIRST_HOP_CAUSE_STRONG % rssi
 
 
+def measurement_gap(elapsed: float, interval: float) -> Finding:
+    """측정이 비어 있던 사실 자체의 기록.
+
+    **판정하지 않는 주기에서도 남겨야 한다.** 2026-09-20 맥북에서 주 인터페이스가
+    없는 채 3시간 15분(구간의 98.9%)이 측정되지 않았는데, engine 이 그 주기를
+    조기 반환하는 바람에 공백 기록이 한 건도 남지 않았다. 이벤트만 읽는 사람은
+    측정이 멈춘 사실을 알 길이 없었다.
+    """
+    return Finding(
+        axis=INFO, kind="MEASUREMENT_GAP",
+        confidence=CONFIRMED, severity=INFO_SEV,
+        summary=msg.MEASUREMENT_GAP % elapsed,
+        evidence={"elapsed_s": round(elapsed, 1), "interval_s": interval},
+        attribution="sleep",
+    )
+
+
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     out: List[Finding] = []
     attribution = ctx.quality_attribution()
@@ -137,12 +154,6 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
     # --- 측정이 멈춘 구간 ---
     if ctx.has("sleep"):
-        out.append(Finding(
-            axis=INFO, kind="MEASUREMENT_GAP",
-            confidence=CONFIRMED, severity=INFO_SEV,
-            summary=msg.MEASUREMENT_GAP % ctx.elapsed,
-            evidence={"elapsed_s": round(ctx.elapsed, 1), "interval_s": ctx.interval},
-            attribution="sleep",
-        ))
+        out.append(measurement_gap(ctx.elapsed, ctx.interval))
 
     return out

@@ -170,6 +170,15 @@ def _first_inet(obs: Observation) -> Optional[str]:
     return None
 
 
+def gap_exceeded(elapsed: float, interval: float) -> bool:
+    """측정이 "비었다" 고 할 만큼 주기가 벌어졌는가.
+
+    판정하지 않는 주기(주 인터페이스 없음)에서도 같은 기준을 써야 해서
+    여기 둔다 — engine 이 조기 반환할 때도 공백은 기록으로 남긴다.
+    """
+    return elapsed > interval * 3 + 10
+
+
 def attributions_for(prev: Optional[Observation], cur: Observation,
                      elapsed: float, interval: float,
                      anchor: Optional[Observation] = None,
@@ -179,7 +188,7 @@ def attributions_for(prev: Optional[Observation], cur: Observation,
         return [FIRST_SAMPLE]
     out: List[str] = []
     # 측정 간격이 크게 벌어짐 = 잠자기 또는 프로세스 정지
-    if elapsed > interval * 3 + 10:
+    if gap_exceeded(elapsed, interval):
         out.append(SLEEP)
     # **정체성은 "주 인터페이스가 있던 마지막 관측"과 비교한다.**
     # 링크가 끊기면 기본 경로가 없어져 주 인터페이스가 None 이 되고, 다시

@@ -654,6 +654,39 @@ class TestLinkBlip(unittest.TestCase):
                    security="NONE", icmp_ok=True)
         return before, gone, back
 
+    def _engine(self, prev):
+        from netmon import config as configmod, investigate
+        from netmon.engine import Engine
+        import os, shutil, tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        eng = Engine.__new__(Engine)
+        eng.cfg = configmod.load(os.path.join(d, "c.json"))
+        eng.store = None; eng.prev = prev; eng.anchor = prev
+        eng.link_gap = False; eng.prev_wall = None; eng.state = {"icmp_gw": True}
+        eng.investigator = investigate.Investigator({}); eng.needs = {}
+        return eng
+
+    def test_a_gap_in_an_unjudged_cycle_is_still_recorded(self):
+        """2026-09-20 맥북: 주 인터페이스 없이 3시간 15분(구간의 98.9%)이 측정되지
+        않았는데, 판정을 건너뛰는 분기가 공백 기록까지 건너뛰어 이벤트에 흔적이
+        없었다. 판정하지 않는 주기라도 측정이 비었다는 사실은 남겨야 한다."""
+        before, gone, _back = self._blip()
+        found = self._engine(before).judge(gone, 900.0)
+        self.assertEqual([f.kind for f in found], ["LINK_ABSENT", "MEASUREMENT_GAP"])
+        gap = found[1]
+        self.assertEqual(gap.evidence["elapsed_s"], 900.0)
+
+    def test_a_short_unjudged_cycle_does_not_invent_a_gap(self):
+        before, gone, _back = self._blip()
+        found = self._engine(before).judge(gone, 5.0)
+        self.assertEqual([f.kind for f in found], ["LINK_ABSENT"])
+
+    def test_the_first_unjudged_cycle_does_not_invent_a_gap(self):
+        _before, gone, _back = self._blip()
+        found = self._engine(None).judge(gone, 900.0)
+        self.assertEqual([f.kind for f in found], ["LINK_ABSENT"])
+
     def test_an_incomplete_observation_is_not_judged(self):
         from netmon import config as configmod
         from netmon.engine import Engine

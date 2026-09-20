@@ -12,7 +12,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import baseline, investigate, messages, vpn
 from .collect import arp, dhcp, dns, iface, link, route, wifi
 from .config import Config
-from .detect import (Context, attributions_for, is_complete, network_key,
+from .detect import quality
+from .detect import (Context, attributions_for, gap_exceeded, is_complete, network_key,
                      run_all)
 from . import messages as msg
 from .model import CONFIRMED, INFO, INFO_SEV, Finding, Observation, unwrap
@@ -173,10 +174,19 @@ class Engine:
         # 기준선도 건드리지 않는다 — 링크가 없는 동안의 값은 기준이 될 수 없다.
         if not is_complete(obs):
             self.link_gap = True
-            return [Finding(axis=INFO, kind="LINK_ABSENT", confidence=CONFIRMED,
-                            severity=INFO_SEV, summary=msg.LINK_ABSENT,
-                            evidence={"iface": obs.get("iface") or {}},
-                            network=self.state.get("network"))]
+            iface = obs.get("iface") or {}
+            out = [Finding(axis=INFO, kind="LINK_ABSENT", confidence=CONFIRMED,
+                           severity=INFO_SEV, summary=msg.LINK_ABSENT,
+                           evidence={"iface": iface},
+                           network=self.state.get("network"))]
+            # **판정은 건너뛰어도 공백은 남긴다.** 이 분기가 run_all 을 건너뛰는
+            # 바람에, 주 인터페이스 없이 3시간 넘게 측정되지 않아도 이벤트에
+            # 아무 흔적이 없었다 (2026-09-20 맥북, 공백의 98.9%).
+            if self.prev is not None and gap_exceeded(elapsed, interval):
+                gap = quality.measurement_gap(elapsed, interval)
+                gap.network = self.state.get("network")
+                out.append(gap)
+            return out
 
         link_gap = self.link_gap
         attributions = attributions_for(self.prev, obs, elapsed, interval,

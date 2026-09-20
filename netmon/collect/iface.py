@@ -137,6 +137,31 @@ def choose_primary(
     return None
 
 
+def candidate_states(ports: List[Dict[str, str]],
+                     if_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """주 인터페이스가 없을 때 후보 물리 인터페이스들의 상태.
+
+    **없을 때야말로 이 상태가 필요하다.** 예전에는 primary 가 None 이면 if_state 를
+    통째로 버려서, "무선이 끊겨 있었나" 와 "붙어 있었는데 IPv4 주소만 없었나" 를
+    나중에 가를 수가 없었다 (2026-09-20 맥북, 판정 없는 주기 56건).
+    주소·MAC 은 남기지 않는다. 상태만으로 그 구분이 된다.
+    """
+    out: List[Dict[str, Any]] = []
+    for p in ports:
+        dev = p["dev"]
+        if dev.startswith(SKIP_PREFIXES) or is_tunnel(dev):
+            continue
+        st = if_state.get(dev) or {}
+        out.append({
+            "kind": p.get("kind"),
+            "status": st.get("status"),
+            "flags_up": bool(st.get("flags_up")),
+            "has_inet": bool(st.get("inet")),
+            "has_inet6": bool(st.get("inet6")),
+        })
+    return out
+
+
 def probe() -> Capability:
     r = run(["route", "-n", "get", "default"], timeout=4)
     detail = "기본 경로 조회 가능" if r.rc == 0 else "기본 경로 없음(오프라인일 수 있음)"
@@ -169,10 +194,16 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         scoped = parse_route_get(run(["route", "-n", "get", "-ifscope", primary, "default"], timeout=4).out)
 
     st = if_state.get(primary or "", {})
+    # **주 인터페이스가 없을 때야말로 후보들의 상태가 필요하다.** 예전에는
+    # primary 가 None 이면 여기서 if_state 를 통째로 버려서, "무선이 끊겨
+    # 있었나" 와 "붙어 있었는데 IPv4 주소만 없었나" 를 나중에 가를 수가 없었다
+    # (2026-09-20 맥북, 판정 없는 주기 56건). 주소는 남기지 않고 상태만 남긴다.
+    candidates = candidate_states(ports, if_state) if primary is None else None
     return {
         "ports": ports,
         "primary": primary,
         "primary_kind": kind,
+        "candidates": candidates,
         "primary_status": st.get("status"),
         "primary_mac": ident("mac", st["ether"]) if st.get("ether") else None,
         "primary_inet": [ident("ipv4", a["addr"]) for a in st.get("inet", [])],
