@@ -77,7 +77,43 @@ def _down_reason(cur: Observation, ctx, state: Dict[str, Any]) -> Dict[str, Any]
         "attributions": list(ctx.attributions),
     }
     evidence.update(_probe_evidence(cur))
+    evidence.update(_endpoint_evidence(cur))
     return evidence
+
+
+def _endpoint_evidence(cur: Observation) -> Dict[str, Any]:
+    """터널 엔드포인트를 이번 주기에 쟀으면 그 결과 (AC-6).
+
+    **재지 않은 주기에는 아무 키도 만들지 않는다.** 동의가 없거나 기능이
+    꺼졌거나 주소를 몰랐던 주기를 "무응답" 으로 읽히게 두지 않는다 — 없는
+    측정을 근거로 삼는 것이 이 작업이 없애려는 결함이다.
+
+    주소는 수집기가 `ident` 로 감싼 값을 **그대로** 옮긴다. 내보낼 때
+    토큰으로 바뀌어야 하기 때문이다 (AC-5, netmon/redact.py).
+    요약문에는 넣지 않는다 — 요약문은 가리지 않은 채로 나간다 (AC-6).
+
+    응답이 없다고 해서 "막혔다" 고 적지 않는다. 여기서 말할 수 있는 것은
+    "이 주소로 보낸 ICMP 에 응답이 있었는가" 까지다 — 리졸버 ICMP 무응답을
+    증거로 쓰지 않기로 한 것과 같은 이유다.
+    """
+    results = cur.get("link", "results")
+    got = results.get("tunnel_endpoint") if isinstance(results, dict) else None
+    if not isinstance(got, dict):
+        return {}
+    out: Dict[str, Any] = {"tunnel_endpoint_reachable": bool(got.get("reachable"))}
+    targets = cur.get("link", "targets")
+    addr = targets.get("tunnel_endpoint") if isinstance(targets, dict) else None
+    if addr is not None:
+        out["tunnel_endpoint"] = addr
+    rtt = got.get("rtt_ms")
+    if isinstance(rtt, (int, float)) and not isinstance(rtt, bool):
+        out["tunnel_endpoint_rtt_ms"] = float(rtt)
+    err = got.get("error")
+    if err:
+        # 측정이 실행되지 못한 주기다. 수집기가 예외 종류 이름까지만
+        # 남기므로(collect/link._error_note) 여기서 주소가 섞여 들어오지 않는다.
+        out["tunnel_endpoint_error"] = str(err)[:80]
+    return out
 
 
 def _probe_evidence(cur: Observation) -> Dict[str, Any]:

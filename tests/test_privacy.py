@@ -13,7 +13,8 @@ import unittest
 from netmon import config as configmod
 from netmon import redact as redactmod
 from netmon.model import ident
-from tests.helpers import GW, GW_MAC, obs
+from tests.helpers import (ENDPOINT, ENDPOINT_REASON, GW, GW_MAC,
+                           endpoint_probe, obs, vpn_state)
 
 
 class TestRedaction(unittest.TestCase):
@@ -120,6 +121,122 @@ class TestCollectorWithholdsIdentity(unittest.TestCase):
         o = obs(ssid=None, bssid=None)
         self.assertIsNone(o.get("wifi", "ssid"))
         self.assertIsNone(o.get("wifi", "bssid"))
+
+
+class TestTunnelEndpointConsent(unittest.TestCase):
+    """터널 엔드포인트 측정도 기존 동의에 묶인다 (QA-14, ADV-5, AC-13)."""
+
+    FEATURE = "vpn.tunnel_probe"
+
+    def _cfg(self, d):
+        return configmod.load(os.path.join(d, "config.json"))
+
+    def test_it_is_bound_to_external_probes(self):
+        self.assertEqual(configmod.FEATURE_CONSENT[self.FEATURE], "external_probes")
+        self.assertIn(self.FEATURE, configmod.CONSENTS["external_probes"]["enables"])
+
+    def test_it_is_off_by_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d)
+            self.assertFalse(cfg.feature(self.FEATURE))
+            self.assertFalse(cfg.effective(self.FEATURE))
+
+    def test_the_feature_alone_is_inert(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d)
+            cfg.set_feature(self.FEATURE, True)
+            self.assertFalse(cfg.effective(self.FEATURE))
+            self.assertIn("동의 필요", cfg.blocked_reason(self.FEATURE))
+
+    def test_the_consent_alone_is_inert(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d)
+            cfg.grant("external_probes")
+            self.assertFalse(cfg.effective(self.FEATURE))
+            self.assertEqual(cfg.blocked_reason(self.FEATURE), "꺼져 있음")
+
+    def test_revoking_turns_it_off_too(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d)
+            cfg.grant("external_probes")
+            cfg.set_feature(self.FEATURE, True)
+            self.assertTrue(cfg.effective(self.FEATURE))
+            cfg.revoke("external_probes")
+            self.assertFalse(cfg.feature(self.FEATURE))
+            self.assertFalse(cfg.effective(self.FEATURE))
+
+    def test_an_existing_grant_is_not_asked_again_and_does_not_switch_it_on(self):
+        """이미 동의한 사람에게 다시 묻지 않고, 저절로 켜지지도 않는다 (QA-14).
+
+        새 기능 키를 모르는 판에서 저장된 설정을 그대로 읽는다.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1,
+                           "consents": {"external_probes": {
+                               "granted": True, "at": "2026-01-01T00:00:00Z",
+                               "note": "초기 설정에서 선택"}},
+                           "features": {"detect.public_ip": True}}, fh)
+            cfg = configmod.load(path)
+            self.assertTrue(cfg.consented("external_probes"))
+            self.assertTrue(cfg.effective("detect.public_ip"))
+            self.assertFalse(cfg.feature(self.FEATURE),
+                             "동의가 있어도 새 기능이 저절로 켜지면 안 된다")
+            self.assertFalse(cfg.effective(self.FEATURE))
+
+    def test_the_consent_text_says_what_goes_out(self):
+        text = configmod.CONSENTS["external_probes"]
+        self.assertIn("엔드포인트", text["why"])
+        self.assertIn("엔드포인트", text["sends_out"])
+        # 언제 보내는지도 적는다 — 평소 주기에는 나가지 않는다.
+        self.assertIn("끊", text["sends_out"])
+
+    def test_the_setup_wizard_says_it_too(self):
+        """초기 설정은 동의를 받으면 `enables` 의 기능을 함께 켠다.
+
+        그 화면에 나오는 문구는 별도 카탈로그라(`netmon/messages`), 여기서
+        같이 보지 않으면 "말하지 않고 켜는" 상태가 된다.
+        """
+        from netmon import messages
+
+        self.assertIn(self.FEATURE, configmod.CONSENTS["external_probes"]["enables"])
+        self.assertIn("터널", messages.get("WZ_EXTERNAL_BODY", "ko"))
+        self.assertIn("끊긴", messages.get("WZ_EXTERNAL_BODY", "ko"))
+        self.assertIn("tunnel endpoint", messages.get("WZ_EXTERNAL_BODY", "en"))
+
+
+class TestTunnelEndpointIsWrapped(unittest.TestCase):
+    """주소는 감싸서 기록하고, 사유 원문은 그대로 둔다 (QA-6, AC-5)."""
+
+    def setUp(self):
+        self.salt = b"test-salt-not-a-real-one"
+
+    def test_the_address_becomes_a_token_when_exported(self):
+        o = endpoint_probe(obs(vpn=vpn_state("disconnected", reason=ENDPOINT_REASON)))
+        red = redactmod.redact(o.as_dict(), self.salt)
+        link = json.dumps(red["data"]["link"], ensure_ascii=False)
+        self.assertNotIn(ENDPOINT, link)
+        self.assertIn("ipv4:", link)
+
+    def test_the_provider_reason_stays_as_it_is(self):
+        """로컬 기록에는 원문을 남긴다 — 이 저장소의 공개된 설계 그대로다.
+
+        감싸지 않은 문자열은 내보낼 때도 바뀌지 않는다(redact 는 감싼 값만
+        바꾼다). 그래서 사유에 적힌 주소는 내보낸 기록에도 남는다. 이 갈래를
+        이 필드에서만 뒤집지 않기로 했으므로(AC-5), 그 사실을 못 박아 둔다.
+        """
+        o = endpoint_probe(obs(vpn=vpn_state("disconnected", reason=ENDPOINT_REASON)))
+        red = redactmod.redact(o.as_dict(), self.salt)
+        self.assertEqual(red["data"]["vpn"]["warp"]["reason"], ENDPOINT_REASON)
+
+    def test_the_evidence_field_is_redactable(self):
+        """끊김 증거에 실린 주소도 같은 방식으로 가려진다."""
+        evidence = {"tunnel_endpoint": ident("ipv4", ENDPOINT),
+                    "tunnel_endpoint_reachable": False}
+        red = redactmod.redact(evidence, self.salt)
+        self.assertNotIn(ENDPOINT, json.dumps(red))
+        self.assertEqual(red["tunnel_endpoint"]["id"], "ipv4")
 
 
 if __name__ == "__main__":

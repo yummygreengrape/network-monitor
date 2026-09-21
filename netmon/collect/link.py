@@ -3,6 +3,10 @@
 기본 대상은 게이트웨이와 이미 설정된 시스템 리졸버뿐이다. 둘 다 이미
 내 트래픽을 보고 있는 상대라 새로 알려지는 정보가 없다. 공개 인터넷
 도달성(1.1.1.1 등)은 새 제3자에게 내 IP 를 알리므로 동의 항목으로 뺀다.
+
+터널 엔드포인트도 같은 이유로 동의 항목이다. 그쪽은 대상 주소까지 우리가
+정하지 않으므로(공급자 사유 문자열에서 온다) 한 겹 더 좁힌다 — 부르는 쪽이
+켜 줬을 때만, 공인 유니캐스트일 때만 보낸다.
 """
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from .. import liveness
 from ..model import ident, unwrap
 from ..util import OK, Capability, run
+from ..vpn import public_unicast
 
 NAME = "link"
 
@@ -85,6 +90,29 @@ BURST_MIN_INTERVAL = 3.0
 # 다발 측정임을 관측에 남기는 문구. 이 값들은 **같은 순간에 나란히 잰 것**이라
 # 시간에 걸친 지터가 아니다. 읽는 쪽이 이것을 시계열로 오해하면 안 된다.
 BURST_NOTE = "같은 순간 동시 측정 — 시간에 걸친 지터가 아님"
+
+
+# 터널 엔드포인트 측정의 대상 이름. 관측의 `targets`·`results` 에 이 이름으로
+# 들어간다. 게이트웨이처럼 **판정이 읽는 값이 아니다** — 끊김 판정의 증거로만
+# 쓰인다(netmon/detect/vpn.py).
+TUNNEL_ENDPOINT = "tunnel_endpoint"
+
+
+def _error_note(name: str, exc: Exception) -> str:
+    """측정이 실패했을 때 관측에 남길 문구.
+
+    터널 엔드포인트만 **예외 종류 이름까지만** 남긴다. 그 대상 주소는 공급자
+    사유 문자열에서 온 공인 IP 이고 명령줄에 그대로 들어가므로, 예외 메시지에
+    섞여 나올 수 있다. 감싸지 않은 문자열은 내보낼 때도 가려지지 않아
+    (netmon/redact.py 는 ident 로 감싼 값만 바꾼다) 주소가 그대로 나간다.
+    예외 종류 이름은 고정된 낱말이라 주소가 들어갈 자리가 없다.
+
+    나머지 대상은 종전 그대로 메시지를 남긴다. 그 주소들은 관측 곳곳에 이미
+    감싸서 들어 있고, 여기 문구가 진단에 쓰인다.
+    """
+    if name == TUNNEL_ENDPOINT:
+        return type(exc).__name__
+    return str(exc)[:80]
 
 
 def vpn_states(vpn_block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -263,6 +291,14 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         targets["resolver"] = resolver
     if ctx.get("allow_external") and ctx.get("external_target"):
         targets["public"] = ctx["external_target"]
+    endpoint = ctx.get("tunnel_endpoint")
+    # **두 게이트를 모두 넘어야 한다.** `allow_tunnel_probe` 는 동의와 기능이
+    # 함께 켜졌다는 표시이고(netmon/engine.py), `public_unicast` 는 대상이
+    # 공인 유니캐스트인지 다시 본다. 주소가 외부 문자열에서 오므로 여기서도
+    # 확인한다 — 부르는 쪽 한 곳만 믿으면 그 한 곳이 틀릴 때 루프백·사설
+    # 주소로 나간다 (_work/redteam.md "공격자가 정할 수 있는 값").
+    if ctx.get("allow_tunnel_probe") and endpoint and public_unicast(endpoint):
+        targets[TUNNEL_ENDPOINT] = str(endpoint)
 
     if not targets:
         return {"targets": {}, "note": "측정 대상 없음 (게이트웨이 미확인)"}
@@ -292,7 +328,8 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
             try:
                 got.setdefault(name, []).append(fut.result(timeout=RESULT_WAIT_SECONDS))
             except Exception as exc:  # 측정 실패는 관측값이지 예외가 아니다
-                got.setdefault(name, []).append({"reachable": False, "error": str(exc)[:80]})
+                got.setdefault(name, []).append({"reachable": False,
+                                                 "error": _error_note(name, exc)})
 
     results: Dict[str, Any] = {}
     for name, rs in got.items():

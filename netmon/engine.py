@@ -120,6 +120,11 @@ class Engine:
             # **직전 주기**의 관측으로만 정한다. 같은 주기의 VPN 상태는 아직 없다 —
             # link 가 vpn 보다 먼저 돌기 때문이다.
             "first_hop_burst": self._burst_hint(),
+            # 터널 엔드포인트 측정. 동의와 기능이 함께 켜졌을 때만 참이고,
+            # 주소는 직전 주기의 VPN 관측에서 온다. 둘 중 하나라도 없으면
+            # 수집기는 대상을 만들지 않는다 (netmon/collect/link.py).
+            "allow_tunnel_probe": self.cfg.effective("vpn.tunnel_probe"),
+            "tunnel_endpoint": self._tunnel_endpoint(),
         }
 
         def step(module, name: str) -> None:
@@ -192,6 +197,27 @@ class Engine:
                                       self._before_vpn,
                                       prev_arp=self._last_arp,
                                       method=liveness.method_for(self.state))
+
+    def _tunnel_endpoint(self) -> Optional[str]:
+        """이번 주기에 터널 엔드포인트로 삼을 주소. 없으면 None.
+
+        **직전 주기**의 VPN 관측에서 얻는다 — 같은 주기의 값은 아직 없고
+        (link 가 vpn 보다 먼저 돈다), 뒤에 직렬로 붙이면 한 주기가 약 1.84초
+        길어져 조사 중 2~3초 주기를 넘긴다 (AC-4c). 그래서 첫 홉 측정과 같은
+        묶음에서 동시에 나가고, 대신 끊김이 시작된 첫 주기에는 주소가 없어
+        관측이 한 주기 늦게 시작된다.
+
+        동의도 기능도 없으면 **주소를 고르지도 않는다.** 여기서 고른 값은
+        수집기에 넘어가는 순간 송신 대상이 되므로, 꺼져 있을 때는 만들지
+        않는 편이 낫다.
+
+        `self._last_vpn` 은 다발 측정 판단이 쓰는 것과 같은, 직전 주기의 VPN
+        블록이다(`_remember_for_burst`). 링크가 없어 판정을 건너뛴 주기도
+        여기에는 남는다 — VPN 상태는 링크가 없어도 수집되기 때문이다.
+        """
+        if not self.cfg.effective("vpn.tunnel_probe"):
+            return None
+        return vpn.tunnel_endpoint(self._last_vpn)
 
     def _remember_for_burst(self, obs: Observation) -> None:
         """다음 주기의 다발 측정 판단에 쓸, 직전 두 주기의 상태를 남긴다.

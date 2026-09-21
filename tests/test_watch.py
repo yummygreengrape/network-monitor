@@ -7,7 +7,9 @@ import unittest
 
 from netmon import messages as msg
 from netmon import watch
+from netmon.detect import Context, attributions_for, network_key, run_all
 from netmon.investigate.model import Investigation
+from tests.helpers import (ENDPOINT, by_kind, endpoint_probe, obs, vpn_state)
 
 NOW = datetime.datetime(2026, 1, 1, 0, 1, 0, tzinfo=datetime.timezone.utc)
 
@@ -96,6 +98,61 @@ class TestRender(unittest.TestCase):
 
     def test_closing_the_window_does_not_stop_monitoring(self):
         self.assertIn(msg.WATCH_FOOTER, self._render())
+
+
+class TestHostileProviderTextNeverReachesTheScreen(unittest.TestCase):
+    """공급자 사유에 섞인 제어문자가 화면까지 오지 않는다 (ADV-1, ADV-2).
+
+    화면에 나오는 것은 판정 요약문과 공급자 **상태** 뿐이다. 사유는 고정
+    목록(`No Network`)과 정확히 일치할 때만 요약문에 인용되므로(AC-6),
+    제어문자·ANSI 이스케이프·개행·RTL 표시가 섞인 사유는 그 문턱을 넘지
+    못한다. 엔드포인트 주소도 요약문에 넣지 않으므로 함께 확인한다.
+    """
+
+    JUNK = "\x1b[31mNo\tNetwork\r\n\u202e via 198.51.100.7:2408\x00"
+    FEATURES = {"detect.vpn": True, "detect.quality": True, "detect.l2": True,
+                "detect.dhcp": True, "detect.dns": True, "detect.route": True,
+                "detect.wifi": True}
+
+    def _summary(self, reason):
+        prev = obs(vpn=vpn_state("connected"), security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:50Z",
+                  vpn=vpn_state("disconnected", reason=reason),
+                  security="WPA2_PSK")
+        endpoint_probe(cur)
+        ctx = Context(elapsed=5.0, interval=5.0, features=self.FEATURES,
+                      state={"icmp_gw": True},
+                      attributions=attributions_for(prev, cur, 5.0, 5.0),
+                      network=network_key(cur))
+        return by_kind(run_all(prev, cur, ctx), "VPN_DISCONNECTED").summary
+
+    def _render(self, summary):
+        ev = [{"ts": "2026-01-01T00:00:50Z", "kind": "VPN_DISCONNECTED",
+               "axis": "quality", "severity": "medium", "summary": summary,
+               "attribution": None}]
+        return plain(watch.render(now=NOW, agent={"pid": "123", "installed": True},
+                                  last_sample=sample(vpn={"warp": {"state": "disconnected"}}),
+                                  sample_count=10, events=ev, open_invs=[],
+                                  rules_summary="기준 요약"))
+
+    def test_no_control_characters_survive_to_the_screen(self):
+        out = self._render(self._summary(self.JUNK))
+        for ch in ("\x1b", "\x00", "\r", "\t", "\u202e"):
+            self.assertNotIn(ch, out, repr(ch))
+
+    def test_the_endpoint_address_is_not_on_the_screen(self):
+        self.assertNotIn(ENDPOINT, self._render(self._summary(self.JUNK)))
+        self.assertNotIn(ENDPOINT, self._render(
+            self._summary("No Network via 198.51.100.7:2408")))
+
+    def test_the_fixed_reason_is_still_quoted(self):
+        """고정 목록과 정확히 일치하는 사유는 종전대로 인용된다 (AC-6).
+
+        화면은 긴 요약문을 잘라 보여 주므로(위 `test_long_summaries_are_cut`)
+        인용 여부는 요약문 자체에서 본다.
+        """
+        self.assertIn("No Network", self._summary("No Network"))
+        self.assertNotIn("No Network", self._summary(self.JUNK))
 
 
 if __name__ == "__main__":

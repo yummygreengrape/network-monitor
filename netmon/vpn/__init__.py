@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 import time
 
@@ -272,3 +273,107 @@ def collect(providers: List[Provider]) -> Dict[str, Any]:
 
 def probe_all() -> List[Capability]:
     return [p.probe() for p in ALL]
+
+
+# --- 터널 엔드포인트 ---
+#
+# 공급자가 끊김 사유에 상대편 주소를 적어 주는 판이 있다
+# (예: "No Network via 198.51.100.7:2408"). 그 주소를 재면 로컬 구간과 터널
+# 상대편 구간을 나눌 근거가 생긴다 — 지금은 상대편 관측값이 0건이라 비교
+# 대상이 없다.
+#
+# **대상 주소를 우리가 정하지 않는다.** 사유 문자열을 만드는 쪽이 정한다.
+# 그래서 주소는 하나만 고르고, 공인 유니캐스트가 아니면 버린다
+# (_work/redteam.md "공격자가 정할 수 있는 값"). 고르지 못하면 관측하지
+# 않는다 — 없는 대상에 보내는 것보다 재지 않는 편이 낫다.
+
+# 사유 문자열에서 훑을 최대 길이. 긴 문자열에 시간을 쓰지 않는다.
+REASON_SCAN_LIMIT = 512
+
+# 훑어볼 최대 후보 수. 숫자 덩어리가 늘어서 있어도 앞쪽만 본다.
+REASON_MAX_CANDIDATES = 8
+
+# 점 넷으로 이어진 숫자. 앞뒤가 다른 주소의 일부이면(`198.51.100.7.9`,
+# `::ffff:198.51.100.7`) 고르지 않는다 — 잘린 조각을 주소로 적지 않으려는
+# 것이다. 유효성은 정규식이 아니라 ipaddress 가 판정한다.
+_IPV4_IN_TEXT = re.compile(r"(?<![0-9A-Za-z.:])(\d{1,3}(?:\.\d{1,3}){3})(?![0-9A-Za-z.])")
+
+# 보내지 않는 대역. **표준 라이브러리의 `is_global` 을 쓰지 않는다** — 그쪽은
+# 문서용 대역(192.0.2.0/24·198.51.100.0/24·203.0.113.0/24)도 사설로 보는데,
+# 이 저장소의 테스트는 그 대역만 쓸 수 있어(공개 저장소라 실제 주소를 넣지
+# 않는다) 이 갈래를 시험할 주소가 남지 않는다. 그래서 명세가 열거한 대역을
+# 그대로 적는다. 240.0.0.0/4 에 255.255.255.255 가 들어간다.
+BLOCKED_V4 = (
+    "0.0.0.0/8",        # 이 네트워크·미지정
+    "10.0.0.0/8",       # 사설
+    "100.64.0.0/10",    # CGNAT
+    "127.0.0.0/8",      # 루프백
+    "169.254.0.0/16",   # 링크로컬
+    "172.16.0.0/12",    # 사설
+    "192.168.0.0/16",   # 사설
+    "224.0.0.0/4",      # 멀티캐스트
+    "240.0.0.0/4",      # 예약 + 브로드캐스트
+)
+
+_BLOCKED_NETS = tuple(ipaddress.IPv4Network(n) for n in BLOCKED_V4)
+
+
+def public_unicast(addr: Any) -> bool:
+    """이 주소로 보내도 되는가. IPv4 공인 유니캐스트만 참이다.
+
+    IPv6 는 이번 범위에서 대상으로 삼지 않으므로(AC-4b) 거짓이다.
+    해석되지 않는 문자열도 거짓이다 — 모르는 것에 보내지 않는다.
+    """
+    try:
+        ip = ipaddress.IPv4Address(str(addr).strip())
+    except (ipaddress.AddressValueError, ValueError):
+        return False
+    return not any(ip in net for net in _BLOCKED_NETS)
+
+
+def endpoint_from_reason(reason: Any) -> Optional[str]:
+    """공급자 사유 문자열에서 잴 만한 엔드포인트 주소 하나.
+
+    - IPv4 만 고르고 포트는 버린다. IPv6 만 있으면 고르지 않는다 (AC-4b).
+    - 숫자 모양이지만 주소가 아닌 것(`999.1.2.3`)은 건너뛰고 다음 후보를 본다.
+      **잘못된 조각을 주소로 기록하지 않는다.**
+    - 고른 주소가 공인 유니캐스트가 아니면 거기서 멈춘다(다음 후보로 넘어가지
+      않는다). 사설 주소 뒤에 공인 주소를 붙여 대상을 고르게 하는 문자열이
+      성공하지 않게 한다.
+    - 제어문자·이스케이프·개행이 섞여 있어도 예외 없이 끝난다. 돌려주는 값은
+      `ipaddress` 가 해석한 주소 문자열뿐이라 그런 문자가 실려 나가지 않는다.
+    """
+    if not isinstance(reason, str) or not reason:
+        return None
+    text = reason[:REASON_SCAN_LIMIT]
+    for i, m in enumerate(_IPV4_IN_TEXT.finditer(text)):
+        if i >= REASON_MAX_CANDIDATES:
+            return None
+        try:
+            ip = ipaddress.IPv4Address(m.group(1))
+        except (ipaddress.AddressValueError, ValueError):
+            continue  # 주소 모양의 다른 숫자다. 다음 후보를 본다.
+        return str(ip) if public_unicast(ip) else None
+    return None
+
+
+def tunnel_endpoint(vpn_block: Optional[Dict[str, Any]]) -> Optional[str]:
+    """**직전 주기**의 VPN 관측에서, 이번 주기에 재 볼 엔드포인트 주소.
+
+    연결돼 있는 공급자는 보지 않는다 — 평소 주기에는 아무것도 보내지
+    않는다는 것이 이 관측의 전제다 (AC-4). 그래서 끊김이 시작된 첫 주기에는
+    (직전 주기가 connected 라) 주소가 없고, 관측은 한 주기 늦게 시작된다
+    (AC-4c).
+
+    공급자가 여럿이면 이름 순으로 첫 번째를 고른다. 대상은 한 주기에 하나다.
+    """
+    if not isinstance(vpn_block, dict):
+        return None
+    for name in sorted(vpn_block):
+        st = vpn_block.get(name)
+        if not isinstance(st, dict) or st.get("state") == CONNECTED:
+            continue
+        addr = endpoint_from_reason(st.get("reason"))
+        if addr:
+            return addr
+    return None

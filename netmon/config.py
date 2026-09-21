@@ -31,10 +31,15 @@ CONSENTS = {
     "external_probes": {
         "title": "외부로 나가는 점검 요청",
         "why": "DNS 응답을 DoH 기준값과 비교하고(가로채기 탐지), 고정 호스트의 "
-               "TLS 발급자 변화와 공인 IP·ASN 변화를 봅니다.",
+               "TLS 발급자 변화와 공인 IP·ASN 변화를 봅니다. VPN 이 끊긴 동안에는 "
+               "공급자가 알려 준 터널 상대편(엔드포인트)에 도달하는지도 재서, "
+               "문제가 이 기기 쪽인지 터널 상대편 쪽인지 가릴 근거를 남깁니다.",
         "sends_out": "고정된 조회 대상 이름과 이 기기의 출발지 IP 입니다. "
-                     "SSID·BSSID·MAC 같은 네트워크 식별자는 보내지 않습니다.",
-        "enables": ["detect.dns_intercept", "detect.tls_intercept", "detect.public_ip"],
+                     "터널 엔드포인트 측정은 VPN 이 끊겨 있는 주기에만, 공급자가 "
+                     "사유에 적어 준 그 주소로 ICMP 를 보냅니다(새 조회 이름은 "
+                     "없습니다). SSID·BSSID·MAC 같은 네트워크 식별자는 보내지 않습니다.",
+        "enables": ["detect.dns_intercept", "detect.tls_intercept", "detect.public_ip",
+                    "vpn.tunnel_probe"],
     },
 }
 
@@ -61,6 +66,10 @@ DEFAULTS: Dict[str, Any] = {
         # VPN 감시는 사람마다 쓰는지조차 다르므로 기본은 꺼짐.
         "vpn.enabled": False,
         "vpn.providers": ["auto"],
+        # 끊긴 동안 터널 상대편에 도달하는지 재는 것. 동의(external_probes)가
+        # 있어야 하고, 기본은 꺼짐이다 — 공급자가 사유에 적어 준 제3자 주소로
+        # 나가기 때문이다.
+        "vpn.tunnel_probe": False,
         # 위치 권한이 필요한 탐지. 동의 전에는 켜도 동작하지 않는다.
         "detect.evil_twin": False,
         # 외부 요청이 필요한 탐지.
@@ -85,6 +94,11 @@ FEATURE_CONSENT = {
     "detect.dns_intercept": "external_probes",
     "detect.tls_intercept": "external_probes",
     "detect.public_ip": "external_probes",
+    # 터널 엔드포인트 측정도 밖으로 나가는 요청이다. **기존 동의에 묶는다** —
+    # 이미 동의한 사람에게 다시 묻지 않고, 대신 무엇이 나가는지를 위 설명에
+    # 적는다 (AC-13). 동의가 있어도 이 기능을 켜지 않으면 아무것도 나가지
+    # 않는다(기본 꺼짐).
+    "vpn.tunnel_probe": "external_probes",
 }
 
 

@@ -10,13 +10,16 @@
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import shutil
 import tempfile
 import threading
 import time
 import unittest
 from unittest import mock
 
+from netmon import config as configmod
 from netmon import link, liveness
 from netmon.collect import link as first_hop
 from netmon.engine import Engine
@@ -635,6 +638,216 @@ class TestPingCountInteraction(unittest.TestCase):
         fake = FakeRun()
         collect_with(fake, first_hop_burst=True, interval=5, ping_count=1)
         self.assertEqual(len(fake.calls), 3)
+
+
+# --- 터널 엔드포인트 (AC-4, AC-4b, AC-4c) ---
+
+ENDPOINT = helpers.ENDPOINT
+
+
+class TestTunnelEndpointTarget(unittest.TestCase):
+    """동의·기능이 켜졌을 때만, 공인 유니캐스트에만 (QA-5, ADV-5, ADV-6)."""
+
+    def test_without_the_gate_nothing_goes_out_and_nothing_is_recorded(self):
+        """동의·기능이 없으면 관측 항목도 만들지 않는다 (AC-4)."""
+        fake = FakeRun()
+        out = collect_with(fake, tunnel_endpoint=ENDPOINT)
+        self.assertEqual(fake.targets(), [GW])
+        self.assertNotIn("tunnel_endpoint", out["targets"])
+        self.assertNotIn("tunnel_endpoint", out["results"])
+
+    def test_the_gate_alone_sends_nothing(self):
+        """주소를 모르는 주기 — 끊김 첫 주기가 이쪽이다 (AC-4c)."""
+        fake = FakeRun()
+        out = collect_with(fake, allow_tunnel_probe=True)
+        self.assertEqual(fake.targets(), [GW])
+        self.assertNotIn("tunnel_endpoint", out["results"])
+
+    def test_with_both_it_is_measured_and_the_address_is_wrapped(self):
+        fake = FakeRun()
+        out = collect_with(fake, allow_tunnel_probe=True, tunnel_endpoint=ENDPOINT)
+        self.assertEqual(sorted(fake.targets()), sorted([GW, ENDPOINT]))
+        self.assertEqual(out["targets"]["tunnel_endpoint"], ident("ipv4", ENDPOINT))
+        self.assertTrue(out["results"]["tunnel_endpoint"]["reachable"])
+
+    def test_blocked_addresses_are_never_probed(self):
+        """대상 주소를 외부 문자열이 정한다 (ADV-6).
+
+        부르는 쪽이 이미 걸렀어야 하지만, 여기서도 다시 본다.
+        """
+        for addr in ("127.0.0.1", "::1", "169.254.0.0", "224.0.0.0",
+                     "255.255.255.255", "10.0.0.0", "192.168.0.0", "172.16.0.0",
+                     "100.64.0.0", "0.0.0.0", "fe80::1", "not-an-address"):
+            fake = FakeRun()
+            out = collect_with(fake, allow_tunnel_probe=True, tunnel_endpoint=addr)
+            self.assertEqual(fake.targets(), [GW], addr)
+            self.assertNotIn("tunnel_endpoint", out["results"], addr)
+
+    def test_it_does_not_change_the_first_hop_verdict(self):
+        """판정이 읽는 값은 게이트웨이 것 그대로다 (AC-1b, AC-12)."""
+        fake = FakeRun(outs=[REPLY, LOST])
+        out = collect_with(fake, allow_tunnel_probe=True, tunnel_endpoint=ENDPOINT)
+        self.assertTrue(out["gateway_reachable"])
+        self.assertEqual(out["gateway_rtt_ms"], 12.3)
+        self.assertEqual(out["first_hop_probes"], 1)
+
+    def test_a_failure_records_only_the_error_kind(self):
+        """엔드포인트의 실패 문구에는 주소가 섞일 수 있다 (DEV-8 검수 지적).
+
+        감싸지 않은 문자열은 내보낼 때도 가려지지 않으므로, 이 대상만
+        예외 종류 이름까지 남긴다. 다른 대상의 문구는 종전 그대로다.
+        """
+        def exploding(argv, timeout=None, stdin=""):
+            raise RuntimeError("ping %s failed" % argv[-1])
+
+        with mock.patch.object(first_hop, "run", exploding):
+            out = first_hop.collect({"gateway": GW, "allow_tunnel_probe": True,
+                                     "tunnel_endpoint": ENDPOINT})
+        endpoint = out["results"]["tunnel_endpoint"]
+        self.assertEqual(endpoint["error"], "RuntimeError")
+        self.assertNotIn(ENDPOINT, endpoint["error"])
+        self.assertFalse(endpoint["reachable"])
+        # 게이트웨이 쪽 문구는 종전처럼 메시지를 남긴다.
+        self.assertIn("failed", out["results"]["gateway"]["error"])
+
+
+class TestTunnelEndpointRidesWithTheBurst(unittest.TestCase):
+    """같은 묶음에서 동시에 나간다 (QA-22, AC-4c).
+
+    직렬로 뒤에 붙이면 무응답 대상 기준 약 1.84초가 더 들어 조사 중 2~3초
+    주기를 넘긴다.
+    """
+
+    def test_four_jobs_one_moment(self):
+        barrier = threading.Barrier(4)     # 네 발이 다 도착해야 풀린다
+        fake = FakeRun(barrier=barrier)
+        seen = []
+        real = first_hop.concurrent.futures.ThreadPoolExecutor
+
+        def recording(max_workers=None, **kw):
+            seen.append(max_workers)
+            return real(max_workers=max_workers, **kw)
+
+        with mock.patch.object(first_hop.concurrent.futures, "ThreadPoolExecutor",
+                               recording):
+            out = collect_with(fake, first_hop_burst=True, interval=5,
+                               allow_tunnel_probe=True, tunnel_endpoint=ENDPOINT)
+        self.assertEqual(len(fake.calls), 4)
+        self.assertEqual(seen, [4])        # worker 수 = 작업 수. 직렬화되지 않는다
+        self.assertEqual(sorted(fake.targets()), sorted([GW, GW, GW, ENDPOINT]))
+        self.assertEqual(out["results"]["gateway"]["sent"], 3)
+        self.assertNotIn("sent", out["results"]["tunnel_endpoint"])
+
+
+class TestEngineDecidesWhetherToProbeTheEndpoint(unittest.TestCase):
+    """직전 주기의 VPN 상태와 동의로 정한다 (QA-5, QA-19, QA-22, ADV-5).
+
+    수집은 돌리지 않는다 — 합성 관측을 기억시키고 판단만 본다.
+    """
+
+    def _engine(self, *observations, consent=True, feature=True):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cfg = configmod.load(os.path.join(d, "config.json"))
+        if consent:
+            cfg.grant("external_probes", note="테스트")
+        cfg.set_feature("vpn.tunnel_probe", feature)
+        eng = Engine.__new__(Engine)
+        eng.cfg = cfg
+        eng.state = {}
+        for o in observations:
+            eng._remember_for_burst(o)
+        return eng
+
+    def _down(self, reason=helpers.ENDPOINT_REASON, state="disconnected"):
+        return helpers.obs(vpn=helpers.vpn_state(state, reason=reason))
+
+    def test_a_cycle_after_a_disconnection_gets_the_address(self):
+        self.assertEqual(self._engine(self._down())._tunnel_endpoint(), ENDPOINT)
+
+    def test_the_first_cycle_of_an_outage_has_no_address_yet(self):
+        """직전 주기가 connected 면 주소가 없다. 한 주기 늦게 시작된다 (AC-4c)."""
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connected")))
+        self.assertIsNone(eng._tunnel_endpoint())
+
+    def test_a_normal_cycle_sends_nothing(self):
+        """평소 주기에는 보내지 않는다 (QA-19)."""
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state(
+            "connected", reason=helpers.ENDPOINT_REASON)))
+        self.assertIsNone(eng._tunnel_endpoint())
+
+    def test_no_previous_cycle_no_address(self):
+        self.assertIsNone(self._engine()._tunnel_endpoint())
+
+    def test_the_feature_alone_does_not_open_the_gate(self):
+        self.assertIsNone(self._engine(self._down(), consent=False)._tunnel_endpoint())
+
+    def test_the_consent_alone_does_not_open_the_gate(self):
+        self.assertIsNone(self._engine(self._down(), feature=False)._tunnel_endpoint())
+
+    def test_revoking_the_consent_closes_it_again(self):
+        eng = self._engine(self._down())
+        self.assertEqual(eng._tunnel_endpoint(), ENDPOINT)
+        eng.cfg.revoke("external_probes")
+        self.assertIsNone(eng._tunnel_endpoint())
+
+    def test_a_hostile_address_never_becomes_a_target(self):
+        eng = self._engine(self._down(reason="No Network via 127.0.0.1:2408"))
+        self.assertIsNone(eng._tunnel_endpoint())
+
+
+class TestEnginePassesBothGatesToTheCollector(unittest.TestCase):
+    """엔진이 수집기에 넘기는 ctx 키가 실제로 맞물리는가 (QA-5, QA-22).
+
+    수집기는 `allow_tunnel_probe` 와 `tunnel_endpoint` 를 본다. 이름이 어긋나면
+    기능이 조용히 죽거나(꺼짐) 조용히 산다(켜짐) — 어느 쪽도 로그에 남지 않는다.
+    그래서 `observe()` 를 한 번 돌려 무엇이 넘어가는지 본다. 수집기는 전부
+    가짜라 명령이 실행되지 않는다.
+    """
+
+    def _observe(self, consent=True, feature=True, last_vpn=None):
+        from netmon.collect import arp, dhcp, dns, iface, route, wifi
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cfg = configmod.load(os.path.join(d, "config.json"))
+        if consent:
+            cfg.grant("external_probes", note="테스트")
+        cfg.set_feature("vpn.tunnel_probe", feature)
+        eng = Engine.__new__(Engine)
+        eng.cfg = cfg
+        eng.state = {}
+        eng.needs = {}
+        eng.prev = None
+        eng.prev_wall = None
+        eng._arp_log_read_at = None
+        eng._last_vpn = last_vpn
+        seen = {}
+
+        def fake_link_collect(ctx):
+            seen.update(ctx)
+            return {}
+
+        with contextlib.ExitStack() as stack:
+            for mod in (iface, arp, dhcp, route, dns, wifi):
+                stack.enter_context(mock.patch.object(mod, "collect",
+                                                      lambda ctx=None: {}))
+            stack.enter_context(mock.patch.object(first_hop, "collect",
+                                                  fake_link_collect))
+            eng.observe()
+        return seen
+
+    def test_the_address_and_the_gate_both_reach_the_collector(self):
+        seen = self._observe(last_vpn=helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON))
+        self.assertTrue(seen["allow_tunnel_probe"])
+        self.assertEqual(seen["tunnel_endpoint"], ENDPOINT)
+
+    def test_without_consent_the_collector_gets_nothing_to_send(self):
+        seen = self._observe(consent=False, last_vpn=helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON))
+        self.assertFalse(seen["allow_tunnel_probe"])
+        self.assertIsNone(seen["tunnel_endpoint"])
 
 
 if __name__ == "__main__":

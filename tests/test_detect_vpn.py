@@ -14,7 +14,8 @@ from netmon import vpn as vpnmod
 from netmon.collect.link import merge_probes, parse_ping
 from netmon.detect import Context, attributions_for, network_key, run_all
 from netmon.detect import vpn as vpn_rules
-from tests.helpers import (GW_MAC, by_kind, command_failed, kinds, obs,
+from tests.helpers import (ENDPOINT, ENDPOINT_REASON, GW_MAC, by_kind,
+                           command_failed, endpoint_probe, kinds, obs,
                            vpn_state)
 
 ON = {"detect.vpn": True, "detect.quality": True, "detect.l2": True,
@@ -941,6 +942,231 @@ class TestConnectedButNoTunnel(unittest.TestCase):
         found = self._pair(vpn_state(), vpn_state())
         self.assertIsNone(by_kind(found, "VPN_TUNNEL_OFF"))
         self.assertIsNone(by_kind(found, "VPN_TUNNEL_ON"))
+
+
+# --- 터널 엔드포인트 (AC-4, AC-4b, AC-4c, AC-5, AC-6 의 증거 부분) ---
+
+CONTROL_JUNK = "\x1b[31mNo\tNetwork\r\n\u202e via 198.51.100.7:2408\x00"
+
+
+class TestPickingTheEndpointAddress(unittest.TestCase):
+    """사유 문자열에서 주소 하나 고르기 (QA-20, ADV-1, AC-4b).
+
+    문자열을 만드는 쪽이 대상 주소를 정한다. 고르지 못하면 관측하지 않는다.
+    """
+
+    def pick(self, reason):
+        return vpnmod.endpoint_from_reason(reason)
+
+    def test_ipv4_is_picked_and_the_port_is_dropped(self):
+        self.assertEqual(self.pick(ENDPOINT_REASON), ENDPOINT)
+
+    def test_ipv4_wins_when_both_families_are_present(self):
+        self.assertEqual(self.pick("via 198.51.100.7:2408 (2001:db8::1)"), ENDPOINT)
+        self.assertEqual(self.pick("via [2001:db8::1]:2408 then 198.51.100.7"), ENDPOINT)
+
+    def test_ipv6_only_is_not_measured_in_this_scope(self):
+        self.assertIsNone(self.pick("connected to [2001:db8::1]:2408"))
+        self.assertIsNone(self.pick("via ::ffff:198.51.100.7"))
+
+    def test_no_address_means_no_measurement(self):
+        for reason in (None, "", "   ", "No Network", "error 500", 7, ["198.51.100.7"],
+                       {"addr": "198.51.100.7"}):
+            self.assertIsNone(self.pick(reason), reason)
+
+    def test_a_broken_piece_is_not_recorded_as_an_address(self):
+        """주소 모양의 다른 숫자를 주소로 적지 않는다."""
+        self.assertIsNone(self.pick("build 198.51.100.7.9"))
+        self.assertIsNone(self.pick("version 999.1.2.3"))
+        # 뒤에 진짜 주소가 있으면 그쪽을 고른다. 잘린 조각은 버린다.
+        self.assertEqual(self.pick("version 999.1.2.3 via 198.51.100.7"), ENDPOINT)
+
+    def test_the_first_address_is_the_only_target(self):
+        self.assertEqual(self.pick("198.51.100.7 203.0.113.9 192.0.2.7"), ENDPOINT)
+
+    def test_control_characters_do_not_raise_and_do_not_come_back(self):
+        """제어문자·ANSI·개행·RTL 이 섞여도 예외 없이 끝난다 (ADV-1).
+
+        돌려주는 값은 `ipaddress` 가 해석한 주소뿐이라, 그런 문자가 증거로
+        실려 나갈 자리가 없다.
+        """
+        got = self.pick(CONTROL_JUNK)
+        self.assertEqual(got, ENDPOINT)
+        self.assertTrue(all(ch.isprintable() for ch in got), repr(got))
+        self.assertIsNone(self.pick("\x1b[31m\x00\u202e no address\r\n"))
+
+    def test_a_very_long_string_is_bounded(self):
+        """훑는 길이와 후보 수를 제한한다. 제한 밖의 주소는 고르지 않는다."""
+        self.assertIsNone(self.pick("x" * 600 + " 198.51.100.7"))
+        self.assertEqual(self.pick("x" * 10 + " 198.51.100.7"), ENDPOINT)
+        # 주소 모양의 숫자를 잔뜩 앞세워 훑기를 길게 끌지 못한다.
+        junk = "999.1.2.3 " * (vpnmod.REASON_MAX_CANDIDATES + 1)
+        self.assertIsNone(self.pick(junk + "198.51.100.7"))
+
+
+class TestOnlyPublicUnicastIsProbed(unittest.TestCase):
+    """대상 주소를 외부 문자열이 정한다 (ADV-6, AC-4b).
+
+    루프백·링크로컬·멀티캐스트·브로드캐스트·사설 대역은 고르지 않는다.
+    기록도 하지 않는다 — 돌려주는 값이 없으면 관측 항목 자체가 생기지 않는다.
+    """
+
+    BLOCKED = ("127.0.0.1", "10.0.0.0", "192.168.0.0", "172.16.0.0",
+               "100.64.0.0", "169.254.0.0", "224.0.0.0", "255.255.255.255",
+               "0.0.0.0", "240.0.0.0")
+
+    def test_blocked_ranges_are_not_picked(self):
+        for addr in self.BLOCKED:
+            self.assertFalse(vpnmod.public_unicast(addr), addr)
+            self.assertIsNone(vpnmod.endpoint_from_reason("via %s:2408" % addr), addr)
+
+    def test_ipv6_and_junk_are_not_unicast_targets(self):
+        for addr in ("::1", "fe80::1", "ff02::1", "2001:db8::1", "", None,
+                     "not-an-address", "198.51.100", "198.51.100.256"):
+            self.assertFalse(vpnmod.public_unicast(addr), addr)
+
+    def test_a_public_address_is_allowed_even_if_we_cannot_vouch_for_it(self):
+        """제3자 공인 주소인지 아닌지는 이 도구가 가릴 수 없다.
+
+        공급자가 알려 준 상대편이 맞는지 확인할 방법이 없으므로, 공인
+        유니캐스트라는 사실까지만 확인하고 보낸다.
+        """
+        self.assertTrue(vpnmod.public_unicast(ENDPOINT))
+        self.assertTrue(vpnmod.public_unicast("203.0.113.9"))
+
+    def test_a_private_address_in_front_does_not_get_a_second_chance(self):
+        """사설 주소 뒤에 공인 주소를 붙여 대상을 고르게 하지 못한다."""
+        self.assertIsNone(vpnmod.endpoint_from_reason("10.0.0.0 via 198.51.100.7"))
+
+
+class TestWhichCycleGetsAnAddress(unittest.TestCase):
+    """직전 주기의 VPN 이 connected 가 아니었을 때만 (QA-19, QA-22, AC-4)."""
+
+    def test_a_connected_provider_is_not_probed(self):
+        block = vpn_state("connected", reason=ENDPOINT_REASON)
+        self.assertIsNone(vpnmod.tunnel_endpoint(block))
+
+    def test_a_disconnected_provider_gives_the_address(self):
+        block = vpn_state("disconnected", reason=ENDPOINT_REASON)
+        self.assertEqual(vpnmod.tunnel_endpoint(block), ENDPOINT)
+
+    def test_renegotiating_counts_too(self):
+        block = vpn_state("connecting", reason=ENDPOINT_REASON)
+        self.assertEqual(vpnmod.tunnel_endpoint(block), ENDPOINT)
+
+    def test_a_connected_providers_address_is_not_borrowed(self):
+        """둘 중 끊긴 쪽의 주소만 쓴다."""
+        block = dict(vpn_state("connected", reason="via 203.0.113.9:2408",
+                               provider="tailscale"))
+        block.update(vpn_state("disconnected", reason=ENDPOINT_REASON, provider="warp"))
+        self.assertEqual(vpnmod.tunnel_endpoint(block), ENDPOINT)
+
+    def test_a_missing_or_broken_block_is_not_an_address(self):
+        for block in (None, {}, [], "warp", {"warp": None}, {"warp": "disconnected"},
+                      vpn_state("disconnected", reason=None)):
+            self.assertIsNone(vpnmod.tunnel_endpoint(block), block)
+
+
+class TestTunnelEndpointEvidence(unittest.TestCase):
+    """끊김 판정의 증거에 실린다 (QA-6, QA-7, AC-5, AC-6).
+
+    끊김 판정은 connected → 그 밖 전환에서 나고, 주소는 직전 주기 것이라
+    보통 한 주기 늦는다(AC-4c). 둘이 만나는 실측 모양은 "링크가 없어 판정을
+    건너뛴 주기가 사이에 끼어 있는" 경우다 — 그동안 판정의 비교 기준(prev)은
+    마지막 완전 관측(connected)에 머물러 있고, 엔드포인트 주소는 그 사이
+    주기의 사유에서 이미 얻어 둔다.
+    """
+
+    def _drop(self, **kw):
+        prev = obs(vpn=vpn_state("connected"), security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:15Z",
+                  vpn=vpn_state("disconnected", reason=ENDPOINT_REASON),
+                  security="WPA2_PSK")
+        endpoint_probe(cur, **kw)
+        return by_kind(judge(prev, cur), "VPN_DISCONNECTED")
+
+    def test_the_address_is_wrapped_and_the_result_is_carried(self):
+        f = self._drop(rtt=25.0)
+        self.assertEqual(f.evidence["tunnel_endpoint"], {"id": "ipv4", "v": ENDPOINT})
+        self.assertTrue(f.evidence["tunnel_endpoint_reachable"])
+        self.assertEqual(f.evidence["tunnel_endpoint_rtt_ms"], 25.0)
+        self.assertEqual(f.evidence["provider_reason"], ENDPOINT_REASON)
+
+    def test_no_answer_is_recorded_without_calling_it_blocked(self):
+        f = self._drop(reachable=False)
+        self.assertFalse(f.evidence["tunnel_endpoint_reachable"])
+        self.assertNotIn("tunnel_endpoint_rtt_ms", f.evidence)
+
+    def test_a_probe_that_never_ran_carries_only_the_error_kind(self):
+        f = self._drop(error="TimeoutError")
+        self.assertEqual(f.evidence["tunnel_endpoint_error"], "TimeoutError")
+        self.assertFalse(f.evidence["tunnel_endpoint_reachable"])
+
+    def test_an_unmeasured_cycle_makes_no_keys_at_all(self):
+        """동의가 없거나 주소를 몰랐던 주기를 '무응답' 으로 읽히게 두지 않는다."""
+        prev = obs(vpn=vpn_state("connected"), security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:05Z",
+                  vpn=vpn_state("disconnected", reason=ENDPOINT_REASON),
+                  security="WPA2_PSK")
+        f = by_kind(judge(prev, cur), "VPN_DISCONNECTED")
+        self.assertFalse([k for k in f.evidence if k.startswith("tunnel_endpoint")],
+                         f.evidence)
+
+    def test_the_summary_never_carries_the_address(self):
+        """요약문은 가리지 않은 채로 화면·보고서에 나간다 (AC-6)."""
+        f = self._drop()
+        self.assertNotIn(ENDPOINT, f.summary)
+        self.assertNotIn("2408", f.summary)
+        self.assertNotIn(ENDPOINT_REASON, f.summary)
+
+    def test_a_hostile_reason_does_not_reach_the_summary(self):
+        """제어문자가 섞인 사유도 요약문에 인용되지 않는다 (ADV-1, ADV-2)."""
+        prev = obs(vpn=vpn_state("connected"), security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:15Z",
+                  vpn=vpn_state("disconnected", reason=CONTROL_JUNK),
+                  security="WPA2_PSK")
+        endpoint_probe(cur)
+        f = by_kind(judge(prev, cur), "VPN_DISCONNECTED")
+        self.assertTrue(all(ch.isprintable() or ch == " " for ch in f.summary),
+                        repr(f.summary))
+        self.assertNotIn(ENDPOINT, f.summary)
+        # 원문은 종전처럼 로컬 기록(증거)에 그대로 남는다 (AC-5).
+        self.assertEqual(f.evidence["provider_reason"], CONTROL_JUNK)
+
+    def test_the_collectors_own_output_fits_the_evidence(self):
+        """손으로 적은 모양이 아니라 수집기가 만든 관측으로 확인한다.
+
+        `collect/link.collect` 를 가짜 `run` 으로 돌려(패킷은 나가지 않는다)
+        그 결과를 그대로 판정에 먹인다. 수집기의 키 이름이 바뀌면 여기서
+        깨진다.
+        """
+        from unittest import mock
+
+        from netmon.collect import link as first_hop
+
+        reply = ("PING 198.51.100.7 (198.51.100.7): 56 data bytes\n"
+                 "64 bytes from 198.51.100.7: icmp_seq=0 ttl=52 time=25.00 ms\n"
+                 "\n--- 198.51.100.7 ping statistics ---\n"
+                 "1 packets transmitted, 1 packets received, 0.0% packet loss\n")
+
+        def fake_run(argv, timeout=None, stdin=""):
+            from netmon.util import CmdResult
+            return CmdResult(list(argv), 0, reply, "")
+
+        with mock.patch.object(first_hop, "run", fake_run):
+            block = first_hop.collect({"gateway": "192.0.2.1",
+                                       "allow_tunnel_probe": True,
+                                       "tunnel_endpoint": ENDPOINT})
+        prev = obs(vpn=vpn_state("connected"), security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:15Z",
+                  vpn=vpn_state("disconnected", reason=ENDPOINT_REASON),
+                  security="WPA2_PSK")
+        cur.data["link"] = block
+        f = by_kind(judge(prev, cur), "VPN_DISCONNECTED")
+        self.assertEqual(f.evidence["tunnel_endpoint"], {"id": "ipv4", "v": ENDPOINT})
+        self.assertTrue(f.evidence["tunnel_endpoint_reachable"])
+        self.assertEqual(f.evidence["tunnel_endpoint_rtt_ms"], 25.0)
+        self.assertNotIn(ENDPOINT, f.summary)
 
 
 if __name__ == "__main__":
