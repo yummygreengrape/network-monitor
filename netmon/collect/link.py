@@ -109,14 +109,34 @@ def first_hop_silent(prev_link: Optional[Dict[str, Any]] = None,
 
     그래서 liveness 가 고른 방법과 같은 신호를 본다.
       - ICMP 로 판정하는 망: `link.gateway_reachable` 이 False
-      - ARP 로 판정하는 망: `arp.gateway_mac` 이 비었다(그 망에서 첫 홉이
-        실제로 끊기면 MAC 이 사라진다)
-      - 보정 중(`unknown`): liveness.evaluate 와 같은 우선순위. ARP 나 ICMP 가
-        살아 있다고 말하면 아니고, ICMP 가 명시적으로 False 일 때만 참이다.
+      - ARP 로 판정하는 망: `arp.gateway_mac` 이 비었다 — 그 망에서 liveness 가
+        도달성을 판정하는 신호가 이것이기 때문이다.
+      - 보정 중(`unknown`): ARP 나 ICMP 가 살아 있다고 말하면 아니고, ICMP 가
+        명시적으로 False 일 때 참이다.
 
-    **판정하지 못한 것은 무응답이 아니다.** 측정하지 않은 주기(None), 수집기가
-    통째로 실패해 블록이 빈 주기는 거짓으로 둔다 — 모르는 것을 근거로 없던
-    패킷을 만들지 않는다.
+    **이 신호가 실제 끊김을 드러낸다는 근거는 없다.** 여기서 말할 수 있는 것은
+    "그 망에서 liveness 가 도달성을 보는 신호를 같이 본다" 까지다.
+      - macOS 의 ARP 캐시는 해석된 항목을 바로 버리지 않는다. 수집기는 파싱해
+        둔 만료 열(`collect/arp.py` 의 `expire_o`·`expire_i`)을 판단에 쓰지 않아,
+        첫 홉이 끊긴 뒤 이 값이 언제 비는지는 모른다 — 늦거나 끝내 뜨지 않을 수 있다.
+      - 반대로 **첫 홉이 살아 있는데 비는 주기도 있었다.** 보관 샘플 6일치
+        (2026-09-16~21)에서 `gateway_mac` 이 빈 주기 297건 중 게이트웨이 주소가
+        함께 있던 것은 4건뿐이고(나머지는 게이트웨이 자체를 모르는 주기), 그 4건
+        중 3건은 같은 주기의 ICMP 가 응답했다.
+    그래서 이 갈래는 드물게 헛켜질 수 있다. 다발은 판정이 아니라 측정을 늘리는
+    것뿐이라 그 대가는 그 주기의 ping 2발이다.
+
+    **모르는 것을 근거로 켜지 않는다.** 측정하지 않은 주기(`gateway_reachable`
+    None)와 수집기가 통째로 실패해 블록이 빈 주기는 거짓으로 둔다. 후자는
+    liveness 와 갈라지는 지점이다 — `liveness.evaluate` 는 빈 arp 블록을 ARP
+    판정 망에서 "죽음" 으로 읽어 `gw_fail_streak` 를 올리지만, 여기서는 없던
+    패킷을 만들지 않으려고 보수적으로 켜지 않는다.
+
+    보정 중에 ARP 도 ICMP 도 살아 있다고 말하지 않으면 참이다. 이것도
+    `liveness.evaluate` 와 갈라진다 — 그쪽은 같은 입력에서 `link_active` 까지
+    보고 판정을 보류한다(None). 여기서는 보류하지 않고 다발로 재 본다:
+    측정을 늘리는 쪽이라 판정을 만들지 않고, 그 상태가 이어지면 어차피 보정이
+    끝나 방법이 정해진다.
     """
     icmp = (prev_link or {}).get("gateway_reachable")
     arp_ok = bool(unwrap((prev_arp or {}).get("gateway_mac")))

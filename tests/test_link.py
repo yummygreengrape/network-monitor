@@ -20,6 +20,7 @@ from unittest import mock
 from netmon import link, liveness
 from netmon.collect import link as first_hop
 from netmon.engine import Engine
+from netmon.model import ident
 from netmon.util import CmdResult
 from tests import helpers
 
@@ -241,7 +242,7 @@ class TestAnomalyHintFollowsTheLivenessMethod(unittest.TestCase):
     다발이 나간다 — liveness 가 ARP 로 판정을 바꾸는 바로 그 망이다.
     """
 
-    ARP_OK = {"gateway_mac": {"id": "mac:1", "v": helpers.GW_MAC}, "neighbors": 4}
+    ARP_OK = {"gateway_mac": ident("mac", helpers.GW_MAC), "neighbors": 4}
     ARP_GONE = {"gateway_mac": None, "neighbors": 4}
     ICMP_SILENT = {"gateway_reachable": False}
     ICMP_OK = {"gateway_reachable": True}
@@ -255,12 +256,22 @@ class TestAnomalyHintFollowsTheLivenessMethod(unittest.TestCase):
         for _ in range(5):
             self.assertFalse(self.hint(self.ICMP_SILENT, self.ARP_OK, liveness.ARP))
 
-    def test_icmp_silent_network_turns_it_on_when_the_first_hop_really_goes(self):
-        """ARP 로 판정하는 망에서 첫 홉이 끊기면 게이트웨이 MAC 이 빈다."""
+    def test_icmp_silent_network_watches_the_arp_signal_instead(self):
+        """그 망에서는 `arp.gateway_mac` 이 빈 것을 이상 징후로 센다.
+
+        liveness 가 그 망에서 도달성을 판정하는 신호가 이것이라서다. **이 신호가
+        실제 끊김을 드러낸다는 근거는 없다** — 보관 샘플에는 첫 홉이 살아 있는데도
+        이 값이 빈 주기가 있고, 끊긴 뒤 언제 비는지는 모른다
+        (netmon/collect/link.py 의 주석). 여기서 고정하는 것은 입력→출력뿐이다.
+        """
         self.assertTrue(self.hint(self.ICMP_SILENT, self.ARP_GONE, liveness.ARP))
 
     def test_an_arp_collector_failure_is_not_an_outage(self):
-        """블록이 통째로 비면 수집 실패다. 모르는 것을 근거로 쏘지 않는다."""
+        """블록이 통째로 비면 수집 실패다. 모르는 것을 근거로 쏘지 않는다.
+
+        `liveness.evaluate` 는 같은 입력을 ARP 판정 망에서 "죽음" 으로 읽어
+        `gw_fail_streak` 를 올린다. 다발 판단은 보수적인 쪽으로 갈라진다.
+        """
         self.assertFalse(self.hint(self.ICMP_SILENT, {}, liveness.ARP))
         self.assertFalse(self.hint(self.ICMP_SILENT, None, liveness.ARP))
 
@@ -278,6 +289,12 @@ class TestAnomalyHintFollowsTheLivenessMethod(unittest.TestCase):
                                    liveness.UNKNOWN))
 
     def test_while_calibrating_both_signals_failing_turns_it_on(self):
+        """여기서는 `liveness.evaluate` 와 갈라진다 — 일부러 그렇다.
+
+        같은 입력에서 liveness 는 `link_active` 까지 보고 판정을 보류하지만
+        (None), 다발 판단은 보류하지 않고 재 본다. 측정을 늘리는 쪽이라 판정을
+        만들지 않는다.
+        """
         self.assertTrue(self.hint(self.ICMP_SILENT, self.ARP_GONE, liveness.UNKNOWN))
 
     def test_the_vpn_branch_is_untouched(self):
@@ -509,8 +526,12 @@ class TestEngineRemembersTheLastTwoCycles(unittest.TestCase):
                                                 vpn=helpers.vpn_state("connected")))
             self.assertFalse(eng._burst_hint())
 
-    def test_an_icmp_silent_network_still_notices_a_real_outage(self):
-        """같은 망에서 첫 홉이 실제로 끊기면 게이트웨이 MAC 이 사라진다."""
+    def test_an_icmp_silent_network_turns_it_on_when_the_arp_signal_goes(self):
+        """같은 망에서 `arp.gateway_mac` 이 비면 켠다.
+
+        그 망의 도달성 판정 신호가 그것이기 때문이다. 이 신호가 실제 끊김을
+        드러낸다는 근거는 없다(netmon/collect/link.py 의 주석).
+        """
         eng = self._engine(helpers.obs(icmp_ok=False,
                                        vpn=helpers.vpn_state("connected")),
                            helpers.obs(icmp_ok=False, gw_mac=None,
