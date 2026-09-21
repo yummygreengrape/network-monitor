@@ -122,7 +122,16 @@ VPN_STATE_UNKNOWN = "%s 상태 확인 불가 (%s → %s)."
 VPN_SINCE = " (%s 부터 끊김)"
 # 측정이 비어 있던 시간이 끊김 속에 섞인 경우. 총 시간만 적으면 그중 얼마를
 # 실제로 지켜봤는지 알 수 없다 — 잠자기로 6분 넘게 비어 있던 구간이 실제로 있었다.
-VPN_SINCE_UNMEASURED = " (%s 부터 %.0f초 끊김, 그중 약 %.0f초는 측정되지 않음)"
+VPN_SINCE_UNMEASURED = " (%s 부터 %s 끊김, 그중 측정되지 않은 시간 약 %s)"
+
+# 끊겨 있던 시간. 초로만 적으면 긴 구간이 "604800초" 로 나와 읽는 사람이
+# 다시 나눠야 한다. 반대로 1초가 안 되는 시간을 반올림해 "0초" 라고 적으면
+# 있었던 공백이 없었던 것처럼 보인다.
+DUR_DAYS = "%d일"
+DUR_HOURS = "%d시간"
+DUR_MINUTES = "%d분"
+DUR_SECONDS = "%d초"
+DUR_UNDER_SECOND = "1초 미만"
 
 # 첫 홉 증거가 1발인지 다발인지. 다발 주기의 reachable·rtt_ms 는 첫 발
 # 기준이라(collect/link.merge_probes), 이 문장이 없으면 3발 중 2발 손실이

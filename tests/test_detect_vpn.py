@@ -140,10 +140,13 @@ class TestReconnect(unittest.TestCase):
         self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:00Z")
         self.assertEqual(f.evidence["down_seconds"], 450.0)
         self.assertEqual(f.evidence["unmeasured_seconds"], 380.0)
-        self.assertIn("450", f.summary)
-        self.assertIn("380", f.summary)
+        # 초 그대로 적지 않는다 — 긴 끊김은 "604800초" 로 읽히면 다시 나눠야 한다.
+        self.assertIn("7분 30초", f.summary)
+        self.assertIn("6분 20초", f.summary)
+        self.assertNotIn("450", f.summary)
         self.assertEqual(f.summary, msg.VPN_RECONNECTED
-                         % ("warp", msg.VPN_SINCE_UNMEASURED % ("00:00:00", 450.0, 380.0)))
+                         % ("warp", msg.VPN_SINCE_UNMEASURED
+                            % ("00:00:00", "7분 30초", "6분 20초")))
 
     def test_without_a_gap_the_summary_keeps_its_old_shape(self):
         """공백이 없으면 종전 그대로 — 시작 시각만 적는다."""
@@ -372,6 +375,39 @@ class TestTheKindSetIsFrozen(unittest.TestCase):
     def test_no_new_security_kind_was_added(self):
         self.assertEqual({k for k in self.KINDS if "PROTECTION" in k or "TUNNEL_OFF" in k},
                          {"VPN_PROTECTION_LOST", "VPN_TUNNEL_OFF"})
+
+
+class TestDownTimeReadsAsTime(unittest.TestCase):
+    """끊긴 시간을 초 단위 숫자로만 적지 않는다 (AC-8 의 표기 부분).
+
+    증거 필드(`down_seconds`·`unmeasured_seconds`)는 초 단위 숫자 그대로다.
+    바뀌는 것은 요약문뿐이다.
+    """
+
+    def _reconnected(self, prev_ts, cur_ts, since, unmeasured):
+        prev = obs(ts=prev_ts, vpn=vpn_state("disconnected"))
+        cur = obs(ts=cur_ts, vpn=vpn_state("connected"))
+        return by_kind(judge(prev, cur, state={
+            "icmp_gw": True, "vpn_down_since": {"warp": since},
+            "vpn_down_unmeasured": {"warp": unmeasured}}), "VPN_RECONNECTED")
+
+    def test_a_long_outage_is_not_printed_in_bare_seconds(self):
+        f = self._reconnected("2026-01-07T23:59:55Z", "2026-01-08T00:00:00Z",
+                              "2026-01-01T00:00:00Z", 3700.0)
+        self.assertEqual(f.evidence["down_seconds"], 604800.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 3700.0)
+        self.assertIn("7일", f.summary)
+        self.assertIn("1시간 1분", f.summary)
+        self.assertNotIn("604800", f.summary)
+
+    def test_a_sub_second_gap_is_not_rounded_away_to_zero(self):
+        """반올림해서 "0초" 라고 적으면 있었던 공백이 없었던 것이 된다."""
+        f = self._reconnected("2026-01-01T00:00:05Z", "2026-01-01T00:00:10Z",
+                              "2026-01-01T00:00:05Z", 0.4)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 0.4)
+        self.assertIn(msg.DUR_UNDER_SECOND, f.summary)
+        self.assertNotIn("0초", f.summary)
+        self.assertIn("5초 끊김", f.summary)
 
 
 class TestNoise(unittest.TestCase):
