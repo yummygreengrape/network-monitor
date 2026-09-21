@@ -10,7 +10,8 @@ import concurrent.futures
 import re
 from typing import Any, Dict, List, Optional
 
-from ..model import ident
+from .. import liveness
+from ..model import ident, unwrap
 from ..util import OK, Capability, run
 
 NAME = "link"
@@ -95,13 +96,50 @@ def vpn_states(vpn_block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def first_hop_silent(prev_link: Optional[Dict[str, Any]] = None,
+                     prev_arp: Optional[Dict[str, Any]] = None,
+                     method: Optional[str] = None) -> bool:
+    """직전 주기의 첫 홉이 **이 망의 판정 방법 기준으로** 무응답이었는가.
+
+    `gateway_reachable`(ICMP)만 보면 안 된다. 게이트웨이가 ICMP 를 막아 둔
+    망에서는 그 값이 **정상 상태에도 매 주기 False** 다 — liveness 가 바로
+    그래서 보정 뒤에 ARP 로 판정을 바꾼다(netmon/liveness.py). ICMP 를 그대로
+    이상 징후로 세면 아무 일도 없는데 주기마다 3발이 나가고, "정상 상태가
+    이어지는 동안에는 켜지지 않는다"(AC-2)가 깨진다.
+
+    그래서 liveness 가 고른 방법과 같은 신호를 본다.
+      - ICMP 로 판정하는 망: `link.gateway_reachable` 이 False
+      - ARP 로 판정하는 망: `arp.gateway_mac` 이 비었다(그 망에서 첫 홉이
+        실제로 끊기면 MAC 이 사라진다)
+      - 보정 중(`unknown`): liveness.evaluate 와 같은 우선순위. ARP 나 ICMP 가
+        살아 있다고 말하면 아니고, ICMP 가 명시적으로 False 일 때만 참이다.
+
+    **판정하지 못한 것은 무응답이 아니다.** 측정하지 않은 주기(None), 수집기가
+    통째로 실패해 블록이 빈 주기는 거짓으로 둔다 — 모르는 것을 근거로 없던
+    패킷을 만들지 않는다.
+    """
+    icmp = (prev_link or {}).get("gateway_reachable")
+    arp_ok = bool(unwrap((prev_arp or {}).get("gateway_mac")))
+    if method == liveness.ICMP:
+        return icmp is False
+    if method == liveness.ARP:
+        # 빈 블록은 ARP 수집 실패다. MAC 이 없는 것과 구분한다.
+        return bool(prev_arp) and not arp_ok
+    if arp_ok or icmp is True:
+        return False
+    return icmp is False
+
+
 def first_hop_anomaly(prev_link: Optional[Dict[str, Any]] = None,
                       prev_vpn: Optional[Dict[str, Any]] = None,
-                      before_vpn: Optional[Dict[str, Any]] = None) -> bool:
+                      before_vpn: Optional[Dict[str, Any]] = None,
+                      prev_arp: Optional[Dict[str, Any]] = None,
+                      method: Optional[str] = None) -> bool:
     """이번 주기에 다발로 잴 만한 이상 징후가 **직전 주기**에 있었는가.
 
     둘 중 하나면 참이다 (AC-2).
-      - 직전 주기의 첫 홉이 무응답
+      - 직전 주기의 첫 홉이 무응답 — 이 망의 판정 방법 기준으로 본다
+        (`first_hop_silent`). `method` 는 liveness 가 고른 방법이다.
       - 직전 주기에 VPN 상태가 바뀌었다 (직전 주기와 그 앞 주기의 비교).
         "connected 가 아니면서 그 앞과 다름" 은 이 조건에 포함된다.
 
@@ -113,7 +151,7 @@ def first_hop_anomaly(prev_link: Optional[Dict[str, Any]] = None,
     다발 측정이 켜지지 않고, 첫 홉 증거가 평소 주기와 같이 ping 명령 한
     번뿐이다(보낸 발 수는 `ping_count` 설정에 달렸고 관측에 남지 않는다).
     """
-    if (prev_link or {}).get("gateway_reachable") is False:
+    if first_hop_silent(prev_link, prev_arp, method):
         return True
     if before_vpn is None:
         return False  # 비교할 앞 주기가 없다. 바뀌었다고 말할 수 없다.

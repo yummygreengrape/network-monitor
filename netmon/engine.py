@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import baseline, investigate, messages, vpn
+from . import baseline, investigate, liveness, messages, vpn
 from .collect import arp, dhcp, dns, iface, link, route, wifi
 from .config import Config
 from .detect import quality
@@ -45,6 +45,7 @@ class Engine:
     # 첫 홉 다발 측정을 켤지 정하는 직전 주기의 관측. 클래스 기본값으로 두는
     # 것은 replay() 가 __init__ 을 우회하기 때문이다.
     _last_link: Optional[Dict[str, Any]] = None
+    _last_arp: Optional[Dict[str, Any]] = None
     _last_vpn: Optional[Dict[str, Any]] = None
     _before_vpn: Optional[Dict[str, Any]] = None
 
@@ -179,9 +180,18 @@ class Engine:
         return obs
 
     def _burst_hint(self) -> bool:
-        """이번 주기의 첫 홉을 다발로 잴 것인가."""
+        """이번 주기의 첫 홉을 다발로 잴 것인가.
+
+        판정 방법을 함께 넘긴다. ICMP 를 막아 둔 게이트웨이에서는
+        `gateway_reachable` 이 정상 상태에도 매 주기 False 라, 그것만 보면
+        아무 일도 없는데 주기마다 다발이 나간다 (netmon/collect/link.py).
+        `self.state` 는 직전 주기까지의 보정 결과다 — 이번 주기 보정은
+        판정 단계에서 일어나므로 여기서는 아직 반영돼 있지 않다.
+        """
         return link.first_hop_anomaly(self._last_link, self._last_vpn,
-                                      self._before_vpn)
+                                      self._before_vpn,
+                                      prev_arp=self._last_arp,
+                                      method=liveness.method_for(self.state))
 
     def _remember_for_burst(self, obs: Observation) -> None:
         """다음 주기의 다발 측정 판단에 쓸, 직전 두 주기의 상태를 남긴다.
@@ -192,6 +202,7 @@ class Engine:
         self._before_vpn = self._last_vpn
         self._last_vpn = obs.get("vpn")
         self._last_link = obs.get("link")
+        self._last_arp = obs.get("arp")
 
     def _wifi_changed_hint(self, obs: Observation) -> bool:
         if self.prev is None:

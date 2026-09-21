@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest import mock
 
-from netmon import link
+from netmon import link, liveness
 from netmon.collect import link as first_hop
 from netmon.engine import Engine
 from netmon.util import CmdResult
@@ -233,6 +233,66 @@ class TestAnomalyHint(unittest.TestCase):
                                                      None, None))
 
 
+class TestAnomalyHintFollowsTheLivenessMethod(unittest.TestCase):
+    """무응답 판정을 이 망의 판정 방법으로 본다 (QA-3, AC-2, DEV-1b).
+
+    ICMP 를 막아 둔 게이트웨이에서는 `gateway_reachable` 이 정상 상태에도
+    매 주기 False 다. 그것을 이상 징후로 세면 아무 일도 없는데 주기마다
+    다발이 나간다 — liveness 가 ARP 로 판정을 바꾸는 바로 그 망이다.
+    """
+
+    ARP_OK = {"gateway_mac": {"id": "mac:1", "v": helpers.GW_MAC}, "neighbors": 4}
+    ARP_GONE = {"gateway_mac": None, "neighbors": 4}
+    ICMP_SILENT = {"gateway_reachable": False}
+    ICMP_OK = {"gateway_reachable": True}
+    CONNECTED = {"warp": {"state": "connected"}}
+
+    def hint(self, link_block, arp_block, method):
+        return first_hop.first_hop_anomaly(link_block, self.CONNECTED, self.CONNECTED,
+                                           prev_arp=arp_block, method=method)
+
+    def test_icmp_silent_network_never_turns_it_on_while_things_are_fine(self):
+        for _ in range(5):
+            self.assertFalse(self.hint(self.ICMP_SILENT, self.ARP_OK, liveness.ARP))
+
+    def test_icmp_silent_network_turns_it_on_when_the_first_hop_really_goes(self):
+        """ARP 로 판정하는 망에서 첫 홉이 끊기면 게이트웨이 MAC 이 빈다."""
+        self.assertTrue(self.hint(self.ICMP_SILENT, self.ARP_GONE, liveness.ARP))
+
+    def test_an_arp_collector_failure_is_not_an_outage(self):
+        """블록이 통째로 비면 수집 실패다. 모르는 것을 근거로 쏘지 않는다."""
+        self.assertFalse(self.hint(self.ICMP_SILENT, {}, liveness.ARP))
+        self.assertFalse(self.hint(self.ICMP_SILENT, None, liveness.ARP))
+
+    def test_icmp_network_keeps_the_old_behaviour(self):
+        self.assertTrue(self.hint(self.ICMP_SILENT, self.ARP_OK, liveness.ICMP))
+        self.assertFalse(self.hint(self.ICMP_OK, self.ARP_GONE, liveness.ICMP))
+        self.assertFalse(self.hint({"gateway_reachable": None}, self.ARP_OK,
+                                   liveness.ICMP))
+
+    def test_while_calibrating_a_live_signal_wins(self):
+        """보정 중에는 liveness.evaluate 와 같은 우선순위다."""
+        self.assertFalse(self.hint(self.ICMP_SILENT, self.ARP_OK, liveness.UNKNOWN))
+        self.assertFalse(self.hint(self.ICMP_OK, self.ARP_GONE, liveness.UNKNOWN))
+        self.assertFalse(self.hint({"gateway_reachable": None}, self.ARP_GONE,
+                                   liveness.UNKNOWN))
+
+    def test_while_calibrating_both_signals_failing_turns_it_on(self):
+        self.assertTrue(self.hint(self.ICMP_SILENT, self.ARP_GONE, liveness.UNKNOWN))
+
+    def test_the_vpn_branch_is_untouched(self):
+        """판정 방법과 무관하게 VPN 상태 변화는 그대로 켠다."""
+        for method, quiet_link in ((liveness.ARP, self.ICMP_SILENT),
+                                   (liveness.ICMP, self.ICMP_OK),
+                                   (liveness.UNKNOWN, self.ICMP_SILENT)):
+            self.assertTrue(first_hop.first_hop_anomaly(
+                quiet_link, self.CONNECTED, {"warp": {"state": "connecting"}},
+                prev_arp=self.ARP_OK, method=method))
+            self.assertFalse(first_hop.first_hop_anomaly(
+                quiet_link, self.CONNECTED, self.CONNECTED,
+                prev_arp=self.ARP_OK, method=method))
+
+
 class TestBurstCycle(unittest.TestCase):
     """이상 징후 주기의 다발 측정 (QA-2, AC-1, AC-3)."""
 
@@ -413,8 +473,10 @@ class TestEngineRemembersTheLastTwoCycles(unittest.TestCase):
     수집은 돌리지 않는다 — 합성 관측을 그대로 기억시키고 판단만 본다.
     """
 
-    def _engine(self, *observations):
+    def _engine(self, *observations, state=None):
         eng = Engine.__new__(Engine)
+        # 보정 상태는 판정 방법을 정한다. 주지 않으면 보정 중(unknown)이다.
+        eng.state = dict(state or {})
         for o in observations:
             eng._remember_for_burst(o)
         return eng
@@ -428,10 +490,40 @@ class TestEngineRemembersTheLastTwoCycles(unittest.TestCase):
         self.assertFalse(eng._burst_hint())
 
     def test_silent_first_hop_last_cycle_turns_it_on(self):
+        """ICMP 로 판정하는 망에서는 종전 그대로다."""
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connected")),
+                           helpers.obs(icmp_ok=False,
+                                       vpn=helpers.vpn_state("connected")),
+                           state={"icmp_gw": True})
+        self.assertTrue(eng._burst_hint())
+
+    def test_an_icmp_silent_network_stays_quiet(self):
+        """게이트웨이가 ICMP 를 막아 둔 망(보정 결과 ARP 판정).
+
+        그 망에서는 `gateway_reachable` 이 정상 상태에도 매 주기 False 라,
+        그것만 보고 켜면 아무 일도 없는데 5초마다 3발이 나간다 (AC-2).
+        """
+        eng = self._engine(state={"icmp_gw": False})
+        for _ in range(5):
+            eng._remember_for_burst(helpers.obs(icmp_ok=False,
+                                                vpn=helpers.vpn_state("connected")))
+            self.assertFalse(eng._burst_hint())
+
+    def test_an_icmp_silent_network_still_notices_a_real_outage(self):
+        """같은 망에서 첫 홉이 실제로 끊기면 게이트웨이 MAC 이 사라진다."""
+        eng = self._engine(helpers.obs(icmp_ok=False,
+                                       vpn=helpers.vpn_state("connected")),
+                           helpers.obs(icmp_ok=False, gw_mac=None,
+                                       vpn=helpers.vpn_state("connected")),
+                           state={"icmp_gw": False})
+        self.assertTrue(eng._burst_hint())
+
+    def test_a_network_being_calibrated_stays_quiet_while_arp_is_fine(self):
+        """보정 중(unknown)에는 liveness 와 같은 우선순위로 본다."""
         eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connected")),
                            helpers.obs(icmp_ok=False,
                                        vpn=helpers.vpn_state("connected")))
-        self.assertTrue(eng._burst_hint())
+        self.assertFalse(eng._burst_hint())
 
     def test_a_state_change_one_cycle_ago_turns_it_on(self):
         """직전 주기에 다시 connected 가 됐어도, 바뀐 주기 다음은 재 본다."""
