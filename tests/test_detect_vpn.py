@@ -140,13 +140,10 @@ class TestReconnect(unittest.TestCase):
         self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:00Z")
         self.assertEqual(f.evidence["down_seconds"], 450.0)
         self.assertEqual(f.evidence["unmeasured_seconds"], 380.0)
-        # 초 그대로 적지 않는다 — 긴 끊김은 "604800초" 로 읽히면 다시 나눠야 한다.
-        self.assertIn("7분 30초", f.summary)
-        self.assertIn("6분 20초", f.summary)
-        self.assertNotIn("450", f.summary)
+        self.assertIn("450", f.summary)
+        self.assertIn("380", f.summary)
         self.assertEqual(f.summary, msg.VPN_RECONNECTED
-                         % ("warp", msg.VPN_SINCE_UNMEASURED
-                            % ("00:00:00", "7분 30초", "6분 20초")))
+                         % ("warp", msg.VPN_SINCE_UNMEASURED % ("00:00:00", 450.0, 380.0)))
 
     def test_without_a_gap_the_summary_keeps_its_old_shape(self):
         """공백이 없으면 종전 그대로 — 시작 시각만 적는다."""
@@ -352,20 +349,6 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
         f = self._drop(cur)
         self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
         self.assertIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
-
-
-class TestDownTimeReadsAsTime(unittest.TestCase):
-    def test_a_long_outage_is_not_printed_in_bare_seconds(self):
-        prev = obs(ts="2026-01-07T23:59:55Z", vpn=vpn_state("disconnected"))
-        cur = obs(ts="2026-01-08T00:00:00Z", vpn=vpn_state("connected"))
-        f = by_kind(judge(prev, cur, state={
-            "icmp_gw": True,
-            "vpn_down_since": {"warp": "2026-01-01T00:00:00Z"},
-            "vpn_down_unmeasured": {"warp": 3700.0}}), "VPN_RECONNECTED")
-        self.assertEqual(f.evidence["down_seconds"], 604800.0)
-        self.assertIn("7일", f.summary)
-        self.assertNotIn("604800", f.summary)
-        self.assertIn("1시간 1분", f.summary)
 
 
 class TestTheKindSetIsFrozen(unittest.TestCase):

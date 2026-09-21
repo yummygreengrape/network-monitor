@@ -1039,8 +1039,8 @@ class TestVpnDownSinceSurvivesUnjudgedCycles(_VpnCycleDriver, unittest.TestCase)
         self.assertEqual(f.evidence["down_seconds"], 200.0)
         # 180초 공백에서 한 주기(5초)는 정상 간격으로 돈 것이라 빠진다.
         self.assertEqual(f.evidence["unmeasured_seconds"], 175.0)
-        self.assertIn("3분 20초", f.summary)    # 200초
-        self.assertIn("2분 55초", f.summary)    # 175초
+        self.assertIn("200", f.summary)
+        self.assertIn("175", f.summary)
 
     def test_without_a_gap_nothing_is_reported_as_unmeasured(self):
         eng, out = self._run([

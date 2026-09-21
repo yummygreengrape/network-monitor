@@ -298,24 +298,6 @@ def _unmeasured_seconds(raw: Any, down_s: Optional[float]) -> float:
     return round(min(val, down_s), 1)
 
 
-def _duration(seconds: float) -> str:
-    """초를 사람이 읽는 표기로. 큰 단위부터 둘까지만 적는다.
-
-    "604800초 끊김" 은 읽는 사람이 다시 나눠야 한다. 값 자체는 증거
-    (`down_seconds`)에 초 단위 숫자로 그대로 남는다.
-    """
-    total = int(round(max(0.0, float(seconds))))
-    parts: List[str] = []
-    for size, fmt in ((86400, msg.DUR_DAYS), (3600, msg.DUR_HOURS),
-                      (60, msg.DUR_MINUTES), (1, msg.DUR_SECONDS)):
-        count, total = divmod(total, size)
-        if count:
-            parts.append(fmt % count)
-        if len(parts) == 2:
-            break
-    return " ".join(parts) if parts else msg.DUR_SECONDS % 0
-
-
 def _down_phrase(since: Any, down_s: Optional[float], unmeasured: float) -> str:
     """재연결 요약문의 괄호. 공백이 섞였으면 총 시간과 미관측 시간을 함께 적는다.
 
@@ -328,8 +310,7 @@ def _down_phrase(since: Any, down_s: Optional[float], unmeasured: float) -> str:
     if down_s is None:
         return msg.VPN_SINCE % since[11:19]
     if unmeasured > 0:
-        return msg.VPN_SINCE_UNMEASURED % (since[11:19], _duration(down_s),
-                                           _duration(unmeasured))
+        return msg.VPN_SINCE_UNMEASURED % (since[11:19], down_s, unmeasured)
     return msg.VPN_SINCE % since[11:19]
 
 
