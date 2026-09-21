@@ -42,6 +42,12 @@ ARP_LOG_WINDOW_SECONDS = 90.0
 
 
 class Engine:
+    # 첫 홉 다발 측정을 켤지 정하는 직전 주기의 관측. 클래스 기본값으로 두는
+    # 것은 replay() 가 __init__ 을 우회하기 때문이다.
+    _last_link: Optional[Dict[str, Any]] = None
+    _last_vpn: Optional[Dict[str, Any]] = None
+    _before_vpn: Optional[Dict[str, Any]] = None
+
     def __init__(self, cfg: Config, store: Store) -> None:
         self.cfg = cfg
         self.store = store
@@ -108,6 +114,11 @@ class Engine:
             "config_home": os.path.dirname(self.cfg.path),
             "wifi_helper_interval": self.cfg.data.get("wifi_helper_interval", 15),
             "ping_count": self.cfg.data.get("ping_count", 1),
+            # 조사 중에는 주기가 좁혀진다. 다발 측정은 그 주기 안에 들어갈 때만 한다.
+            "interval": self.effective_interval(self.cfg.interval),
+            # **직전 주기**의 관측으로만 정한다. 같은 주기의 VPN 상태는 아직 없다 —
+            # link 가 vpn 보다 먼저 돌기 때문이다.
+            "first_hop_burst": self._burst_hint(),
         }
 
         def step(module, name: str) -> None:
@@ -164,7 +175,23 @@ class Engine:
             except Exception as exc:
                 obs.errors["vpn"] = str(exc)[:120]
 
+        self._remember_for_burst(obs)
         return obs
+
+    def _burst_hint(self) -> bool:
+        """이번 주기의 첫 홉을 다발로 잴 것인가."""
+        return link.first_hop_anomaly(self._last_link, self._last_vpn,
+                                      self._before_vpn)
+
+    def _remember_for_burst(self, obs: Observation) -> None:
+        """다음 주기의 다발 측정 판단에 쓸, 직전 두 주기의 상태를 남긴다.
+
+        링크가 없어 판정을 건너뛰는 주기도 여기서는 센다 — 첫 홉이 응답하지
+        않은 주기가 바로 다음 주기를 다발로 재야 할 이유이기 때문이다.
+        """
+        self._before_vpn = self._last_vpn
+        self._last_vpn = obs.get("vpn")
+        self._last_link = obs.get("link")
 
     def _wifi_changed_hint(self, obs: Observation) -> bool:
         if self.prev is None:
