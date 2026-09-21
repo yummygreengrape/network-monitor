@@ -677,6 +677,47 @@ class TestLinkBlip(unittest.TestCase):
         gap = found[1]
         self.assertEqual(gap.evidence["elapsed_s"], 900.0)
 
+    def test_an_associated_radio_without_ipv4_is_not_called_a_link_drop(self):
+        """2026-09-21 02:03:42 UTC 실측: Wi-Fi 후보가 active 인데 IPv4 주소만 없어
+        primary 가 비었고, 5초 뒤 다른 네트워크로 정상 연결됐다. 그 주기에
+        "링크가 끊긴 상태" 라고 적으면 관측과 다르다."""
+        from netmon import messages as msg
+        before, gone, _back = self._blip()
+        gone.data["iface"]["candidates"] = [
+            {"kind": "ethernet", "status": "inactive", "flags_up": True,
+             "has_inet": False, "has_inet6": False},
+            {"kind": "wifi", "status": "active", "flags_up": True,
+             "has_inet": False, "has_inet6": True},
+        ]
+        found = self._engine(before).judge(gone, 5.0)
+        self.assertEqual([f.kind for f in found], ["LINK_ABSENT"])
+        self.assertEqual(found[0].summary, msg.LINK_ABSENT_NO_IPV4)
+        self.assertNotIn("끊긴", found[0].summary)
+
+    def test_a_radio_that_is_not_associated_is_still_called_a_link_drop(self):
+        from netmon import messages as msg
+        before, gone, _back = self._blip()
+        gone.data["iface"]["candidates"] = [
+            {"kind": "wifi", "status": "inactive", "flags_up": True,
+             "has_inet": False, "has_inet6": False},
+        ]
+        found = self._engine(before).judge(gone, 5.0)
+        self.assertEqual(found[0].summary, msg.LINK_ABSENT)
+
+    def test_an_old_sample_without_candidates_keeps_the_old_wording(self):
+        from netmon import messages as msg
+        before, gone, _back = self._blip()
+        gone.data["iface"].pop("candidates", None)
+        found = self._engine(before).judge(gone, 5.0)
+        self.assertEqual(found[0].summary, msg.LINK_ABSENT)
+
+    def test_a_measurement_gap_carries_no_invented_cause(self):
+        """귀속이 붙으면 콘솔에서 억제된다. 원인은 관측된 적이 없으므로 달지 않는다."""
+        before, gone, _back = self._blip()
+        found = self._engine(before).judge(gone, 900.0)
+        gap = [f for f in found if f.kind == "MEASUREMENT_GAP"][0]
+        self.assertIsNone(gap.attribution)
+
     def test_a_short_unjudged_cycle_does_not_invent_a_gap(self):
         before, gone, _back = self._blip()
         found = self._engine(before).judge(gone, 5.0)

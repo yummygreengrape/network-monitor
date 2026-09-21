@@ -360,6 +360,8 @@ EXPOSURE_IDENTITY_AMBIGUOUS = (
 
 # ─────────────────────────────────────────── Incomplete observation
 LINK_ABSENT = "No primary interface, so this cycle is not judged. The link is down."
+LINK_ABSENT_NO_IPV4 = ("No primary interface, so this cycle is not judged. The radio is "
+                       "associated and only the IPv4 address is missing (it may still be joining).")
 WHY_LINK_GONE = "the link itself went away"
 
 # ─────────────────────────────────────────── Day boundary

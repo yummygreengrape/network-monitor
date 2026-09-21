@@ -13,7 +13,8 @@ from . import baseline, investigate, messages, vpn
 from .collect import arp, dhcp, dns, iface, link, route, wifi
 from .config import Config
 from .detect import quality
-from .detect import (Context, attributions_for, gap_exceeded, is_complete, network_key,
+from .detect import (Context, associated_without_ipv4, attributions_for, gap_exceeded,
+                     is_complete, network_key,
                      run_all)
 from . import messages as msg
 from .model import CONFIRMED, INFO, INFO_SEV, Finding, Observation, unwrap
@@ -119,6 +120,14 @@ class Engine:
         step(iface, "iface")
         ctx["primary"] = obs.data["iface"].get("primary")
         ctx["primary_kind"] = obs.data["iface"].get("primary_kind")
+        # 주 인터페이스가 없을 때가 무선 상태를 가장 알고 싶은 순간이다.
+        # 그런데 그때는 primary_kind 가 unknown 이라 wifi 수집기가 통째로
+        # 건너뛰어서, "링크가 끊겼다" 고 적는 주기에 RSSI 도 link_active 도
+        # 남지 않았다 (2026-09-21 확인).
+        if not ctx["primary"]:
+            ctx["wifi_fallback_dev"] = next(
+                (p.get("dev") for p in (obs.data["iface"].get("ports") or [])
+                 if p.get("kind") == "wifi"), None)
         gw = unwrap(obs.data["iface"].get("default4_gateway")) or \
             unwrap(obs.data["iface"].get("scoped_gateway"))
         ctx["gateway"] = gw
@@ -175,8 +184,10 @@ class Engine:
         if not is_complete(obs):
             self.link_gap = True
             iface = obs.get("iface") or {}
+            summary = (msg.LINK_ABSENT_NO_IPV4 if associated_without_ipv4(iface)
+                       else msg.LINK_ABSENT)
             out = [Finding(axis=INFO, kind="LINK_ABSENT", confidence=CONFIRMED,
-                           severity=INFO_SEV, summary=msg.LINK_ABSENT,
+                           severity=INFO_SEV, summary=summary,
                            evidence={"iface": iface},
                            network=self.state.get("network"))]
             # **판정은 건너뛰어도 공백은 남긴다.** 이 분기가 run_all 을 건너뛰는

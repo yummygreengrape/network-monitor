@@ -170,6 +170,21 @@ def _first_inet(obs: Observation) -> Optional[str]:
     return None
 
 
+def associated_without_ipv4(iface: Dict[str, Any]) -> bool:
+    """주 인터페이스가 없는 이유가 "무선이 끊겨서" 가 아니라 "IPv4 주소가 아직
+    없어서" 인가.
+
+    2026-09-21 실측: Wi-Fi 후보가 `status: active` 인데 IPv4 주소만 없어
+    primary 가 비었고, 5초 뒤 다른 네트워크로 정상 연결됐다. 그 주기에
+    "링크가 끊긴 상태" 라고 적는 것은 관측과 다르다.
+    """
+    for cand in (iface.get("candidates") or []):
+        if (cand.get("kind") == "wifi" and cand.get("status") == "active"
+                and not cand.get("has_inet")):
+            return True
+    return False
+
+
 def gap_exceeded(elapsed: float, interval: float) -> bool:
     """측정이 "비었다" 고 할 만큼 주기가 벌어졌는가.
 
