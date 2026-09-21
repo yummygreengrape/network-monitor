@@ -9,12 +9,29 @@ import unittest
 
 from netmon import messages as msg
 from netmon import vpn as vpnmod
+from netmon.collect.link import merge_probes
 from netmon.detect import Context, attributions_for, network_key, run_all
+from netmon.detect import vpn as vpn_rules
 from tests.helpers import GW_MAC, by_kind, kinds, obs, vpn_state
 
 ON = {"detect.vpn": True, "detect.quality": True, "detect.l2": True,
       "detect.dhcp": True, "detect.dns": True, "detect.route": True,
       "detect.wifi": True}
+
+
+def burst(o, replies=(True, False, False), rtt=3.0):
+    """다발 주기의 첫 홉 관측.
+
+    모양을 손으로 적지 않고 **실제 생산자**(collect/link.merge_probes)를
+    그대로 쓴다. 첫 발이 응답한 3발 묶음이면 `reachable` 은 종전과 같이
+    True 이고, 나머지 두 발의 손실은 증거에만 남는다.
+    """
+    probes = [{"reachable": bool(r), "rtt_ms": rtt if r else None,
+               "replies": 1 if r else 0} for r in replies]
+    o.data["link"]["results"]["gateway"] = merge_probes(probes)
+    o.data["link"]["gateway_reachable"] = bool(replies[0])
+    o.data["link"]["first_hop_probes"] = len(probes)
+    return o
 
 
 def judge(prev, cur, state=None, elapsed=5.0):
@@ -36,11 +53,18 @@ class TestDisconnect(unittest.TestCase):
         self.assertEqual({x.axis for x in f if x.kind.startswith("VPN_")},
                          {"quality", "security"})
 
-    def test_healthy_first_hop_points_at_the_tunnel(self):
+    def test_healthy_first_hop_is_stated_not_turned_into_a_verdict(self):
+        """첫 홉이 응답했다는 사실까지만 적는다.
+
+        종전 문구는 같은 자리에서 "첫 홉은 정상 — 터널 경로 문제" 라고 고장
+        위치를 지목했다. 1발 ICMP 가 돌아온 것으로는 로컬 구간과 터널
+        상대편 구간을 나눌 수 없다.
+        """
         prev = obs(vpn=vpn_state("connected"), icmp_ok=True)
         cur = obs(vpn=vpn_state("disconnected"), icmp_ok=True)
         f = by_kind(judge(prev, cur), "VPN_DISCONNECTED")
-        self.assertIn(msg.WHY_TUNNEL, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_OK, f.summary)
+        self.assertNotIn("터널 경로", f.summary)
         self.assertIs(f.evidence["first_hop_alive"], True)
 
     def test_dead_first_hop_points_at_the_link(self):
@@ -116,10 +140,13 @@ class TestReconnect(unittest.TestCase):
         self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:00Z")
         self.assertEqual(f.evidence["down_seconds"], 450.0)
         self.assertEqual(f.evidence["unmeasured_seconds"], 380.0)
-        self.assertIn("450", f.summary)
-        self.assertIn("380", f.summary)
+        # 초 그대로 적지 않는다 — 긴 끊김은 "604800초" 로 읽히면 다시 나눠야 한다.
+        self.assertIn("7분 30초", f.summary)
+        self.assertIn("6분 20초", f.summary)
+        self.assertNotIn("450", f.summary)
         self.assertEqual(f.summary, msg.VPN_RECONNECTED
-                         % ("warp", msg.VPN_SINCE_UNMEASURED % ("00:00:00", 450.0, 380.0)))
+                         % ("warp", msg.VPN_SINCE_UNMEASURED
+                            % ("00:00:00", "7분 30초", "6분 20초")))
 
     def test_without_a_gap_the_summary_keeps_its_old_shape(self):
         """공백이 없으면 종전 그대로 — 시작 시각만 적는다."""
@@ -204,6 +231,164 @@ class TestReconnect(unittest.TestCase):
                 self.assertIsNotNone(f)
                 self.assertIsNone(f.evidence["down_since"])
                 self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+
+
+class TestRenegotiationIsNotCalledADrop(unittest.TestCase):
+    """공급자가 `connecting` 이라고 말한 것을 "연결 끊김" 으로 적지 않는다.
+
+    2026-09-21 실측의 12건은 복구 직전 상태가 전부 `connecting` 이었다.
+    다시 맺는 중인 것과 끊어진 것은 다른 사실이다. **판정 종류·등급과
+    보호 상실 판정은 그대로 둔다** — 터널 밖으로 나간 사실은 같다.
+    """
+
+    def _drop(self, state):
+        prev = obs(vpn=vpn_state("connected"), security="NONE")
+        cur = obs(vpn=vpn_state(state), security="NONE")
+        return judge(prev, cur)
+
+    def test_connecting_is_worded_as_renegotiation(self):
+        f = by_kind(self._drop("connecting"), "VPN_DISCONNECTED")
+        self.assertTrue(f.summary.startswith(
+            msg.VPN_RENEGOTIATING % ("warp", msg.WHY_FIRST_HOP_OK)), f.summary)
+        self.assertNotIn("연결 끊김", f.summary)
+        self.assertEqual(f.evidence["provider_state"], "connecting")
+
+    def test_a_real_disconnect_still_says_disconnected(self):
+        f = by_kind(self._drop("disconnected"), "VPN_DISCONNECTED")
+        self.assertTrue(f.summary.startswith(
+            msg.VPN_DISCONNECTED % ("warp", msg.WHY_FIRST_HOP_OK)), f.summary)
+        self.assertEqual(f.evidence["provider_state"], "disconnected")
+
+    def test_the_kind_and_severity_do_not_change(self):
+        a = by_kind(self._drop("connecting"), "VPN_DISCONNECTED")
+        b = by_kind(self._drop("disconnected"), "VPN_DISCONNECTED")
+        self.assertEqual(a.kind, b.kind)
+        self.assertEqual((a.axis, a.severity, a.confidence),
+                         (b.axis, b.severity, b.confidence))
+
+    def test_protection_loss_is_reported_exactly_as_before(self):
+        a = by_kind(self._drop("connecting"), "VPN_PROTECTION_LOST")
+        b = by_kind(self._drop("disconnected"), "VPN_PROTECTION_LOST")
+        self.assertIsNotNone(a)
+        self.assertEqual(a.severity, "medium")
+        self.assertEqual((a.axis, a.severity, a.summary, a.attribution),
+                         (b.axis, b.severity, b.summary, b.attribution))
+
+
+class TestProviderReasonInTheSummary(unittest.TestCase):
+    """사유는 고정 목록과 **정확히 일치할 때만** 요약문에 인용한다.
+
+    사유 문자열에는 터널 엔드포인트의 공인 IP·포트가 들어 있고, 요약문은
+    가리지 않은 채로 보고서에 나간다(redact 는 감싼 값만 바꾼다).
+    """
+
+    def _drop(self, reason):
+        prev = obs(vpn=vpn_state("connected"))
+        cur = obs(vpn=vpn_state("disconnected", reason=reason))
+        return by_kind(judge(prev, cur), "VPN_DISCONNECTED")
+
+    def test_an_exact_match_is_quoted(self):
+        f = self._drop("No Network")
+        self.assertIn(msg.VPN_PROVIDER_REASON % "No Network", f.summary)
+        self.assertEqual(f.evidence["provider_reason"], "No Network")
+
+    def test_anything_else_stays_in_the_evidence_only(self):
+        cases = ["No Network detected", "no network", "NO NETWORK",
+                 "Unable to reach 198.51.100.7:2408 (No Network)",
+                 "handshake with 198.51.100.7:2408 timed out",
+                 "", None]
+        for reason in cases:
+            with self.subTest(reason=reason):
+                f = self._drop(reason)
+                self.assertNotIn("공급자 사유", f.summary)
+                self.assertNotIn("198.51.100", f.summary)
+                if isinstance(reason, str) and reason:
+                    self.assertNotIn(reason, f.summary)
+                self.assertEqual(f.evidence["provider_reason"], reason)
+
+    def test_surrounding_whitespace_does_not_defeat_the_list(self):
+        f = self._drop("  No Network\n")
+        self.assertIn(msg.VPN_PROVIDER_REASON % "No Network", f.summary)
+
+
+class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
+    """1발인지 다발인지 문구와 근거에 드러낸다.
+
+    다발 주기의 `reachable`·`rtt_ms` 는 첫 발 기준이라, 손실을 함께 적지
+    않으면 3발 중 2발이 빠진 주기도 "첫 홉은 응답함" 으로만 남는다.
+    """
+
+    def _drop(self, cur):
+        return by_kind(judge(obs(vpn=vpn_state("connected")), cur),
+                       "VPN_DISCONNECTED")
+
+    def test_a_one_probe_cycle_says_it_is_one_probe(self):
+        f = self._drop(obs(vpn=vpn_state("disconnected")))
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+        self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
+
+    def test_a_burst_cycle_quotes_the_loss(self):
+        cur = burst(obs(vpn=vpn_state("disconnected")))
+        f = self._drop(cur)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST % (3, 1, 66.7), f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+        self.assertEqual(f.evidence["first_hop_probe_mode"], "burst")
+        self.assertEqual(f.evidence["first_hop_sent"], 3)
+        self.assertEqual(f.evidence["first_hop_received"], 1)
+        self.assertEqual(f.evidence["first_hop_loss_pct"], 66.7)
+        # 판정이 읽는 값은 첫 발 기준 그대로다 (AC-1b).
+        self.assertIs(f.evidence["first_hop_alive"], True)
+
+    def test_a_burst_without_loss_still_says_it_was_a_burst(self):
+        f = self._drop(burst(obs(vpn=vpn_state("disconnected")),
+                             replies=(True, True, True)))
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST % (3, 3, 0.0), f.summary)
+        self.assertEqual(f.evidence["first_hop_loss_pct"], 0.0)
+
+    def test_ping_count_alone_does_not_make_it_a_burst(self):
+        """`first_hop_probes` 는 띄운 명령 수다. 다발 여부는 `mode` 로 본다."""
+        cur = obs(vpn=vpn_state("disconnected"))
+        cur.data["link"]["first_hop_probes"] = 3
+        f = self._drop(cur)
+        self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+
+
+class TestDownTimeReadsAsTime(unittest.TestCase):
+    def test_a_long_outage_is_not_printed_in_bare_seconds(self):
+        prev = obs(ts="2026-01-07T23:59:55Z", vpn=vpn_state("disconnected"))
+        cur = obs(ts="2026-01-08T00:00:00Z", vpn=vpn_state("connected"))
+        f = by_kind(judge(prev, cur, state={
+            "icmp_gw": True,
+            "vpn_down_since": {"warp": "2026-01-01T00:00:00Z"},
+            "vpn_down_unmeasured": {"warp": 3700.0}}), "VPN_RECONNECTED")
+        self.assertEqual(f.evidence["down_seconds"], 604800.0)
+        self.assertIn("7일", f.summary)
+        self.assertNotIn("604800", f.summary)
+        self.assertIn("1시간 1분", f.summary)
+
+
+class TestTheKindSetIsFrozen(unittest.TestCase):
+    """이 판정기가 내는 종류 집합. 기준 커밋(a502aeb)과 같다.
+
+    새 종류를 늘리면 한·영 문구와 문서 표가 함께 따라와야 하므로
+    (AC-11), 늘어났다는 사실 자체를 여기서 먼저 걸리게 한다.
+    """
+
+    KINDS = {"VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED",
+             "VPN_STATE_CHANGED", "VPN_STATE_UNKNOWN", "VPN_TUNNEL_OFF",
+             "VPN_TUNNEL_ON"}
+
+    def test_the_module_emits_only_these_kinds(self):
+        import io
+        import re
+        with io.open(vpn_rules.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertEqual(set(re.findall(r'kind="([A-Z_]+)"', src)), self.KINDS)
+
+    def test_no_new_security_kind_was_added(self):
+        self.assertEqual({k for k in self.KINDS if "PROTECTION" in k or "TUNNEL_OFF" in k},
+                         {"VPN_PROTECTION_LOST", "VPN_TUNNEL_OFF"})
 
 
 class TestNoise(unittest.TestCase):

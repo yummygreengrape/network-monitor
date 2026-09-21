@@ -103,6 +103,9 @@ MEASUREMENT_GAP = "측정이 %.0f초 동안 중단됨 (잠자기 또는 프로�
 
 # ─────────────────────────────────────────── 판정: VPN
 VPN_DISCONNECTED = "%s 연결 끊김. 가장 유력한 설명: %s."
+# 공급자가 connecting 을 보고한 전환. 끊긴 것이 아니라 다시 맺는 중이다.
+# (보호 상실 판정은 이 경우에도 종전 그대로 난다 — 터널 밖으로 나간 사실은 같다.)
+VPN_RENEGOTIATING = "%s 터널 재협상 중(공급자 상태 connecting). 가장 유력한 설명: %s."
 VPN_TUNNEL_OFF = ("%s 는 연결돼 있지만 터널을 세우지 않는 모드(%s). 트래픽은 터널 밖으로 "
                   "나가며, 이 네트워크는 같은 L2 의 다른 기기가 들여다볼 수 있는 곳.")
 VPN_TUNNEL_OFF_SAE = ("%s 는 연결돼 있지만 터널을 세우지 않는 모드(%s). WPA3-SAE 라 조용히 "
@@ -119,14 +122,34 @@ VPN_STATE_UNKNOWN = "%s 상태 확인 불가 (%s → %s)."
 VPN_SINCE = " (%s 부터 끊김)"
 # 측정이 비어 있던 시간이 끊김 속에 섞인 경우. 총 시간만 적으면 그중 얼마를
 # 실제로 지켜봤는지 알 수 없다 — 잠자기로 6분 넘게 비어 있던 구간이 실제로 있었다.
-VPN_SINCE_UNMEASURED = " (%s 부터 %.0f초 끊김, 그중 약 %.0f초는 측정되지 않음)"
+VPN_SINCE_UNMEASURED = " (%s 부터 %s 끊김, 그중 측정되지 않은 시간 약 %s)"
+
+# 끊겨 있던 시간. 초만 적으면 긴 구간이 "604800초" 처럼 읽히지 않는다.
+DUR_DAYS = "%d일"
+DUR_HOURS = "%d시간"
+DUR_MINUTES = "%d분"
+DUR_SECONDS = "%d초"
+
+# 첫 홉 증거가 1발인지 다발인지. 다발 주기의 reachable·rtt_ms 는 첫 발
+# 기준이라(collect/link.merge_probes), 이 문장이 없으면 3발 중 2발 손실이
+# "첫 홉은 응답함" 뒤에 가려진다.
+FIRST_HOP_EVIDENCE_ONE = "첫 홉 증거는 1발 ping."
+FIRST_HOP_EVIDENCE_BURST = "첫 홉 증거는 동시 %d발 ping (응답 %d발, 손실 %.0f%%)."
+FIRST_HOP_EVIDENCE_BURST_PLAIN = "첫 홉 증거는 동시 %d발 ping."
+
+# 공급자가 준 사유. **고정 목록과 정확히 일치할 때만** 요약문에 인용한다 —
+# 사유 문자열에는 공인 IP·포트가 들어 있고, 감싸지 않은 문자열은 내보낼 때도
+# 가려지지 않는다. 원문은 근거(provider_reason)에 그대로 남는다.
+VPN_PROVIDER_REASON = "공급자 사유: %s."
 
 # VPN 끊김의 "가장 유력한 설명"
 WHY_USER = "사용자가 직접 끊음"
 WHY_SLEEP = "잠자기"
 WHY_MOVED = "네트워크 이동"
 WHY_LINK = "첫 홉 무응답 — 이 기기와 공유기 사이 구간 문제"
-WHY_TUNNEL = "첫 홉은 정상 — 터널 경로 문제"
+# 첫 홉이 응답했다는 사실까지만 적는다. 같은 증거량에서 quality.cause_note 가
+# "이 관측만으로 판별 불가" 라고 적는 것과 어투를 맞춘다.
+WHY_FIRST_HOP_OK = "첫 홉은 응답함 — 어느 구간 문제인지는 이 관측만으로 판별 불가"
 WHY_UNKNOWN = "판단 근거 부족"
 
 DETECTOR_ERROR = "판정기 %s 예외로 중단: %s"

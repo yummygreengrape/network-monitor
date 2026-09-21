@@ -7,6 +7,10 @@ SLEEP / ARP_ANOMALY). 여기서는 고르지 않는다. 대신 한 번의 끊김
   연결 품질  VPN_DISCONNECTED   연결이 끊겼다
   보안       VPN_PROTECTION_LOST 신뢰할 수 없는 네트워크에서 보호가 사라졌다
 
+공급자가 `connecting` 을 보고한 전환도 같은 두 판정으로 남지만, 요약문은
+"끊김" 이 아니라 재협상이라고 적는다. 터널 밖으로 나간 사실은 같으므로
+보호 상실 판정의 등급과 조사 개시는 달라지지 않는다.
+
 "왜 끊겼나"는 분류가 아니라 **근거**로 붙는다. 같은 주기의 첫 홉 상태와
 억제 사유를 함께 기록하므로, 나중에 판단이 틀렸다고 생각되면 되짚을 수 있다.
 원인을 하나 골라 적으면 그 순간 나머지 근거가 사라진다.
@@ -65,12 +69,76 @@ def _security_kind(cur: Observation,
 def _down_reason(cur: Observation, ctx, state: Dict[str, Any]) -> Dict[str, Any]:
     """끊김과 함께 남길 근거. 원인을 하나로 단정하지 않는다."""
     method, alive = evaluate(cur, ctx.state)
-    return {
+    evidence = {
         "provider_reason": state.get("reason"),
+        "provider_state": state.get("state"),
         "first_hop_method": method,
         "first_hop_alive": alive,
         "attributions": list(ctx.attributions),
     }
+    evidence.update(_probe_evidence(cur))
+    return evidence
+
+
+def _probe_evidence(cur: Observation) -> Dict[str, Any]:
+    """첫 홉 증거가 1발인가 다발인가.
+
+    **판별은 `mode` 로 한다.** `link.first_hop_probes` 는 띄운 ping 명령의
+    수라서 `ping_count` 를 올려 둔 설정에서는 다발이 아닌 주기에도 1 보다
+    크다. 다발로 합친 관측만 스스로 `mode="burst"` 를 적는다
+    (collect/link.merge_probes).
+
+    다발 주기의 `reachable`·`rtt_ms` 는 **첫 발 기준**이므로(AC-1b), 손실
+    수를 함께 남기지 않으면 3발 중 2발이 빠진 주기도 "첫 홉은 응답함" 으로만
+    남는다.
+    """
+    results = cur.get("link", "results") or {}
+    gw = results.get("gateway") if isinstance(results, dict) else None
+    if not isinstance(gw, dict) or gw.get("mode") != "burst":
+        return {"first_hop_probe_mode": "single"}
+    out: Dict[str, Any] = {"first_hop_probe_mode": "burst",
+                           "first_hop_concurrent": bool(gw.get("concurrent"))}
+    for src, dst in (("sent", "first_hop_sent"), ("received", "first_hop_received")):
+        value = gw.get(src)
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[dst] = value
+    loss = gw.get("loss_pct")
+    if isinstance(loss, (int, float)) and not isinstance(loss, bool):
+        out["first_hop_loss_pct"] = float(loss)
+    return out
+
+
+def _probe_phrase(evidence: Dict[str, Any]) -> str:
+    """첫 홉 증거의 성격을 요약문에 드러내는 한 문장.
+
+    다발인데 발 수를 읽지 못하면 아무 말도 하지 않는다 — 모르는 것을 1발로
+    적으면 증거가 실제보다 약해 보인다.
+    """
+    if evidence.get("first_hop_probe_mode") != "burst":
+        return msg.FIRST_HOP_EVIDENCE_ONE
+    sent = evidence.get("first_hop_sent")
+    if not isinstance(sent, int):
+        return ""
+    received = evidence.get("first_hop_received")
+    loss = evidence.get("first_hop_loss_pct")
+    if isinstance(received, int) and isinstance(loss, float):
+        return msg.FIRST_HOP_EVIDENCE_BURST % (sent, received, loss)
+    return msg.FIRST_HOP_EVIDENCE_BURST_PLAIN % sent
+
+
+# 요약문에 그대로 인용해도 되는 공급자 사유. **정확히 일치할 때만** 쓴다.
+# 사유 문자열에는 터널 엔드포인트의 공인 IP·포트가 섞여 있고, 요약문은
+# 가리지 않은 채로 보고서·화면에 그대로 나간다(redact 는 감싼 값만 바꾼다).
+# 부분 일치를 허용하면 "No Network via 198.51.100.7:2408" 같은 문자열이
+# 통과한다.
+QUOTABLE_REASONS = ("No Network",)
+
+
+def _quotable_reason(reason: Any) -> Optional[str]:
+    if not isinstance(reason, str):
+        return None
+    text = reason.strip()
+    return text if text in QUOTABLE_REASONS else None
 
 
 def _likely(cur: Observation, ctx, state: Dict[str, Any]) -> str:
@@ -78,8 +146,8 @@ def _likely(cur: Observation, ctx, state: Dict[str, Any]) -> str:
 
     **안정화 창까지 본다.** VPN 상태 변화는 깨어난 그 주기가 아니라 다음
     주기에 나타난다 — 실측에서 공백은 16:48:58, 끊김은 16:49:03 이었다.
-    같은 주기만 보면 "잠자기에서 깨어나는 중" 대신 "터널 경로 문제" 라고
-    답하게 된다. 첫 홉이 정상인 것은 맞지만, 그것이 설명은 아니다.
+    같은 주기만 보면 "잠자기에서 깨어나는 중" 대신 "첫 홉은 응답함" 이라고
+    답하게 된다. 첫 홉이 응답한 것은 맞지만, 그것이 설명은 아니다.
     """
     if _user_action(state.get("reason")):
         return msg.WHY_USER
@@ -97,7 +165,10 @@ def _likely(cur: Observation, ctx, state: Dict[str, Any]) -> str:
     if alive is False:
         return msg.WHY_LINK
     if alive is True:
-        return msg.WHY_TUNNEL
+        # 첫 홉이 응답했다는 **사실**까지만 적는다. 1발(또는 한 묶음) ICMP 가
+        # 돌아온 것으로는 로컬 구간과 터널 상대편 구간을 나눌 수 없다 —
+        # 같은 증거량에서 quality.cause_note 는 "판별 불가" 라고 적는다.
+        return msg.WHY_FIRST_HOP_OK
     return msg.WHY_UNKNOWN
 
 
@@ -227,6 +298,24 @@ def _unmeasured_seconds(raw: Any, down_s: Optional[float]) -> float:
     return round(min(val, down_s), 1)
 
 
+def _duration(seconds: float) -> str:
+    """초를 사람이 읽는 표기로. 큰 단위부터 둘까지만 적는다.
+
+    "604800초 끊김" 은 읽는 사람이 다시 나눠야 한다. 값 자체는 증거
+    (`down_seconds`)에 초 단위 숫자로 그대로 남는다.
+    """
+    total = int(round(max(0.0, float(seconds))))
+    parts: List[str] = []
+    for size, fmt in ((86400, msg.DUR_DAYS), (3600, msg.DUR_HOURS),
+                      (60, msg.DUR_MINUTES), (1, msg.DUR_SECONDS)):
+        count, total = divmod(total, size)
+        if count:
+            parts.append(fmt % count)
+        if len(parts) == 2:
+            break
+    return " ".join(parts) if parts else msg.DUR_SECONDS % 0
+
+
 def _down_phrase(since: Any, down_s: Optional[float], unmeasured: float) -> str:
     """재연결 요약문의 괄호. 공백이 섞였으면 총 시간과 미관측 시간을 함께 적는다.
 
@@ -239,8 +328,29 @@ def _down_phrase(since: Any, down_s: Optional[float], unmeasured: float) -> str:
     if down_s is None:
         return msg.VPN_SINCE % since[11:19]
     if unmeasured > 0:
-        return msg.VPN_SINCE_UNMEASURED % (since[11:19], down_s, unmeasured)
+        return msg.VPN_SINCE_UNMEASURED % (since[11:19], _duration(down_s),
+                                           _duration(unmeasured))
     return msg.VPN_SINCE % since[11:19]
+
+
+def _down_summary(name: str, now: Any, likely: str,
+                  evidence: Dict[str, Any]) -> str:
+    """끊김 판정의 요약문.
+
+    셋을 붙인다: 공급자가 보고한 상태(연결 끊김인가 재협상 중인가), 가장
+    그럴듯한 설명, 그리고 **첫 홉 증거가 1발인지 다발인지**. 공급자 사유는
+    고정 목록과 정확히 일치할 때만 덧붙인다.
+
+    `connecting` 을 "연결 끊김" 이라고 적지 않는다 — 공급자 자신은 다시 맺는
+    중이라고 말하고 있다. 판정 종류·등급은 그대로이고(보호 상실 판정과 조사
+    개시도 그대로), 바뀌는 것은 문장뿐이다.
+    """
+    head = msg.VPN_RENEGOTIATING if now == "connecting" else msg.VPN_DISCONNECTED
+    parts = [head % (name, likely), _probe_phrase(evidence)]
+    quotable = _quotable_reason(evidence.get("provider_reason"))
+    if quotable:
+        parts.append(msg.VPN_PROVIDER_REASON % quotable)
+    return " ".join(p for p in parts if p)
 
 
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
@@ -284,7 +394,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                 axis=QUALITY, kind="VPN_DISCONNECTED",
                 confidence=CONFIRMED,
                 severity=INFO_SEV if user else MEDIUM,
-                summary=msg.VPN_DISCONNECTED % (name, likely),
+                summary=_down_summary(name, now, likely, evidence),
                 evidence=evidence,
                 attribution=attribution,
             ))

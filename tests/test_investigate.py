@@ -187,6 +187,30 @@ class TestVpnInvestigation(unittest.TestCase):
         self._drop_cycle(h, 0)
         self.assertTrue(h.only("vpn_drop")[0].open)
 
+    def test_a_connecting_transition_opens_the_same_investigation(self):
+        """재협상(`connecting`)으로 바뀐 전환도 종전처럼 조사를 연다.
+
+        요약문만 "재협상 중" 으로 바뀌었고 판정 종류는 그대로라서, 조사를
+        여는 기준(`triggers.DEFAULT_RULES` 의 VPN_DISCONNECTED)도 그대로다.
+        이 픽스처들이 `disconnected` 만 써서 이 경로를 지나지 않았다.
+        """
+        h = Harness()
+        h.feed(obs(ts=ts(0), vpn=vpn_state("connected"), icmp_ok=True))
+        f = h.feed(obs(ts=ts(5), vpn=vpn_state("connecting"), icmp_ok=True))
+        self.assertIn("INVESTIGATION_OPENED", kinds(f))
+        self.assertEqual(len(h.opened("vpn_drop")), 1)
+        self.assertIn("재협상", by_kind(f, "VPN_DISCONNECTED").summary)
+
+    def test_a_connecting_drop_counts_like_any_other(self):
+        """세 번 끊기면 상태가 `connecting` 이어도 같은 결론에 닿는다."""
+        h = Harness()
+        for n in (0, 10, 20):
+            h.feed(obs(ts=ts(n), vpn=vpn_state("connected"), icmp_ok=True))
+            h.feed(obs(ts=ts(n + 5), vpn=vpn_state("connecting"), icmp_ok=True))
+        done = h.closed("vpn_drop")
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0].status, CONCLUDED)
+
 
 class TestPathConfigInvestigation(unittest.TestCase):
     def test_persisting_change_concludes_confirmed(self):

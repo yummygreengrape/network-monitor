@@ -870,8 +870,8 @@ class TestExplanationUsesTheSettlingWindow(unittest.TestCase):
     """VPN 상태 변화는 깨어난 다음 주기에 나타난다.
 
     실측: 공백(903초)은 16:48:58, 끊김은 16:49:03. 같은 주기만 보면 잠자기가
-    설명에서 빠지고 "첫 홉은 정상 — 터널 경로 문제" 라고 답한다. 첫 홉이
-    정상인 것은 맞지만 그것이 설명은 아니다.
+    설명에서 빠지고 첫 홉 이야기만 남는다. 첫 홉이 응답한 것은 맞지만
+    그것이 설명은 아니다.
     """
 
     def _ctx(self, settling):
@@ -897,10 +897,16 @@ class TestExplanationUsesTheSettlingWindow(unittest.TestCase):
         f = self._drop("link_restart")
         self.assertIn(msg.WHY_LINK_BACK, f.summary)
 
-    def test_without_a_settling_window_it_still_blames_the_tunnel(self):
+    def test_without_a_settling_window_it_reports_the_fact_not_a_verdict(self):
+        """설명할 창이 없으면 첫 홉이 응답했다는 **사실**까지만 적는다.
+
+        종전에는 같은 자리에서 "터널 경로 문제" 라고 고장 위치를 지목했다.
+        1발 ICMP 가 돌아온 것으로는 로컬 구간과 상대편 구간을 나눌 수 없다.
+        """
         from netmon import messages as msg
         f = self._drop(None)
-        self.assertIn(msg.WHY_TUNNEL, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_OK, f.summary)
+        self.assertNotIn("터널 경로", f.summary)
         self.assertIsNone(f.attribution)
 
     def test_protection_loss_is_not_suppressed_by_waking(self):
@@ -1033,8 +1039,8 @@ class TestVpnDownSinceSurvivesUnjudgedCycles(_VpnCycleDriver, unittest.TestCase)
         self.assertEqual(f.evidence["down_seconds"], 200.0)
         # 180초 공백에서 한 주기(5초)는 정상 간격으로 돈 것이라 빠진다.
         self.assertEqual(f.evidence["unmeasured_seconds"], 175.0)
-        self.assertIn("200", f.summary)
-        self.assertIn("175", f.summary)
+        self.assertIn("3분 20초", f.summary)    # 200초
+        self.assertIn("2분 55초", f.summary)    # 175초
 
     def test_without_a_gap_nothing_is_reported_as_unmeasured(self):
         eng, out = self._run([

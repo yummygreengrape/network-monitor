@@ -110,6 +110,10 @@ MEASUREMENT_GAP = "Measurement stopped for %.0f seconds (sleep or a halted proce
 
 # ─────────────────────────────────────────── Findings: VPN
 VPN_DISCONNECTED = "%s disconnected. Most likely explanation: %s."
+# A transition the provider reported as connecting: not down, but being
+# re-established. (Protection loss is still reported as before - traffic
+# leaves outside the tunnel either way.)
+VPN_RENEGOTIATING = "%s is renegotiating its tunnel (provider state connecting). Most likely explanation: %s."
 VPN_TUNNEL_OFF = ("%s is connected but in a mode that builds no tunnel (%s). Traffic "
                   "leaves outside the tunnel, and other devices on this L2 can read it.")
 VPN_TUNNEL_OFF_SAE = ("%s is connected but in a mode that builds no tunnel (%s). WPA3-SAE "
@@ -126,14 +130,35 @@ VPN_RECONNECTED = "%s reconnected%s."
 VPN_STATE_CHANGED = "%s state changed (%s → %s)."
 VPN_STATE_UNKNOWN = "%s state could not be read (%s → %s)."
 VPN_SINCE = " (down since %s)"
-VPN_SINCE_UNMEASURED = " (down since %s, %.0f s total, about %.0f s of it unmeasured)"
+VPN_SINCE_UNMEASURED = " (down since %s, %s total, about %s of it unmeasured)"
+
+# How long it was down. Bare seconds read badly for long outages ("604800 s").
+DUR_DAYS = "%d d"
+DUR_HOURS = "%d h"
+DUR_MINUTES = "%d min"
+DUR_SECONDS = "%d s"
+
+# Whether the first-hop evidence is one probe or a burst. In burst cycles
+# reachable/rtt_ms come from the first probe only (collect/link.merge_probes),
+# so without this sentence two losses out of three hide behind "first hop answered".
+FIRST_HOP_EVIDENCE_ONE = "First-hop evidence is a single ping."
+FIRST_HOP_EVIDENCE_BURST = "First-hop evidence is %d concurrent pings (%d answered, %.0f%% loss)."
+FIRST_HOP_EVIDENCE_BURST_PLAIN = "First-hop evidence is %d concurrent pings."
+
+# The reason string from the provider. Quoted in a summary only on an exact
+# match against a fixed list - these strings carry public addresses and ports,
+# and an unwrapped string is not masked on export. The raw text stays in
+# the evidence (provider_reason).
+VPN_PROVIDER_REASON = "Provider reason: %s."
 
 # Most likely explanation for a VPN drop
 WHY_USER = "disconnected by the user"
 WHY_SLEEP = "sleep"
 WHY_MOVED = "network change"
 WHY_LINK = "first hop silent — problem between this device and the router"
-WHY_TUNNEL = "first hop healthy — tunnel path problem"
+# Only the fact that the first hop answered, matching how quality.cause_note
+# words the same amount of evidence.
+WHY_FIRST_HOP_OK = "first hop answered — which leg is at fault cannot be told from this observation alone"
 WHY_UNKNOWN = "not enough evidence to tell"
 
 DETECTOR_ERROR = "Detector %s stopped with an exception: %s"
