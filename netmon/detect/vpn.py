@@ -158,9 +158,35 @@ def _tunnel_off_findings(name: str, prev_st: Dict[str, Any], cur_st: Dict[str, A
 TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def _down_since(state: Any, name: str) -> Optional[Any]:
-    downs = state.get("vpn_down_since") if isinstance(state, dict) else None
-    return downs.get(name) if isinstance(downs, dict) else None
+def _down_record(state: Any, name: str):
+    """(끊긴 시각, 미관측 누적값). 둘 다 못 찾으면 (None, None).
+
+    판정하지 않는 주기에 공급자가 올라오면 기록이 `vpn_down_pending` 으로
+    옮겨진다(baseline.update_vpn_down). 그 주기에는 판정이 돌지 않으므로,
+    복구를 알리는 것은 그다음 완전 주기의 몫이고 여기서 그 보관분을 읽는다.
+    """
+    if not isinstance(state, dict):
+        return None, None
+    downs = state.get("vpn_down_since")
+    since = downs.get(name) if isinstance(downs, dict) else None
+    acc = state.get("vpn_down_unmeasured")
+    unmeasured = acc.get(name) if isinstance(acc, dict) else None
+    if since is None:
+        pending = state.get("vpn_down_pending")
+        rec = pending.get(name) if isinstance(pending, dict) else None
+        if isinstance(rec, dict):
+            since, unmeasured = rec.get("since"), rec.get("unmeasured")
+    return since, unmeasured
+
+
+def _is_ts(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.datetime.strptime(value, TS_FMT)
+    except ValueError:
+        return False
+    return True
 
 
 def _elapsed_seconds(since: Any, ts: Any) -> Optional[float]:
@@ -181,8 +207,7 @@ def _elapsed_seconds(since: Any, ts: Any) -> Optional[float]:
     return round(span, 1) if span >= 0 else None
 
 
-def _unmeasured_seconds(state: Any, name: str,
-                        down_s: Optional[float]) -> float:
+def _unmeasured_seconds(raw: Any, down_s: Optional[float]) -> float:
     """끊겨 있던 시간 중 측정이 비어 있던 몫. 셈이 없으면 0.
 
     총 끊긴 시간을 모르면 0 으로 둔다 — 경계를 그을 수 없는 구간에 "그중
@@ -191,8 +216,6 @@ def _unmeasured_seconds(state: Any, name: str,
     """
     if down_s is None:
         return 0.0
-    acc = state.get("vpn_down_unmeasured") if isinstance(state, dict) else None
-    raw = acc.get(name) if isinstance(acc, dict) else None
     try:
         val = float(raw)
     except (TypeError, ValueError):
@@ -205,9 +228,16 @@ def _unmeasured_seconds(state: Any, name: str,
 
 
 def _down_phrase(since: Any, down_s: Optional[float], unmeasured: float) -> str:
-    """재연결 요약문의 괄호. 공백이 섞였으면 총 시간과 미관측 시간을 함께 적는다."""
-    if down_s is None:
+    """재연결 요약문의 괄호. 공백이 섞였으면 총 시간과 미관측 시간을 함께 적는다.
+
+    시각을 읽을 수 있으면 **끊긴 시간을 계산할 수 없어도 시각은 적는다** —
+    시계가 뒤로 점프한 직후에 종전에 나오던 표기가 사라지지 않게 한다.
+    시각 자체가 시각이 아닐 때만 괄호를 비운다(잘린 값을 적지 않는다).
+    """
+    if not _is_ts(since):
         return ""
+    if down_s is None:
+        return msg.VPN_SINCE % since[11:19]
     if unmeasured > 0:
         return msg.VPN_SINCE_UNMEASURED % (since[11:19], down_s, unmeasured)
     return msg.VPN_SINCE % since[11:19]
@@ -287,9 +317,9 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                 ))
 
         elif was != CONNECTED and now == CONNECTED:
-            since = _down_since(ctx.state, name)
+            since, acc = _down_record(ctx.state, name)
             down_s = _elapsed_seconds(since, cur.ts)
-            unmeasured = _unmeasured_seconds(ctx.state, name, down_s)
+            unmeasured = _unmeasured_seconds(acc, down_s)
             out.append(Finding(
                 axis=QUALITY, kind="VPN_RECONNECTED",
                 confidence=CONFIRMED, severity=INFO_SEV,

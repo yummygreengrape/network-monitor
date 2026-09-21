@@ -210,7 +210,10 @@ class Engine:
         # 그 증거가 방금 지나간 공백까지 포함해야 한다. 판정 뒤에 더하면
         # 복구 주기 직전의 공백이 매번 빠진다.
         if gap_exceeded(elapsed, interval):
-            self.state = baseline.note_unmeasured(self.state, elapsed)
+            # **한 주기분은 빼고 센다.** 이 도구가 약속하는 해상도가 한 주기이므로,
+            # 정상 간격으로 돈 주기는 "측정됨" 이다. 공백 전체를 더하면 공백
+            # 한 건마다 그만큼씩 미관측 시간이 부풀려진다.
+            self.state = baseline.note_unmeasured(self.state, elapsed - interval)
 
         # 주 인터페이스가 없으면 비교할 상태가 아니다. 기록만 남기고 넘어간다.
         # 기준선도 건드리지 않는다 — 링크가 없는 동안의 값은 기준이 될 수 없다.
@@ -234,7 +237,7 @@ class Engine:
             # 수집되는데 이 분기가 조기 반환하는 바람에 갱신되지 않았고,
             # 7분 25초 끊겨 있던 것이 복구 판정에 "5초" 로 적혔다
             # (2026-09-21 05:41~05:49 맥북).
-            self.state = baseline.update_vpn_down(self.state, obs)
+            self.state = baseline.update_vpn_down(self.state, obs, judged=False)
             return out
 
         link_gap = self.link_gap

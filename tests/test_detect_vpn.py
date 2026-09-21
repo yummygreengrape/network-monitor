@@ -130,11 +130,10 @@ class TestReconnect(unittest.TestCase):
         self.assertEqual(f.summary,
                          msg.VPN_RECONNECTED % ("warp", msg.VPN_SINCE % "00:00:00"))
 
-    def test_broken_down_since_values_never_become_absurd_durations(self):
+    def test_values_that_are_not_timestamps_leave_the_bracket_empty(self):
         """상태 파일은 손으로 고칠 수 있고 재시작을 건너뛰어 남는다."""
         cases = [{}, {"warp": None}, {"warp": ""}, {"warp": "x"}, {"warp": 12345},
-                 {"warp": -1}, {"warp": ["2026-01-01T00:00:00Z"]},
-                 {"warp": "2026-01-01T09:00:00Z"}]     # 미래 시각
+                 {"warp": -1}, {"warp": ["2026-01-01T00:00:00Z"]}]
         for downs in cases:
             with self.subTest(downs=downs):
                 f = self._reconnect({"icmp_gw": True, "vpn_down_since": downs,
@@ -143,6 +142,39 @@ class TestReconnect(unittest.TestCase):
                 self.assertIsNone(f.evidence["down_seconds"])
                 self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
                 self.assertEqual(f.summary, msg.VPN_RECONNECTED % ("warp", ""))
+
+    def test_a_start_in_the_future_still_reports_the_time_itself(self):
+        """시계가 뒤로 점프해도 종전에 나오던 시작 시각 표기는 남는다.
+
+        끊긴 시간만 계산하지 않는다 — 음수를 적을 수는 없기 때문이다.
+        """
+        f = self._reconnect({"icmp_gw": True,
+                             "vpn_down_since": {"warp": "2026-01-01T09:00:00Z"},
+                             "vpn_down_unmeasured": {"warp": 380.0}})
+        self.assertIsNone(f.evidence["down_seconds"])
+        self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+        self.assertEqual(f.summary,
+                         msg.VPN_RECONNECTED % ("warp", msg.VPN_SINCE % "09:00:00"))
+
+    def test_a_record_kept_from_an_unjudged_cycle_is_read(self):
+        """링크 없는 주기에 공급자가 올라오면 기록이 보관분으로 옮겨진다."""
+        f = self._reconnect({"icmp_gw": True, "vpn_down_since": {},
+                             "vpn_down_pending":
+                                 {"warp": {"since": "2026-01-01T00:00:00Z",
+                                           "unmeasured": 120.0}}})
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:00Z")
+        self.assertEqual(f.evidence["down_seconds"], 450.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 120.0)
+
+    def test_a_broken_pending_record_is_ignored(self):
+        for pending in ({"warp": "x"}, {"warp": {}}, {"warp": {"since": 3}},
+                        "x", None):
+            with self.subTest(pending=pending):
+                f = self._reconnect({"icmp_gw": True, "vpn_down_since": {},
+                                     "vpn_down_pending": pending})
+                self.assertIsNotNone(f)
+                self.assertIsNone(f.evidence["down_seconds"])
+                self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
 
     def test_broken_unmeasured_values_are_ignored_not_printed(self):
         cases = [None, "x", -5, float("nan"), float("inf"), {"nested": 1}]

@@ -954,19 +954,8 @@ class TestSettlingReasonKeepsTheRootCause(unittest.TestCase):
         self.assertEqual(s["settle_reason"], "vpn_change")
 
 
-class TestVpnDownSinceSurvivesUnjudgedCycles(unittest.TestCase):
-    """2026-09-21 05:41~05:49 맥북: 7분 25초 끊겨 있었는데 "5초" 로 적혔다.
-
-    공급자가 `No Network` 를 보고한 샘플이 05:41:52 부터 이어졌는데, 그 주기들은
-    주 인터페이스가 없어 engine 이 조기 반환했다. 그래서 `vpn_down_since` 를
-    갱신하는 `baseline.update_baselines` 가 돌지 않았고, 복구 판정은 마지막
-    완전 관측 시각인 "05:49:17 부터" 라고 적었다. VPN 상태는 공급자에게 묻는
-    값이라 링크가 없어도 수집된다 — 건너뛸 이유가 없었다.
-
-    **관측은 합성이다.** 재현한 것은 주기의 짜임새다: 완전 관측 → 링크 없는
-    주기 여럿(그 사이에 측정 공백) → 링크는 돌아왔지만 VPN 은 아직인 주기 →
-    재연결.
-    """
+class _VpnCycleDriver:
+    """관측 열을 engine.cycle 과 같은 순서로 돌린다. 관측은 전부 합성이다."""
 
     def _engine(self):
         from netmon import config as configmod, investigate
@@ -986,9 +975,11 @@ class TestVpnDownSinceSurvivesUnjudgedCycles(unittest.TestCase):
         eng.needs = {}
         return eng
 
-    def _absent(self, ts):
+    def _absent(self, ts, state="disconnected"):
+        """주 인터페이스가 없는 주기. VPN 상태는 그와 무관하게 수집된다."""
         o = obs(ts=ts, gateway=None, gw_mac=None, icmp_ok=None,
-                vpn=vpn_state("disconnected", reason="No Network"))
+                vpn=vpn_state(state,
+                              reason="No Network" if state != "connected" else None))
         o.data["iface"]["primary"] = None
         o.data["iface"]["primary_kind"] = "unknown"
         o.data["wifi"] = {"applicable": False, "reason": "링크 없음"}
@@ -998,7 +989,7 @@ class TestVpnDownSinceSurvivesUnjudgedCycles(unittest.TestCase):
         return obs(ts=ts, vpn=vpn_state(state), security="WPA2", icmp_ok=True)
 
     def _run(self, steps):
-        """engine.cycle 과 같은 순서로 (관측, 직전 주기와의 간격) 을 돌린다."""
+        """(관측, 직전 주기와의 간격) 을 차례로 판정한다."""
         from netmon.detect import is_complete
         eng = self._engine()
         out = []
@@ -1008,6 +999,21 @@ class TestVpnDownSinceSurvivesUnjudgedCycles(unittest.TestCase):
                 eng.prev = o
             out.append(found)
         return eng, out
+
+
+class TestVpnDownSinceSurvivesUnjudgedCycles(_VpnCycleDriver, unittest.TestCase):
+    """2026-09-21 05:41~05:49 맥북: 7분 25초 끊겨 있었는데 "5초" 로 적혔다.
+
+    공급자가 `No Network` 를 보고한 샘플이 05:41:52 부터 이어졌는데, 그 주기들은
+    주 인터페이스가 없어 engine 이 조기 반환했다. 그래서 `vpn_down_since` 를
+    갱신하는 `baseline.update_baselines` 가 돌지 않았고, 복구 판정은 마지막
+    완전 관측 시각인 "05:49:17 부터" 라고 적었다. VPN 상태는 공급자에게 묻는
+    값이라 링크가 없어도 수집된다 — 건너뛸 이유가 없었다.
+
+    **관측은 합성이다.** 재현한 것은 주기의 짜임새다: 완전 관측 → 링크 없는
+    주기 여럿(그 사이에 측정 공백) → 링크는 돌아왔지만 VPN 은 아직인 주기 →
+    재연결.
+    """
 
     def test_the_outage_is_measured_from_the_first_unjudged_cycle(self):
         eng, out = self._run([
@@ -1025,9 +1031,10 @@ class TestVpnDownSinceSurvivesUnjudgedCycles(unittest.TestCase):
         self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:05Z",
                          "마지막 완전 관측이 아니라 실제로 끊긴 주기여야 한다")
         self.assertEqual(f.evidence["down_seconds"], 200.0)
-        self.assertEqual(f.evidence["unmeasured_seconds"], 180.0)
+        # 180초 공백에서 한 주기(5초)는 정상 간격으로 돈 것이라 빠진다.
+        self.assertEqual(f.evidence["unmeasured_seconds"], 175.0)
         self.assertIn("200", f.summary)
-        self.assertIn("180", f.summary)
+        self.assertIn("175", f.summary)
 
     def test_without_a_gap_nothing_is_reported_as_unmeasured(self):
         eng, out = self._run([
@@ -1070,7 +1077,72 @@ class TestVpnDownSinceSurvivesUnjudgedCycles(unittest.TestCase):
             (self._full("2026-01-01T00:03:25Z", "connected"), 5.0),
         ])
         first = by_kind(out[4], "VPN_RECONNECTED")
-        self.assertEqual(first.evidence["unmeasured_seconds"], 180.0)
+        self.assertEqual(first.evidence["unmeasured_seconds"], 175.0)
         second = by_kind(out[-1], "VPN_RECONNECTED")
         self.assertEqual(second.evidence["down_seconds"], 5.0)
         self.assertEqual(second.evidence["unmeasured_seconds"], 0.0)
+
+
+class TestRecoverySeenWhileUnjudged(_VpnCycleDriver, unittest.TestCase):
+    """복구가 **판정하지 않는 주기**에 보이는 경우.
+
+    `is_complete` 는 IPv4 를 가진 물리 인터페이스만 본다. wireguard·tailscale
+    은 그런 인터페이스가 없어도 connected 를 보고하므로, 링크가 없는 주기에
+    공급자가 올라오는 열이 실제로 생긴다. 그 주기에는 `run_all` 이 돌지 않아
+    복구 판정이 나지 않으므로, 끊긴 기록을 거기서 지우면 다음 완전 주기의
+    복구 판정이 시작 시각을 통째로 잃는다.
+    """
+
+    def test_the_start_time_survives_a_recovery_seen_in_an_unjudged_cycle(self):
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z", "connected"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertIsNotNone(f, "복구 판정 자체는 종전처럼 나야 한다")
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:05Z",
+                         "판정하지 않는 주기가 끊긴 시각을 지우면 안 된다")
+        self.assertEqual(f.evidence["down_seconds"], 15.0)
+        from netmon import messages as msg
+        self.assertIn(msg.VPN_SINCE % "00:00:05", f.summary)
+
+    def test_a_gap_after_the_provider_came_back_is_not_charged_to_the_outage(self):
+        """공급자가 올라온 뒤의 공백은 끊긴 시간이 아니다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z", "connected"), 5.0),
+            (self._absent("2026-01-01T00:03:15Z", "connected"), 180.0),
+            (self._full("2026-01-01T00:03:20Z", "connected"), 5.0),
+        ])
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:05Z")
+        self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+
+    def test_a_second_drop_in_an_unjudged_cycle_replaces_the_kept_record(self):
+        """다시 끊겼으면 알리지 못한 복구는 지나간 일이다. 더 이른 시각을 적지 않는다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z", "connected"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:15Z")
+        self.assertEqual(f.evidence["down_seconds"], 5.0)
+
+    def test_the_kept_record_does_not_outlive_the_next_judged_cycle(self):
+        """복구가 판정에 실리지 못한 채 지나갔으면 보관분도 함께 사라진다."""
+        eng, _out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z", "connected"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+        ])
+        self.assertFalse(eng.state.get("vpn_down_pending"))
+        self.assertFalse(eng.state.get("vpn_down_since"))
