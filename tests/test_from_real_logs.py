@@ -842,6 +842,7 @@ class TestConclusionDoesNotContradictItself(unittest.TestCase):
         inv.criteria = {"provider": "warp", "drops": drops, "reconnects": drops,
                         "still_down": False, "settled_for": pb.SETTLED_CYCLES,
                         "first_hop_alive_at_drop": [True] * drops,
+                        "first_hop_method_at_drop": ["icmp"] * drops,
                         "watch_kinds": ["VPN_DISCONNECTED", "VPN_RECONNECTED"]}
         ctx = Context(elapsed=5.0, interval=5.0, features=ON,
                       state={"icmp_gw": True}, attributions=[], network="n")
@@ -860,10 +861,23 @@ class TestConclusionDoesNotContradictItself(unittest.TestCase):
             _, found = self._settled(n)
             self.assertNotIn("되풀이", found[0].summary, found[0].summary)
 
-    def test_the_leg_description_is_shared_by_both_conclusions(self):
+    def test_the_first_hop_description_is_shared_by_both_conclusions(self):
         from netmon import messages as msg
         _, found = self._settled(2)
-        self.assertIn(msg.INV_VPN_LEG_TUNNEL, found[0].summary)
+        self.assertIn(msg.INV_VPN_LEG_FIRST_HOP_OK % msg.METHOD_ICMP,
+                      found[0].summary)
+
+    def test_neither_conclusion_points_at_a_leg(self):
+        """실측 17:02:12 의 결론은 1발 ICMP 로 "터널 쪽" 을 지목했다.
+
+        끊김 요약문(detect/vpn)이 같은 증거로 유보하게 바뀐 뒤에도 조사
+        결론만 단정하면, 한 도구가 같은 관측을 두 가지 확신으로 말한다.
+        """
+        for n in (1, 2):
+            inv, found = self._settled(n)
+            for word in ("터널", "tunnel"):
+                self.assertNotIn(word, found[0].summary, found[0].summary)
+                self.assertNotIn(word, inv.verdict or "", inv.verdict)
 
 
 class TestExplanationUsesTheSettlingWindow(unittest.TestCase):

@@ -220,12 +220,20 @@ INV_PATH_VERDICT = "the changed settings took hold"
 # Playbook: VPN drops
 INV_VPN_WIDEN = "Drops keep repeating. Watching first-hop quality as well."
 INV_VPN_REPEATED = "%s dropped %d times. %s."
-# Which leg was at fault. Keep the "repeated" framing out of these — reusing
-# them in a single-drop conclusion produces "dropped once … repeated drops".
-INV_VPN_LEG_TUNNEL = "the first hop was healthy each time — a tunnel-side problem"
+# How the first hop behaved at each drop. Keep the "repeated" framing out of
+# these — reusing them in a single-drop conclusion produces "dropped once …
+# repeated drops". Do not name a leg either: a first hop that answers does not
+# separate the local leg from the far side of the tunnel, and the drop summary
+# (WHY_FIRST_HOP_OK) withholds that call on the same evidence.
+# The "%s" is what reachability was judged by (METHOD_*).
+INV_VPN_LEG_FIRST_HOP_OK = ("the first hop answered at every drop (judged by %s) — which leg "
+                            "is at fault cannot be told from this observation alone")
+# For investigations that recorded no judging method. Do not state what is unknown.
+INV_VPN_LEG_FIRST_HOP_OK_PLAIN = ("the first hop answered at every drop — which leg is at "
+                                  "fault cannot be told from this observation alone")
 INV_VPN_LEG_LINK = "the first hop was unstable at the same time"
 INV_VPN_LEG_UNKNOWN = "could not tell which leg"
-INV_VPN_VERDICT_TUNNEL = "repeated drops on the tunnel side"
+INV_VPN_VERDICT_FIRST_HOP_OK = "repeated drops — the first hop answered each time, leg undetermined"
 INV_VPN_VERDICT_LINK = "repeated drops alongside an unstable first hop"
 INV_VPN_VERDICT_UNKNOWN = "repeated drops — could not tell which leg"
 

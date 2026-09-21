@@ -170,7 +170,13 @@ class TestVpnInvestigation(unittest.TestCase):
         self.assertTrue(inv.criteria.get("watch_link"))
         self.assertIn("FIRST_HOP_UNREACHABLE", inv.criteria["watch_kinds"])
 
-    def test_three_drops_with_healthy_link_blames_the_tunnel(self):
+    def test_three_drops_with_a_healthy_first_hop_conclude_without_naming_a_leg(self):
+        """되풀이돼도 증거는 같다 — 한 묶음 ICMP 를 세 번 본 것이다.
+
+        종전에는 이 갈래가 "터널 쪽에서 되풀이되는 끊김" 이라고 구간을
+        지목했다. 끊김 요약문(detect/vpn)이 같은 증거로 유보하므로 조사
+        결론도 같은 기준으로 말한다.
+        """
         h = Harness()
         self._drop_cycle(h, 0)
         self._drop_cycle(h, 10)
@@ -178,9 +184,70 @@ class TestVpnInvestigation(unittest.TestCase):
         done = h.closed("vpn_drop")
         self.assertEqual(len(done), 1)
         self.assertEqual(done[0].status, CONCLUDED)
-        self.assertEqual(done[0].verdict, msg.INV_VPN_VERDICT_TUNNEL)
+        self.assertEqual(done[0].verdict, msg.INV_VPN_VERDICT_FIRST_HOP_OK)
         self.assertEqual(h.opened("vpn_drop"), [],
                          "결론을 낸 주기에 같은 조사가 또 열리면 안 된다")
+        concluded = by_kind(h.all, "INVESTIGATION_CONCLUDED")
+        self.assertIn(msg.INV_VPN_LEG_FIRST_HOP_OK % msg.METHOD_ICMP,
+                      concluded.summary)
+        for word in ("터널", "tunnel"):
+            self.assertNotIn(word, concluded.summary)
+            self.assertNotIn(word, done[0].verdict)
+
+    def test_the_judging_method_is_recorded_at_every_drop(self):
+        """무엇으로 판정했는지를 남겨야 "첫 홉은 응답했음" 이 뜻을 가진다.
+
+        ARP 로 판정하는 망에서는 같은 주기의 ICMP 가 전부 빠져 있어도
+        `first_hop_alive` 가 True 다(netmon/liveness.py).
+        """
+        h = Harness()
+        self._drop_cycle(h, 0)
+        self._drop_cycle(h, 10)
+        crit = h.only("vpn_drop")[0].criteria
+        self.assertEqual(crit["first_hop_method_at_drop"], ["icmp", "icmp"])
+        self.assertEqual(len(crit["first_hop_method_at_drop"]),
+                         len(crit["first_hop_alive_at_drop"]))
+
+    def test_an_arp_judged_network_says_so_in_the_conclusion(self):
+        """ICMP 가 전부 빠진 망에서도 결론이 판정 기준을 밝힌다."""
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [True, True],
+                "first_hop_method_at_drop": ["arp", "arp"]}
+        self.assertEqual(VpnDrop._leg(crit),
+                         msg.INV_VPN_LEG_FIRST_HOP_OK % msg.METHOD_ARP)
+
+    def test_a_mixed_basis_lists_both(self):
+        """보정이 ICMP 와 ARP 사이를 오가면 둘 다 적는다."""
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [True, True, True],
+                "first_hop_method_at_drop": ["icmp", "arp", "icmp"]}
+        self.assertEqual(
+            VpnDrop._leg(crit),
+            msg.INV_VPN_LEG_FIRST_HOP_OK % ("%s\u00b7%s" % (msg.METHOD_ICMP, msg.METHOD_ARP)))
+
+    def test_without_a_recorded_basis_it_claims_none(self):
+        """기준을 기록하지 못한 조사(옛 기록, 보정 중)는 기준을 주장하지 않는다."""
+        from netmon.investigate.playbooks import VpnDrop
+        for methods in ([], [None, None], ["unknown", "unknown"]):
+            crit = {"first_hop_alive_at_drop": [True, True],
+                    "first_hop_method_at_drop": methods}
+            self.assertEqual(VpnDrop._leg(crit), msg.INV_VPN_LEG_FIRST_HOP_OK_PLAIN,
+                             methods)
+
+    def test_an_unstable_first_hop_still_reads_as_before(self):
+        """바꾼 것은 지목하던 갈래뿐이다. 나머지 갈래는 그대로다."""
+        from netmon.investigate.playbooks import VpnDrop
+        self.assertEqual(
+            VpnDrop._leg({"first_hop_alive_at_drop": [False, False],
+                          "first_hop_method_at_drop": ["icmp", "icmp"]}),
+            msg.INV_VPN_LEG_LINK)
+        self.assertEqual(
+            VpnDrop._leg({"first_hop_alive_at_drop": [True, True],
+                          "first_hop_method_at_drop": ["icmp", "icmp"],
+                          "link_events": 2}),
+            msg.INV_VPN_LEG_LINK)
+        self.assertEqual(VpnDrop._leg({"first_hop_alive_at_drop": [None]}),
+                         msg.INV_VPN_LEG_UNKNOWN)
 
     def test_single_drop_does_not_conclude_yet(self):
         h = Harness()

@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import messages as msg
-from ..liveness import evaluate
+from ..liveness import METHOD_MESSAGES, evaluate, method_label
 from ..model import (CONFIRMED, HIGH, INFO, INFO_SEV, LOW, MEDIUM, POSSIBLE,
                      QUALITY, SECURITY, SUSPECT, Finding, Observation, unwrap)
 from .model import ABANDONED, CONCLUDED, Investigation
@@ -278,6 +278,11 @@ class VpnDrop(Playbook):
             "drops": 1,
             "reconnects": 0,
             "first_hop_alive_at_drop": [ev.get("first_hop_alive")],
+            # **무엇으로 도달성을 판정했는지도 함께 남긴다.** 끊길 때마다
+            # 첫 홉이 살아 있었다는 말은 판정 기준을 빼면 뜻이 달라진다 —
+            # ARP 로 판정하는 망에서는 같은 주기의 ICMP 가 전부 빠져 있어도
+            # True 다(netmon/liveness.py).
+            "first_hop_method_at_drop": [ev.get("first_hop_method")],
             "watch_kinds": ["VPN_DISCONNECTED", "VPN_RECONNECTED"],
             "still_down": True,
         }
@@ -295,6 +300,8 @@ class VpnDrop(Playbook):
                 crit["still_down"] = True
                 crit.setdefault("first_hop_alive_at_drop", []).append(
                     f.evidence.get("first_hop_alive"))
+                crit.setdefault("first_hop_method_at_drop", []).append(
+                    f.evidence.get("first_hop_method"))
                 inv.note(ts, msg.INV_NOTE_DROP_AGAIN, drops=crit["drops"])
             elif f.kind == "VPN_RECONNECTED":
                 crit["reconnects"] = int(crit.get("reconnects", 0)) + 1
@@ -337,7 +344,9 @@ class VpnDrop(Playbook):
             link_events = int(crit.get("link_events", 0))
             alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
             if alive and all(alive) and not link_events:
-                verdict = msg.INV_VPN_VERDICT_TUNNEL
+                # 첫 홉이 매번 응답했다는 **사실**까지만 적는다. 구간을
+                # 지목하지 않는 이유는 _leg() 에 적었다.
+                verdict = msg.INV_VPN_VERDICT_FIRST_HOP_OK
             elif link_events:
                 verdict = msg.INV_VPN_VERDICT_LINK
             else:
@@ -350,19 +359,46 @@ class VpnDrop(Playbook):
 
     @staticmethod
     def _leg(crit) -> str:
-        """어느 구간이 문제였나.
+        """끊길 때 첫 홉이 어땠나.
 
         **횟수와 무관한 서술이다.** "되풀이" 같은 틀을 여기 섞으면 단발 결론에
         재사용할 때 "한 번 끊겼다 … 되풀이되는 끊김" 같은 자기모순이 된다.
         실제로 그렇게 났다.
+
+        **구간도 지목하지 않는다.** 첫 홉이 응답했다는 것은 이 기기와 공유기
+        사이가 살아 있었다는 뜻일 뿐, 터널 상대편 구간에 대해서는 아무것도
+        재지 않았다. 되풀이된다고 해서 같은 증거가 다른 것을 말해 주지는
+        않는다 — 한 묶음 ICMP 를 세 번 본 것이다. 같은 증거로 끊김 요약문
+        (netmon/detect/vpn._likely)은 유보하므로, 조사 결론만 단정하면 한
+        도구가 같은 관측을 두 가지 확신으로 말하게 된다.
         """
         alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
         link_events = int(crit.get("link_events", 0))
         if alive and all(alive) and not link_events:
-            return msg.INV_VPN_LEG_TUNNEL
+            basis = VpnDrop._method_basis(crit)
+            if basis:
+                return msg.INV_VPN_LEG_FIRST_HOP_OK % basis
+            return msg.INV_VPN_LEG_FIRST_HOP_OK_PLAIN
         if link_events or (alive and not any(alive)):
             return msg.INV_VPN_LEG_LINK
         return msg.INV_VPN_LEG_UNKNOWN
+
+    @staticmethod
+    def _method_basis(crit) -> str:
+        """무엇으로 첫 홉 도달성을 판정했는가.
+
+        끊김마다 다를 수 있어(보정이 ICMP 와 ARP 사이를 오간다) 본 것을 모두
+        적는다. 이름표가 없는 값(보정 중 `unknown`, 옛 기록의 None)은 적지
+        않는다 — 하나도 없으면 기준을 밝히지 않는 문구를 쓴다.
+        """
+        labels: List[str] = []
+        for method in crit.get("first_hop_method_at_drop", []) or []:
+            if method not in METHOD_MESSAGES:
+                continue
+            label = method_label(method)
+            if label not in labels:
+                labels.append(label)
+        return "·".join(labels)
 
 
 ALL: List[Playbook] = [L2Identity(), PathConfig(), VpnDrop()]

@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from .. import messages as msg
 from .. import wifi_security
-from ..liveness import ARP, ICMP, LINK, evaluate
+from ..liveness import ICMP, evaluate, method_label
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, QUALITY, SECURITY,
                      Finding, Observation)
 
@@ -166,17 +166,6 @@ def _probe_phrase(evidence: Dict[str, Any]) -> str:
     return msg.FIRST_HOP_EVIDENCE_BURST_PLAIN % sent
 
 
-# 도달성을 무엇으로 판정했는가. `netmon/detect/quality.py` 가 첫 홉 판정
-# 요약문에 언제나 붙이는 이름표와 같은 말을 쓴다 — 같은 기계의 같은 주기를
-# 두 판정이 다른 말로 부르면 안 된다.
-METHOD_LABELS = {ARP: "METHOD_ARP", ICMP: "METHOD_ICMP", LINK: "METHOD_LINK"}
-
-
-def _method_label(method: Any) -> str:
-    name = METHOD_LABELS.get(method)
-    return msg.get(name) if name else str(method)
-
-
 # 요약문에 그대로 인용해도 되는 공급자 사유. **정확히 일치할 때만** 쓴다.
 # 사유 문자열에는 터널 엔드포인트의 공인 IP·포트가 섞여 있고, 요약문은
 # 가리지 않은 채로 보고서·화면에 그대로 나간다(redact 는 감싼 값만 바꾼다).
@@ -238,7 +227,10 @@ def _likely(cur: Observation, ctx, state: Dict[str, Any],
     # 기준이라(AC-1b), 첫 발만 빠진 주기를 "첫 홉 무응답 — 이 기기와 공유기
     # 사이 구간 문제" 라고 적으면 바로 뒤에 붙는 "응답 2발, 손실 33%" 와
     # 어긋난다. 반대 방향이지만 이것도 근거를 넘어선 단정이다.
-    label = _method_label(method)
+    # 이름표는 `netmon/liveness.py` 것을 그대로 쓴다. `netmon/detect/quality.py`
+    # 의 첫 홉 판정 요약문, 조사 결론(`investigate/playbooks.py`)과 같은 말이어야
+    # 한다 — 같은 기계의 같은 주기를 셋이 다른 말로 부르면 안 된다.
+    label = method_label(method)
     if _mixed_first_hop(method, evidence or {}):
         return msg.WHY_FIRST_HOP_MIXED % label
     if alive is False:
