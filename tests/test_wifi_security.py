@@ -65,6 +65,24 @@ def _sample(security, applicable=True):
 
 
 class TestExposureNotes(unittest.TestCase):
+    def test_a_non_primary_reading_is_not_the_current_exposure(self):
+        """주 인터페이스가 없는 주기에도 무선 상태를 남기지만, 그것으로 "지금
+        이 네트워크가 이렇다" 고 말하면 접속 중이던 순간의 값을 현재로 읽고,
+        위치 권한이 있는데도 "권한이 없어 SSID 를 못 읽음" 이라고 적게 된다."""
+        s = _sample("NONE")
+        s["data"]["wifi"]["is_primary"] = False
+        s["data"]["wifi"]["location"] = "unknown"
+        self.assertEqual(exposure_notes(s), [])
+
+    def test_a_primary_reading_still_counts(self):
+        s = _sample("NONE")
+        s["data"]["wifi"]["is_primary"] = True
+        self.assertIn(msg.EXPOSURE_OPEN, exposure_notes(s))
+
+    def test_an_old_sample_without_the_flag_still_counts(self):
+        self.assertIn(msg.EXPOSURE_OPEN, exposure_notes(_sample("NONE")))
+
+
     def test_sae_does_not_claim_passive_decryption(self):
         note = exposure_notes(_sample("WPA3_SAE"))[0]
         self.assertEqual(note, msg.EXPOSURE_SHARED_SAE % "WPA3_SAE")

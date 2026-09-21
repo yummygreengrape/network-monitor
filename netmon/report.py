@@ -107,6 +107,12 @@ def exposure_notes(last_sample: Optional[Dict[str, Any]]) -> List[str]:
     out = []
     data = last_sample.get("data", {})
     wifi = data.get("wifi") or {}
+    # **주 인터페이스로 본 것만 현재 노출면으로 쓴다.** 주 인터페이스가 없는
+    # 주기에도 무선 상태를 남기지만(engine 이 판정하지 않는 주기), 그 값으로
+    # "지금 이 네트워크가 이렇다" 고 말하면 접속 중이던 순간의 값을 현재로
+    # 읽고, 위치 권한이 있는데도 "권한이 없어 SSID 를 못 읽음" 이라고 적게 된다.
+    if wifi.get("is_primary") is False:
+        wifi = {}
     if wifi.get("applicable"):
         kind = wifi_security.classify(wifi.get("security"))
         label = wifi.get("security") or "?"

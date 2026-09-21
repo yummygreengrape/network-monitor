@@ -112,15 +112,28 @@ def radio_from(src: Dict[str, str]) -> Dict[str, Any]:
 
 def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
     ctx = ctx or {}
-    if ctx.get("primary_kind") != "wifi":
-        return {"applicable": False, "reason": "주 인터페이스가 Wi-Fi 가 아님"}
-
-    dev = ctx.get("primary")
+    # 주 인터페이스가 Wi-Fi 면 그것을 본다. 주 인터페이스가 아예 없으면
+    # (링크가 끊겼거나 IPv4 주소가 없는 주기) 무선 장치를 직접 본다 —
+    # 그 주기야말로 무선 상태가 필요한 순간이다. 주 인터페이스가 다른
+    # 종류(유선 등)일 때는 보지 않는다. 그 값은 판정에 쓰이지 않는다.
+    dev = None
+    is_primary = ctx.get("primary_kind") == "wifi"
+    if is_primary:
+        dev = ctx.get("primary")
+    elif not ctx.get("primary"):
+        dev = ctx.get("wifi_fallback_dev")
+    if not dev:
+        reason = ("무선 장치를 찾지 못함" if not ctx.get("primary")
+                  else "주 인터페이스가 Wi-Fi 가 아님")
+        return {"applicable": False, "reason": reason}
     parsed = parse_wifi_summary(run(["ipconfig", "getsummary", dev], timeout=5).out)
     loc = location_state(parsed)
 
     out: Dict[str, Any] = {
         "applicable": True,
+        # 주 인터페이스로서 본 것인지, 주 인터페이스가 없어 무선 장치를
+        # 직접 본 것인지. 뒤쪽 주기는 판정에 쓰이지 않는다(engine 이 조기 반환).
+        "is_primary": is_primary,
         "security": parsed.get("security"),
         "link_active": parsed.get("link_active"),
         "location": loc,
@@ -140,6 +153,17 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         out["bssid"] = ident("bssid", parsed["bssid"]) if parsed.get("bssid") else None
         out["source"] = "ipconfig"
         out.update(radio_from(parsed))
+        return out
+
+    # **주 인터페이스가 아닐 때는 헬퍼에 묻지 않는다.** 헬퍼 값은 최대 15초
+    # 캐시라, 링크가 끊기기 직전의 SSID·RSSI 가 이번 주기 관측인 것처럼
+    # 기록된다. 이 주기의 기록은 "판정할 수 없었던 순간을 나중에 되짚는" 것이
+    # 목적이므로, 이번 주기에 실제로 읽은 값만 남긴다. 필요한 값(암호화 방식,
+    # link_active)은 getsummary 에서 이미 나왔다.
+    if not is_primary:
+        out["ssid"] = None
+        out["bssid"] = None
+        out["identity_withheld"] = True
         return out
 
     # 흔한 경우: 이 프로세스에는 권한이 없다. 권한을 가진 헬퍼 앱에 물어본다.

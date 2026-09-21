@@ -331,5 +331,94 @@ class TestCollectWiresCandidatesToTheMissingPrimary(unittest.TestCase):
         self.assertIsNone(got["candidates"])
 
 
+class TestWifiIsReadEvenWithoutAPrimary(unittest.TestCase):
+    """주 인터페이스가 없는 주기가 무선 상태를 가장 알고 싶은 순간이다.
+    예전에는 primary_kind 가 unknown 이라 수집을 통째로 건너뛰었다."""
+
+    SUMMARY = "  Security : WPA2_PSK\n  LinkStatusActive : TRUE\n"
+
+    def _collect(self, ctx):
+        from netmon.util import CmdResult
+        calls = []
+
+        def fake_run(argv, timeout=None, stdin=""):
+            calls.append(argv)
+            return CmdResult(argv, 0, self.SUMMARY, "")
+
+        orig = wifi.run
+        wifi.run = fake_run
+        try:
+            return wifi.collect(ctx), calls
+        finally:
+            wifi.run = orig
+
+    def test_no_primary_reads_the_radio_directly(self):
+        got, calls = self._collect({"primary": None, "primary_kind": "unknown",
+                                    "wifi_fallback_dev": "en0"})
+        self.assertTrue(got["applicable"])
+        self.assertIs(got["is_primary"], False)
+        self.assertEqual(got["security"], "WPA2_PSK")
+        self.assertIn("en0", calls[0])
+
+    def test_a_wired_primary_is_left_alone(self):
+        got, calls = self._collect({"primary": "en1", "primary_kind": "ethernet",
+                                    "wifi_fallback_dev": "en0"})
+        self.assertFalse(got["applicable"])
+        self.assertEqual(calls, [])
+
+    def test_no_radio_at_all_says_so(self):
+        got, calls = self._collect({"primary": None, "primary_kind": "unknown",
+                                    "wifi_fallback_dev": None})
+        self.assertFalse(got["applicable"])
+        self.assertEqual(calls, [])
+
+    def test_no_primary_never_asks_the_location_helper(self):
+        """헬퍼 값은 최대 15초 캐시라, 끊기기 직전 값이 이번 주기 관측처럼
+        기록된다. 이 주기에 실제로 읽은 값만 남긴다."""
+        from netmon.collect import wifi as wifimod
+        called = []
+
+        def fake_helper(*a, **kw):
+            called.append(kw)
+            return {"ssid": "ExampleNet", "bssid": None, "rssi": -40}
+
+        orig = wifimod.wifi_helper.wifi
+        wifimod.wifi_helper.wifi = fake_helper
+        try:
+            got, _calls = self._collect({"primary": None, "primary_kind": "unknown",
+                                         "wifi_fallback_dev": "en0",
+                                         "allow_location": True,
+                                         "wifi_force_refresh": True})
+        finally:
+            wifimod.wifi_helper.wifi = orig
+        self.assertEqual(called, [])
+        self.assertIsNone(got["ssid"])
+        self.assertTrue(got["identity_withheld"])
+
+    def test_a_primary_cycle_still_asks_the_helper(self):
+        from netmon.collect import wifi as wifimod
+        called = []
+
+        def fake_helper(*a, **kw):
+            called.append(kw)
+            return {"ssid": "ExampleNet", "bssid": None, "rssi": -40}
+
+        orig = wifimod.wifi_helper.wifi
+        wifimod.wifi_helper.wifi = fake_helper
+        try:
+            got, _calls = self._collect({"primary": "en0", "primary_kind": "wifi",
+                                         "allow_location": True,
+                                         "wifi_force_refresh": True})
+        finally:
+            wifimod.wifi_helper.wifi = orig
+        self.assertEqual(len(called), 1)
+        self.assertTrue(called[0]["force"])
+        self.assertEqual(got["location"], "granted-via-helper")
+
+    def test_a_wifi_primary_is_marked_as_primary(self):
+        got, _calls = self._collect({"primary": "en0", "primary_kind": "wifi"})
+        self.assertIs(got["is_primary"], True)
+
+
 if __name__ == "__main__":
     unittest.main()
