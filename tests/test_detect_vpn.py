@@ -8,6 +8,7 @@ from __future__ import annotations
 import unittest
 
 from netmon import messages as msg
+from netmon import vpn as vpnmod
 from netmon.detect import Context, attributions_for, network_key, run_all
 from tests.helpers import GW_MAC, by_kind, kinds, obs, vpn_state
 
@@ -148,6 +149,185 @@ class TestProviderDedup(unittest.TestCase):
                 'IPSec "회사이름-VPN"  [IPSec]\n')
         row = parse_nc_list(text)[0]
         self.assertNotIn("회사이름", repr(row))
+
+
+
+
+class TestWarpModeParsing(unittest.TestCase):
+    """모드 문자열은 요약문에 그대로 실린다. 엉뚱한 줄을 집으면 공개 보고서에
+    외부 문자열이 들어간다."""
+
+    SETTINGS = (
+        "Merged configuration:\n"
+        "(not set)\tCompliance Environment: Normal\n"
+        "(default)\tAlways On: false\n"
+        "(user set)\tMode: DnsOverTls\n"
+        "(default)\tWARP tunnel protocol: MASQUE\n"
+        "(not set)\tMASQUE Protocol Settings: \n"
+        "  HTTP Version: MASQUE (HTTP/3 with HTTP/2 fallback)\n"
+    )
+
+    def test_it_reads_the_mode_line(self):
+        self.assertEqual(vpnmod.parse_warp_mode(self.SETTINGS), "DnsOverTls")
+
+    def test_it_ignores_other_lines_that_mention_mode(self):
+        text = ("(network policy)\tWARP tunnel protocol: MASQUE\n"
+                "(user set)\tExclude mode, with hosts/ips:\n"
+                "(user set)\tMode: WarpWithDnsOverHttps\n")
+        self.assertEqual(vpnmod.parse_warp_mode(text), "WarpWithDnsOverHttps")
+
+    def test_an_unexpected_value_is_not_taken(self):
+        self.assertIsNone(vpnmod.parse_warp_mode("(user set)\tMode: 10.0.0.0/8\n"))
+        self.assertIsNone(vpnmod.parse_warp_mode("(user set)\tMode: \n"))
+        self.assertIsNone(vpnmod.parse_warp_mode(""))
+
+    def test_mode_names_map_to_whether_there_is_a_tunnel(self):
+        for name, expect in (("DnsOverTls", False), ("DnsOverHttps", False),
+                             ("WarpWithDnsOverHttps", True), ("Warp", True),
+                             ("Proxy", None), (None, None), ("", None)):
+            self.assertIs(vpnmod.warp_tunnel_for(name), expect, name)
+
+    def test_a_failed_lookup_keeps_the_last_known_mode(self):
+        w = vpnmod.Warp()
+        calls = []
+
+        def fake_run(argv, timeout=None, stdin=""):
+            calls.append(argv)
+            from netmon.util import CmdResult
+            if len(calls) == 1:
+                return CmdResult(argv, 0, self.SETTINGS, "")
+            return CmdResult(argv, 1, "", "daemon busy")
+
+        orig = vpnmod.run
+        vpnmod.run = fake_run
+        try:
+            self.assertEqual(w.mode(now=0.0), "DnsOverTls")
+            self.assertEqual(w.mode(now=100.0), "DnsOverTls")  # 조회 실패, 아직 유효
+            self.assertIsNone(w.mode(now=1000.0))  # 너무 오래됐으면 버린다
+        finally:
+            vpnmod.run = orig
+        self.assertEqual(len(calls), 3)
+
+    def test_an_unreadable_output_does_not_retry_every_cycle(self):
+        """해석 못 하는 출력에서도 간격은 지켜야 한다. 기능이 조용히 꺼진 바로
+        그 상태에서만 비용 제한이 사라지면 안 된다."""
+        w = vpnmod.Warp()
+        calls = []
+
+        def fake_run(argv, timeout=None, stdin=""):
+            from netmon.util import CmdResult
+            calls.append(argv)
+            return CmdResult(argv, 0, "Merged configuration:\n(default)\tAlways On: false\n", "")
+
+        orig = vpnmod.run
+        vpnmod.run = fake_run
+        try:
+            for t in (0.0, 5.0, 10.0, 55.0):
+                self.assertIsNone(w.mode(now=t))
+            self.assertEqual(len(calls), 1)
+        finally:
+            vpnmod.run = orig
+
+    def test_it_does_not_ask_every_cycle(self):
+        w = vpnmod.Warp()
+        calls = []
+
+        def fake_run(argv, timeout=None, stdin=""):
+            from netmon.util import CmdResult
+            calls.append(argv)
+            return CmdResult(argv, 0, self.SETTINGS, "")
+
+        orig = vpnmod.run
+        vpnmod.run = fake_run
+        try:
+            for t in (0.0, 5.0, 10.0, 55.0):
+                w.mode(now=t)
+            self.assertEqual(len(calls), 1)
+            w.mode(now=61.0)
+            self.assertEqual(len(calls), 2)
+        finally:
+            vpnmod.run = orig
+
+
+class TestConnectedButNoTunnel(unittest.TestCase):
+    """2026-09-21 실측: DNS only 모드에서도 warp-cli 는 "Connected" 를 돌려준다.
+    끊긴 적이 없으니 상태 전환 판정에 걸리지 않아, 보호가 사라진 채로 조용했다."""
+
+    def _pair(self, before, after, security="WPA2_PSK", **kw):
+        prev = obs(vpn=before, security=security)
+        cur = obs(ts="2026-01-01T00:00:05Z", vpn=after, security=security, **kw)
+        return judge(prev, cur)
+
+    def test_switching_to_a_dns_only_mode_is_reported(self):
+        found = self._pair(vpn_state(mode="WarpWithDnsOverHttps", tunnel=True),
+                           vpn_state(mode="DnsOverTls", tunnel=False))
+        f = by_kind(found, "VPN_TUNNEL_OFF")
+        self.assertIsNotNone(f)
+        self.assertEqual(f.severity, "medium")
+        self.assertIn("DnsOverTls", f.summary)
+        self.assertTrue(f.evidence["passively_readable"])
+
+    def test_it_does_not_repeat_every_cycle(self):
+        found = self._pair(vpn_state(mode="DnsOverTls", tunnel=False),
+                           vpn_state(mode="DnsOverTls", tunnel=False))
+        self.assertIsNone(by_kind(found, "VPN_TUNNEL_OFF"))
+
+    def test_joining_another_network_while_off_reports_again(self):
+        found = self._pair(vpn_state(mode="DnsOverTls", tunnel=False),
+                           vpn_state(mode="DnsOverTls", tunnel=False),
+                           ssid="OtherNet", gateway="198.51.100.1",
+                           gw_mac="00:00:5e:00:53:2a")
+        self.assertIsNotNone(by_kind(found, "VPN_TUNNEL_OFF"))
+
+    def test_an_sae_network_is_not_called_passively_readable(self):
+        found = self._pair(vpn_state(mode="WarpWithDnsOverHttps", tunnel=True),
+                           vpn_state(mode="DnsOverTls", tunnel=False),
+                           security="WPA3_SAE")
+        f = by_kind(found, "VPN_TUNNEL_OFF")
+        self.assertEqual(f.severity, "low")
+        self.assertFalse(f.evidence["passively_readable"])
+
+    def test_an_unknown_mode_is_not_called_unprotected(self):
+        found = self._pair(vpn_state(mode="WarpWithDnsOverHttps", tunnel=True),
+                           vpn_state(mode="Proxy", tunnel=None))
+        self.assertIsNone(by_kind(found, "VPN_TUNNEL_OFF"))
+
+    def test_coming_back_to_a_tunnelling_mode_is_logged(self):
+        found = self._pair(vpn_state(mode="DnsOverTls", tunnel=False),
+                           vpn_state(mode="WarpWithDnsOverHttps", tunnel=True))
+        f = by_kind(found, "VPN_TUNNEL_ON")
+        self.assertIsNotNone(f)
+        self.assertEqual(f.severity, "info")
+
+    def test_a_failed_mode_lookup_does_not_repeat_the_warning(self):
+        """조회 실패로 tunnel 이 None 이 되었다가 돌아와도 다시 알리지 않는다."""
+        st = {"icmp_gw": True}
+        a = obs(vpn=vpn_state(mode="WarpWithDnsOverHttps", tunnel=True), security="WPA2_PSK")
+        b = obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state(mode="DnsOverTls", tunnel=False),
+                security="WPA2_PSK")
+        c = obs(ts="2026-01-01T00:00:10Z", vpn=vpn_state(mode=None, tunnel=None),
+                security="WPA2_PSK")
+        d = obs(ts="2026-01-01T00:00:15Z", vpn=vpn_state(mode="DnsOverTls", tunnel=False),
+                security="WPA2_PSK")
+        self.assertIsNotNone(by_kind(judge(a, b, st), "VPN_TUNNEL_OFF"))
+        judge(b, c, st)
+        self.assertIsNone(by_kind(judge(c, d, st), "VPN_TUNNEL_OFF"))
+
+    def test_moving_without_an_ssid_still_reports(self):
+        """SSID 를 못 읽는 기계에서는 다른 장소가 link_restart 로만 나타난다."""
+        prev = obs(vpn=vpn_state(mode="DnsOverTls", tunnel=False), security="WPA2_PSK",
+                   ssid=None)
+        cur = obs(ts="2026-01-01T00:00:05Z", vpn=vpn_state(mode="DnsOverTls", tunnel=False),
+                  security="WPA2_PSK", ssid=None)
+        attrs = ["link_restart"]
+        ctx = Context(elapsed=5.0, interval=5.0, features=ON, state={"icmp_gw": True},
+                      attributions=attrs, network=network_key(cur))
+        self.assertIsNotNone(by_kind(run_all(prev, cur, ctx), "VPN_TUNNEL_OFF"))
+
+    def test_old_samples_without_the_field_say_nothing(self):
+        found = self._pair(vpn_state(), vpn_state())
+        self.assertIsNone(by_kind(found, "VPN_TUNNEL_OFF"))
+        self.assertIsNone(by_kind(found, "VPN_TUNNEL_ON"))
 
 
 if __name__ == "__main__":

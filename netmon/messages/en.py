@@ -110,6 +110,15 @@ MEASUREMENT_GAP = "Measurement stopped for %.0f seconds (sleep or a halted proce
 
 # ─────────────────────────────────────────── Findings: VPN
 VPN_DISCONNECTED = "%s disconnected. Most likely explanation: %s."
+VPN_TUNNEL_OFF = ("%s is connected but in a mode that builds no tunnel (%s). Traffic "
+                  "leaves outside the tunnel, and other devices on this L2 can read it.")
+VPN_TUNNEL_OFF_SAE = ("%s is connected but in a mode that builds no tunnel (%s). WPA3-SAE "
+                      "blocks passive reading, but a device on the same L2 that hijacks "
+                      "the path can still see it.")
+VPN_TUNNEL_OFF_UNKNOWN = ("%s is connected but in a mode that builds no tunnel (%s). The "
+                          "encryption of this network could not be read, so exposure is "
+                          "not judged.")
+VPN_TUNNEL_ON = "%s switched to a mode that builds a tunnel (%s)."
 VPN_PROTECTION_LOST = ("%s dropped, so traffic is leaving outside the tunnel. Other devices "
                        "on this L2 segment can see it.")
 VPN_PROTECTION_LOST_UNKNOWN = "%s dropped. Whether this network can be trusted is undetermined."

@@ -142,9 +142,11 @@ def obs(
     return o
 
 
-def vpn_state(state="connected", reason=None, provider="warp"):
+def vpn_state(state="connected", reason=None, provider="warp",
+              mode=None, tunnel=None):
     return {provider: {"provider": provider, "state": state,
-                       "reason": reason, "iface": None}}
+                       "reason": reason, "iface": None,
+                       "mode": mode, "tunnel": tunnel}}
 
 
 def kinds(findings):

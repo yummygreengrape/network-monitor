@@ -9,6 +9,9 @@
 """
 from __future__ import annotations
 
+import re
+import time
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -28,10 +31,15 @@ class VpnStatus:
     reason: Optional[str] = None
     iface: Optional[str] = None
     raw: Optional[str] = None
+    # 공급자가 알려 주는 동작 모드와, 그 모드가 실제로 터널을 세우는지.
+    # None 은 "모른다" 다 — 모르는 것을 보호 없음으로 적지 않는다.
+    mode: Optional[str] = None
+    tunnel: Optional[bool] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {"provider": self.provider, "state": self.state,
-                "reason": self.reason, "iface": self.iface}
+                "reason": self.reason, "iface": self.iface,
+                "mode": self.mode, "tunnel": self.tunnel}
 
 
 class Provider:
@@ -54,8 +62,77 @@ class Provider:
         raise NotImplementedError
 
 
+# 모드 값으로 받아들일 모양. 설정 출력의 다른 줄을 잘못 집으면 요약문에
+# 엉뚱한 문자열이 실리므로, 글자와 길이를 확인한 것만 쓴다.
+MODE_VALUE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,39}$")
+
+
+def parse_warp_mode(text: str) -> Optional[str]:
+    """`warp-cli settings` 에서 동작 모드만.
+
+    출력은 "(user set)\tMode: DnsOverTls" 처럼 앞에 출처 표시가 붙고,
+    "WARP tunnel protocol: MASQUE" 처럼 mode 가 아닌 줄도 있다. 키가 정확히
+    `mode` 인 줄만 받는다 — 제외 목록은 줄이 하나 늘면 조용히 무너진다.
+    """
+    for line in (text or "").splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        # 앞의 "(user set)" 같은 출처 표시를 떼고 키만 본다.
+        key = key.split(")")[-1].strip().lower()
+        if key != "mode":
+            continue
+        value = value.strip()
+        return value if MODE_VALUE_RE.match(value) else None
+    return None
+
+
+def warp_tunnel_for(mode: Optional[str]) -> Optional[bool]:
+    """모드 이름이 터널을 세우는 모드인가.
+
+    **"연결됨" 이 "보호받는 중" 을 뜻하지 않는다.** DNS only 모드(DnsOverTls,
+    DnsOverHttps)에서도 warp-cli 는 `Status update: Connected` 를 돌려준다.
+    2026-09-21 실측에서 이 때문에 터널이 없는데도 연결로 기록됐고, 보호가
+    사라진 사실이 판정에 한 번도 잡히지 않았다.
+    """
+    if not mode:
+        return None
+    low = mode.strip().lower()
+    if low.startswith("dnsover"):
+        return False
+    if "warp" in low:
+        return True
+    return None
+
+
 class Warp(Provider):
     name, cmd = "warp", "warp-cli"
+    # 모드는 사람이 바꿀 때만 바뀐다. 주기마다 명령을 하나 더 띄우지 않는다
+    # (ARP 로그·Wi-Fi 헬퍼도 같은 방식으로 간격을 둔다).
+    MODE_EVERY_SECONDS = 60.0
+    # 못 읽은 채 이만큼 지나면 옛 값을 버린다. 모르는 것과 잠깐 못 읽은 것은
+    # 다르지만, "잠깐" 이 길어지면 옛 모드를 이번 관측처럼 싣게 된다.
+    MODE_MAX_AGE_SECONDS = 300.0
+    _mode_cache: Optional[str] = None
+    _mode_read_at: Optional[float] = None
+
+    def mode(self, now: Optional[float] = None) -> Optional[str]:
+        now = time.time() if now is None else now
+        # **읽은 적 없음과 읽었는데 해석 못 함은 다르다.** 시각으로만 가드하지
+        # 않으면, 출력 형식이 바뀌어 해석에 실패하는 동안(기능이 조용히 꺼진 바로
+        # 그 상태) 주기마다 명령을 다시 띄운다.
+        if self._mode_read_at is not None and now - self._mode_read_at < self.MODE_EVERY_SECONDS:
+            return self._mode_cache
+        r = run([self.path() or self.cmd, "settings"], timeout=6)
+        if not r.ok:
+            # 일시적 실패는 다음 주기에 다시 시도한다. 너무 오래된 값은 버린다.
+            if (self._mode_read_at is not None
+                    and now - self._mode_read_at <= self.MODE_MAX_AGE_SECONDS):
+                return self._mode_cache
+            self._mode_cache = None
+            return None
+        self._mode_cache, self._mode_read_at = parse_warp_mode(r.out), now
+        return self._mode_cache
 
     def status(self) -> VpnStatus:
         r = run([self.path() or self.cmd, "status"], timeout=6)
@@ -73,7 +150,9 @@ class Warp(Provider):
                          else DISCONNECTED)
             elif line.lower().startswith("reason:"):
                 reason = line.split(":", 1)[1].strip()
-        return VpnStatus(self.name, state, reason=reason, raw=first_line(text))
+        mode = self.mode() if state == CONNECTED else None
+        return VpnStatus(self.name, state, reason=reason, raw=first_line(text),
+                         mode=mode, tunnel=warp_tunnel_for(mode))
 
 
 class Tailscale(Provider):

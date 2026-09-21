@@ -25,6 +25,10 @@
 
 VPN 상태는 공급자별로 `warp-cli status`, `tailscale status --json`,
 `wg show interfaces`, `scutil --nc list`를 씁니다. 기본은 꺼짐입니다.
+WARP 는 연결 상태일 때 `warp-cli settings` 로 동작 모드도 읽습니다(60초 간격).
+"연결됨"이 "터널이 있음"을 뜻하지 않기 때문입니다 — DNS only 모드에서도
+`Status update: Connected` 가 나옵니다. 기록하는 값은 모드 이름 한 단어뿐이고,
+예상한 모양(글자·길이)이 아니면 기록하지 않습니다.
 
 ## 실측으로 확인한 함정
 

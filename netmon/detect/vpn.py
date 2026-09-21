@@ -100,6 +100,60 @@ def _likely(cur: Observation, ctx, state: Dict[str, Any]) -> str:
     return msg.WHY_UNKNOWN
 
 
+def _tunnel_off_findings(name: str, prev_st: Dict[str, Any], cur_st: Dict[str, Any],
+                         cur: Observation, prev: Observation, ctx) -> List[Finding]:
+    """연결돼 있는데 터널을 세우지 않는 모드로 바뀐 것.
+
+    **끊김이 아니라서 상태 전환 판정에 걸리지 않는다.** DNS only 모드에서도
+    공급자는 "연결됨" 을 보고하므로, 보호가 사라진 사실이 조용히 지나간다
+    (2026-09-21 실측). 모드가 바뀐 순간과, 그 모드로 다른 네트워크에 붙은
+    순간에만 낸다 — 매 주기 되풀이하지 않는다.
+    """
+    # **조회 실패(None)를 전환으로 세지 않는다.** 모드 조회가 한 번 실패하면
+    # False → None → False 로 흔들리고, 그때마다 medium 보안 판정이 되풀이된다.
+    # 같은 모듈이 상태 쪽에서 지키는 원칙("unknown 은 끊김이 아니다")과 같다.
+    key = "vpn_tunnel_%s" % name
+    was_t = prev_st.get("tunnel")
+    if was_t is None:
+        was_t = ctx.state.get(key)
+    now_t = cur_st.get("tunnel")
+    if now_t is None:
+        return []
+    ctx.state[key] = now_t
+    if now_t is not False:
+        if was_t is False and now_t is True:
+            return [Finding(
+                axis=INFO, kind="VPN_TUNNEL_ON", confidence=CONFIRMED, severity=INFO_SEV,
+                summary=msg.VPN_TUNNEL_ON % (name, cur_st.get("mode") or "?"),
+                evidence={"provider": name, "mode": cur_st.get("mode")},
+            )]
+        return []
+    # SSID 를 못 읽는 기계에서는 다른 장소가 link_restart 로만 나타난다.
+    # ctx.moved 가 그 셋을 함께 본다.
+    moved = ctx.moved
+    if was_t is False and not moved:
+        return []
+
+    kind = _security_kind(cur, prev)
+    if kind == wifi_security.PER_USER:
+        return []
+    if kind in (wifi_security.OPEN, wifi_security.SHARED_PASSIVE):
+        summary, severity = msg.VPN_TUNNEL_OFF, MEDIUM
+    elif kind == wifi_security.SHARED_SAE:
+        summary, severity = msg.VPN_TUNNEL_OFF_SAE, LOW
+    else:
+        summary, severity = msg.VPN_TUNNEL_OFF_UNKNOWN, LOW
+    return [Finding(
+        axis=SECURITY, kind="VPN_TUNNEL_OFF", confidence=CONFIRMED, severity=severity,
+        summary=summary % (name, cur_st.get("mode") or "?"),
+        evidence={"provider": name, "mode": cur_st.get("mode"),
+                  "wifi_security": (cur.get("wifi") or {}).get("security"),
+                  "security_kind": kind,
+                  "passively_readable":
+                      kind in (wifi_security.OPEN, wifi_security.SHARED_PASSIVE)},
+    )]
+
+
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     out: List[Finding] = []
     cur_vpn = cur.get("vpn")
@@ -112,6 +166,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         prev_st = prev_vpn.get(name)
         if not prev_st:
             continue
+        out.extend(_tunnel_off_findings(name, prev_st, cur_st, cur, prev, ctx))
         was, now = prev_st.get("state"), cur_st.get("state")
         if was == now:
             continue
