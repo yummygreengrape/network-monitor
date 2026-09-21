@@ -206,6 +206,12 @@ class Engine:
     def judge(self, obs: Observation, elapsed: float) -> List[Finding]:
         interval = float(self.cfg.interval)
 
+        # **공백은 판정보다 먼저 귀속한다.** 이 주기에 VPN 복구 판정이 나면
+        # 그 증거가 방금 지나간 공백까지 포함해야 한다. 판정 뒤에 더하면
+        # 복구 주기 직전의 공백이 매번 빠진다.
+        if gap_exceeded(elapsed, interval):
+            self.state = baseline.note_unmeasured(self.state, elapsed)
+
         # 주 인터페이스가 없으면 비교할 상태가 아니다. 기록만 남기고 넘어간다.
         # 기준선도 건드리지 않는다 — 링크가 없는 동안의 값은 기준이 될 수 없다.
         if not is_complete(obs):
@@ -224,6 +230,11 @@ class Engine:
                 gap = quality.measurement_gap(elapsed, interval)
                 gap.network = self.state.get("network")
                 out.append(gap)
+            # **끊긴 시각은 이 주기에도 갱신한다.** VPN 상태는 링크가 없어도
+            # 수집되는데 이 분기가 조기 반환하는 바람에 갱신되지 않았고,
+            # 7분 25초 끊겨 있던 것이 복구 판정에 "5초" 로 적혔다
+            # (2026-09-21 05:41~05:49 맥북).
+            self.state = baseline.update_vpn_down(self.state, obs)
             return out
 
         link_gap = self.link_gap

@@ -117,6 +117,9 @@ VPN_RECONNECTED = "%s 재연결됨%s."
 VPN_STATE_CHANGED = "%s 상태 변경됨 (%s → %s)."
 VPN_STATE_UNKNOWN = "%s 상태 확인 불가 (%s → %s)."
 VPN_SINCE = " (%s 부터 끊김)"
+# 측정이 비어 있던 시간이 끊김 속에 섞인 경우. 총 시간만 적으면 그중 얼마를
+# 실제로 지켜봤는지 알 수 없다 — 잠자기로 6분 넘게 비어 있던 구간이 실제로 있었다.
+VPN_SINCE_UNMEASURED = " (%s 부터 %.0f초 끊김, 그중 약 %.0f초는 측정되지 않음)"
 
 # VPN 끊김의 "가장 유력한 설명"
 WHY_USER = "사용자가 직접 끊음"

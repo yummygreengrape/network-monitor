@@ -126,6 +126,7 @@ VPN_RECONNECTED = "%s reconnected%s."
 VPN_STATE_CHANGED = "%s state changed (%s → %s)."
 VPN_STATE_UNKNOWN = "%s state could not be read (%s → %s)."
 VPN_SINCE = " (down since %s)"
+VPN_SINCE_UNMEASURED = " (down since %s, %.0f s total, about %.0f s of it unmeasured)"
 
 # Most likely explanation for a VPN drop
 WHY_USER = "disconnected by the user"

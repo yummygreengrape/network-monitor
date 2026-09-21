@@ -13,6 +13,7 @@ SLEEP / ARP_ANOMALY). 여기서는 고르지 않는다. 대신 한 번의 끊김
 """
 from __future__ import annotations
 
+import datetime
 from typing import Any, Dict, List, Optional
 
 from .. import messages as msg
@@ -154,6 +155,64 @@ def _tunnel_off_findings(name: str, prev_st: Dict[str, Any], cur_st: Dict[str, A
     )]
 
 
+TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _down_since(state: Any, name: str) -> Optional[Any]:
+    downs = state.get("vpn_down_since") if isinstance(state, dict) else None
+    return downs.get(name) if isinstance(downs, dict) else None
+
+
+def _elapsed_seconds(since: Any, ts: Any) -> Optional[float]:
+    """끊긴 시각부터 지금까지 몇 초인가. 읽을 수 없으면 None.
+
+    상태 파일은 사람이 고칠 수 있고 재시작을 건너뛰어 남는다. 값이 문자열이
+    아니거나 앞뒤가 뒤집혀 있으면(미래 시각) 계산하지 않는다 — 음수나
+    터무니없는 시간을 적느니 적지 않는 편이 낫다.
+    """
+    if not isinstance(since, str) or not isinstance(ts, str):
+        return None
+    try:
+        a = datetime.datetime.strptime(since, TS_FMT)
+        b = datetime.datetime.strptime(ts, TS_FMT)
+    except ValueError:
+        return None
+    span = (b - a).total_seconds()
+    return round(span, 1) if span >= 0 else None
+
+
+def _unmeasured_seconds(state: Any, name: str,
+                        down_s: Optional[float]) -> float:
+    """끊겨 있던 시간 중 측정이 비어 있던 몫. 셈이 없으면 0.
+
+    총 끊긴 시간을 모르면 0 으로 둔다 — 경계를 그을 수 없는 구간에 "그중
+    얼마" 를 적을 수는 없고, 견줄 상한이 없으면 셈이 어긋났을 때 걸러낼
+    방법도 없다.
+    """
+    if down_s is None:
+        return 0.0
+    acc = state.get("vpn_down_unmeasured") if isinstance(state, dict) else None
+    raw = acc.get(name) if isinstance(acc, dict) else None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if not val > 0 or val != val or val == float("inf"):
+        return 0.0
+    # 총 끊긴 시간보다 클 수는 없다. 상태가 어긋나 있어도 기록이 스스로
+    # 모순되지 않게 자른다.
+    return round(min(val, down_s), 1)
+
+
+def _down_phrase(since: Any, down_s: Optional[float], unmeasured: float) -> str:
+    """재연결 요약문의 괄호. 공백이 섞였으면 총 시간과 미관측 시간을 함께 적는다."""
+    if down_s is None:
+        return ""
+    if unmeasured > 0:
+        return msg.VPN_SINCE_UNMEASURED % (since[11:19], down_s, unmeasured)
+    return msg.VPN_SINCE % since[11:19]
+
+
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     out: List[Finding] = []
     cur_vpn = cur.get("vpn")
@@ -228,13 +287,17 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                 ))
 
         elif was != CONNECTED and now == CONNECTED:
-            since = (ctx.state.get("vpn_down_since") or {}).get(name)
-            dur = msg.VPN_SINCE % since[11:19] if since else ""
+            since = _down_since(ctx.state, name)
+            down_s = _elapsed_seconds(since, cur.ts)
+            unmeasured = _unmeasured_seconds(ctx.state, name, down_s)
             out.append(Finding(
                 axis=QUALITY, kind="VPN_RECONNECTED",
                 confidence=CONFIRMED, severity=INFO_SEV,
-                summary=msg.VPN_RECONNECTED % (name, dur),
+                summary=msg.VPN_RECONNECTED % (name, _down_phrase(since, down_s,
+                                                                  unmeasured)),
                 evidence={"provider": name, "down_since": since,
+                          "down_seconds": down_s,
+                          "unmeasured_seconds": unmeasured,
                           "prev_state": was},
                 attribution=ctx.quality_attribution(),
             ))

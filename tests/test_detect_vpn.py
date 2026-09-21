@@ -103,6 +103,76 @@ class TestReconnect(unittest.TestCase):
         self.assertIsNotNone(f)
         self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:00Z")
 
+    def _reconnect(self, state, cur_ts="2026-01-01T00:07:30Z"):
+        prev = obs(ts="2026-01-01T00:07:25Z", vpn=vpn_state("disconnected"))
+        cur = obs(ts=cur_ts, vpn=vpn_state("connected"))
+        return by_kind(judge(prev, cur, state=state), "VPN_RECONNECTED")
+
+    def test_evidence_carries_the_total_and_the_unmeasured_part(self):
+        """끊긴 시간에 측정 공백이 섞이면 둘을 함께 적는다."""
+        f = self._reconnect({"icmp_gw": True,
+                             "vpn_down_since": {"warp": "2026-01-01T00:00:00Z"},
+                             "vpn_down_unmeasured": {"warp": 380.0}})
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:00Z")
+        self.assertEqual(f.evidence["down_seconds"], 450.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 380.0)
+        self.assertIn("450", f.summary)
+        self.assertIn("380", f.summary)
+        self.assertEqual(f.summary, msg.VPN_RECONNECTED
+                         % ("warp", msg.VPN_SINCE_UNMEASURED % ("00:00:00", 450.0, 380.0)))
+
+    def test_without_a_gap_the_summary_keeps_its_old_shape(self):
+        """공백이 없으면 종전 그대로 — 시작 시각만 적는다."""
+        f = self._reconnect({"icmp_gw": True,
+                             "vpn_down_since": {"warp": "2026-01-01T00:00:00Z"}})
+        self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+        self.assertEqual(f.evidence["down_seconds"], 450.0)
+        self.assertEqual(f.summary,
+                         msg.VPN_RECONNECTED % ("warp", msg.VPN_SINCE % "00:00:00"))
+
+    def test_broken_down_since_values_never_become_absurd_durations(self):
+        """상태 파일은 손으로 고칠 수 있고 재시작을 건너뛰어 남는다."""
+        cases = [{}, {"warp": None}, {"warp": ""}, {"warp": "x"}, {"warp": 12345},
+                 {"warp": -1}, {"warp": ["2026-01-01T00:00:00Z"]},
+                 {"warp": "2026-01-01T09:00:00Z"}]     # 미래 시각
+        for downs in cases:
+            with self.subTest(downs=downs):
+                f = self._reconnect({"icmp_gw": True, "vpn_down_since": downs,
+                                     "vpn_down_unmeasured": {"warp": 380.0}})
+                self.assertIsNotNone(f)
+                self.assertIsNone(f.evidence["down_seconds"])
+                self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+                self.assertEqual(f.summary, msg.VPN_RECONNECTED % ("warp", ""))
+
+    def test_broken_unmeasured_values_are_ignored_not_printed(self):
+        cases = [None, "x", -5, float("nan"), float("inf"), {"nested": 1}]
+        for bad in cases:
+            with self.subTest(unmeasured=bad):
+                f = self._reconnect({"icmp_gw": True,
+                                     "vpn_down_since": {"warp": "2026-01-01T00:00:00Z"},
+                                     "vpn_down_unmeasured": {"warp": bad}})
+                self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+                self.assertEqual(f.summary,
+                                 msg.VPN_RECONNECTED % ("warp", msg.VPN_SINCE % "00:00:00"))
+
+    def test_unmeasured_never_exceeds_the_total(self):
+        """셈이 어긋나도 "끊긴 시간보다 오래 비어 있었다" 고 적지 않는다."""
+        f = self._reconnect({"icmp_gw": True,
+                             "vpn_down_since": {"warp": "2026-01-01T00:00:00Z"},
+                             "vpn_down_unmeasured": {"warp": 99999.0}})
+        self.assertEqual(f.evidence["unmeasured_seconds"], 450.0)
+        self.assertEqual(f.evidence["down_seconds"], 450.0)
+
+    def test_a_broken_state_shape_does_not_raise(self):
+        for state in ({"icmp_gw": True, "vpn_down_since": "x",
+                       "vpn_down_unmeasured": "y"},
+                      {"icmp_gw": True, "vpn_down_since": None}):
+            with self.subTest(state=state):
+                f = self._reconnect(state)
+                self.assertIsNotNone(f)
+                self.assertIsNone(f.evidence["down_since"])
+                self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+
 
 class TestNoise(unittest.TestCase):
     def test_unchanged_state_is_silent(self):

@@ -145,6 +145,67 @@ def update_counters(state: Dict[str, Any], cur: Observation,
     return new
 
 
+def update_vpn_down(state: Dict[str, Any], cur: Observation) -> Dict[str, Any]:
+    """공급자별로 "언제부터 끊겨 있는가" 를 갱신한다.
+
+    **판정할 수 없는 주기에서도 불러야 한다.** 링크가 없는 주기는 engine 이
+    조기 반환해 `update_baselines` 가 돌지 않았고, 그래서 끊겨 있던 7분 25초가
+    `vpn_down_since` 에 들어가지 않아 복구 판정이 "5초 끊김" 으로 적혔다
+    (2026-09-21 05:41~05:49 맥북). VPN 상태는 링크가 없어도 수집된다 —
+    공급자에게 물어보는 값이라 주 인터페이스가 필요 없다.
+    """
+    vpn_block = cur.get("vpn")
+    if not vpn_block:
+        return state
+    new = dict(state)
+    downs = dict(state.get("vpn_down_since") or {})
+    unmeasured = dict(_unmeasured_map(state))
+    for name, st in vpn_block.items():
+        if (st or {}).get("state") == "connected":
+            downs.pop(name, None)
+            # 복구 판정이 이미 읽고 지나간 뒤다. 다음 끊김에 이월하지 않는다.
+            unmeasured.pop(name, None)
+        else:
+            downs.setdefault(name, cur.ts)
+    new["vpn_down_since"] = downs
+    new["vpn_down_unmeasured"] = unmeasured
+    return new
+
+
+def note_unmeasured(state: Dict[str, Any], seconds: float) -> Dict[str, Any]:
+    """방금 지나간 측정 공백을, 그동안 끊겨 있던 공급자의 미관측 시간에 더한다.
+
+    **판정보다 먼저 불러야 한다.** 이 주기에 복구 판정이 나면 그 증거가 직전
+    공백까지 포함해야 하기 때문이다. 이미 끊겨 있던 공급자에만 더한다 —
+    이번 주기에 처음 끊긴 것이라면 그 공백은 끊기기 **전**의 시간이다.
+    """
+    try:
+        span = float(seconds)
+    except (TypeError, ValueError):
+        return state
+    if not span > 0 or span != span or span == float("inf"):
+        return state
+    downs = state.get("vpn_down_since")
+    if not isinstance(downs, dict) or not downs:
+        return state
+    acc = dict(_unmeasured_map(state))
+    for name in downs:
+        try:
+            prev = float(acc.get(name) or 0.0)
+        except (TypeError, ValueError):
+            prev = 0.0
+        acc[name] = round(prev + span, 1)
+    new = dict(state)
+    new["vpn_down_unmeasured"] = acc
+    return new
+
+
+def _unmeasured_map(state: Dict[str, Any]) -> Dict[str, Any]:
+    """저장된 미관측 누적값. 형태가 깨져 있으면 비어 있는 것으로 본다."""
+    acc = state.get("vpn_down_unmeasured")
+    return acc if isinstance(acc, dict) else {}
+
+
 def update_baselines(state: Dict[str, Any], cur: Observation,
                      elapsed: Optional[float] = None,
                      interval: float = 5.0) -> Dict[str, Any]:
@@ -162,15 +223,7 @@ def update_baselines(state: Dict[str, Any], cur: Observation,
         new["rtt_ewma"] = round(_ewma(state.get("rtt_ewma"), float(rtt)), 3)
 
     # VPN 이 끊긴 시각. 재연결 판정이 직전 값을 읽어야 하므로 판정 뒤에 갱신한다.
-    vpn_block = cur.get("vpn")
-    if vpn_block:
-        downs = dict(state.get("vpn_down_since") or {})
-        for name, st in vpn_block.items():
-            if (st or {}).get("state") == "connected":
-                downs.pop(name, None)
-            else:
-                downs.setdefault(name, cur.ts)
-        new["vpn_down_since"] = downs
+    new = update_vpn_down(new, cur)
 
     replies = cur.get("arp", "replies_received")
     if isinstance(replies, int):
