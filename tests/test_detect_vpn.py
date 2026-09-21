@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from netmon import messages
 from netmon import messages as msg
@@ -60,6 +61,20 @@ def unmeasured(o, empty=False):
     """
     o.data["link"] = ({} if empty else
                       {"targets": {}, "note": "측정 대상 없음 (게이트웨이 미확인)"})
+    return o
+
+
+def command_failed(o, error="timed out"):
+    """ping 명령 자체가 실행되지 못한 평소(single) 주기.
+
+    `collect/link.collect` 의 예외 처리가 남기는 모양 그대로다 — 결과에는
+    `reachable` False 와 **단수 키** `error` 뿐이고, 받은 수도 손실률도
+    없다. 이 `reachable` 은 "무응답" 이 아니라 "재지 못함" 이다.
+    """
+    o.data["link"]["results"]["gateway"] = {"reachable": False, "error": error}
+    o.data["link"]["gateway_reachable"] = False
+    o.data["link"]["gateway_rtt_ms"] = None
+    o.data["link"]["first_hop_probes"] = 1
     return o
 
 
@@ -523,14 +538,36 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
         self.assertIn(msg.METHOD_ICMP, summary(True))
         self.assertNotEqual(summary(False), summary(True))
 
-    def test_the_method_labels_match_the_quality_detector(self):
-        """같은 기계의 같은 주기를 두 판정이 다른 말로 부르지 않는다."""
+    def _assert_method_labels_in_sync(self):
+        """판정 방법의 **단일 출처**(netmon/liveness.METHOD_MESSAGES)와 견준다.
+
+        여기에 리터럴 dict 를 적어 두면 판정 방법이 늘거나 이름이 바뀌어도
+        이 테스트는 그대로 통과한다 — 드리프트를 잡으라고 둔 테스트가
+        드리프트를 못 본다. 출처를 직접 읽어야 새 방법이 quality 쪽 이름표
+        없이 들어오는 순간 걸린다.
+        """
+        from netmon import liveness
         from netmon.detect.quality import METHOD_LABEL
         self.assertEqual(
-            {k: messages.get(v, "ko") for k, v in
-             {"arp": "METHOD_ARP", "icmp": "METHOD_ICMP",
-              "link": "METHOD_LINK"}.items()},
+            {k: messages.get(v, "ko")
+             for k, v in liveness.METHOD_MESSAGES.items()},
             METHOD_LABEL)
+
+    def test_the_method_labels_match_the_quality_detector(self):
+        """같은 기계의 같은 주기를 두 판정이 다른 말로 부르지 않는다."""
+        self._assert_method_labels_in_sync()
+
+    def test_a_judging_method_added_without_a_quality_label_is_caught(self):
+        """드리프트가 실제로 걸리는지 확인한다.
+
+        단일 출처에 방법이 하나 늘어난 상태를 만들면 동기화 단언이 깨져야
+        한다. 리터럴 dict 로 되돌리면 출처를 보지 않으므로 이 상황을
+        지나치고, 이 테스트가 실패한다.
+        """
+        from netmon import liveness
+        with mock.patch.dict(liveness.METHOD_MESSAGES, {"fake": "METHOD_ICMP"}):
+            with self.assertRaises(AssertionError):
+                self._assert_method_labels_in_sync()
 
     def test_probes_that_failed_to_run_are_not_reported_as_network_loss(self):
         """다발의 "보낸 수" 는 띄운 명령 수다.
@@ -558,6 +595,83 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
             self.assertNotIn("first_hop_replies", f.evidence)
         self.assertEqual(single.evidence["first_hop_received"], 2)
         self.assertEqual(multi.evidence["first_hop_received"], 1)
+
+
+class TestAMeasurementThatNeverRanIsNotEvidence(unittest.TestCase):
+    """나가지 않은 패킷은 구간을 지목하지 못한다.
+
+    명령이 실행되지 못하면 수집기는 `reachable` 을 False 로 적는다
+    (collect/link.collect). liveness 는 "무응답" 과 "재지 못함" 을 구분하지
+    않으므로 `first_hop_alive` 는 False 로 나온다. 그 값은 그대로 두고,
+    요약문만 재지 못한 사실에 맞춘다.
+    """
+
+    def _drop(self, cur, state=None):
+        return by_kind(judge(obs(vpn=vpn_state("connected")), cur,
+                             state=state or {"icmp_gw": True}),
+                       "VPN_DISCONNECTED")
+
+    def test_a_single_probe_that_failed_to_run_carries_its_error(self):
+        """단수 키 `error` 를 다발과 같은 키로 근거에 싣는다."""
+        f = self._drop(command_failed(obs(vpn=vpn_state("disconnected"))))
+        self.assertEqual(f.evidence["first_hop_errors"], ["timed out"])
+        self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
+        # 판정값 자체는 종전 그대로다 — 바꾸는 것은 문구뿐이다.
+        self.assertIs(f.evidence["first_hop_alive"], False)
+
+    def test_a_single_probe_that_failed_to_run_does_not_accuse_the_local_leg(self):
+        f = self._drop(command_failed(obs(vpn=vpn_state("disconnected"))))
+        self.assertIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
+        self.assertNotIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_NOT_RUN, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE_COMMAND, f.summary)
+
+    def test_a_single_probe_that_did_run_still_names_the_local_leg(self):
+        """가드가 넘치지 않는다 — 실제로 나갔는데 무응답인 주기는 그대로다."""
+        f = self._drop(obs(vpn=vpn_state("disconnected"), icmp_ok=False,
+                           gw_mac=None))
+        self.assertIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
+
+    def test_an_arp_judged_network_is_untouched_by_a_failed_ping(self):
+        """ARP 로 판정하는 망의 `alive` 는 ping 결과에서 오지 않는다."""
+        f = self._drop(command_failed(obs(vpn=vpn_state("disconnected"))),
+                       state={"icmp_gw": False})
+        self.assertEqual(f.evidence["first_hop_method"], "arp")
+        self.assertIn(msg.WHY_FIRST_HOP_OK % msg.METHOD_ARP, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
+
+    def test_a_burst_where_nothing_ran_is_not_called_partly_failed(self):
+        """3발이 전부 실행 실패면 "일부" 가 아니다.
+
+        실패 목록은 같은 문구끼리 합쳐지므로(collect/link.merge_probes) 몇
+        발이 실패했는지 셀 수 없고, 응답이 0이면 나간 발이 있었는지조차
+        모른다.
+        """
+        cur = burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
+                    replies=(False, False, False), failed=(0, 1, 2))
+        f = self._drop(cur)
+        self.assertEqual(f.evidence["first_hop_received"], 0)
+        self.assertEqual(f.evidence["first_hop_errors"], ["timed out"])
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST_NOT_RUN, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_BURST_FAILED % 0, f.summary)
+        self.assertNotIn("일부", f.summary)
+
+    def test_a_burst_where_nothing_ran_does_not_accuse_the_local_leg(self):
+        cur = burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
+                    replies=(False, False, False), failed=(0, 1, 2))
+        f = self._drop(cur)
+        self.assertIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
+        self.assertNotIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
+
+    def test_a_burst_that_only_partly_failed_still_reads_as_before(self):
+        """응답이 하나라도 있으면 나간 발이 있었다 — 유보 갈래가 아니다."""
+        cur = burst(obs(vpn=vpn_state("disconnected")),
+                    replies=(True, False, False), failed=(1, 2))
+        f = self._drop(cur)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST_FAILED % 1, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_BURST_NOT_RUN, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
 
 
 class TestTheKindSetIsFrozen(unittest.TestCase):

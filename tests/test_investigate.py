@@ -234,6 +234,40 @@ class TestVpnInvestigation(unittest.TestCase):
             self.assertEqual(VpnDrop._leg(crit), msg.INV_VPN_LEG_FIRST_HOP_OK_PLAIN,
                              methods)
 
+    def test_a_drop_that_judged_nothing_does_not_lend_its_basis(self):
+        """판정한 적 없는 끊김의 방법을 기준으로 내세우지 않는다.
+
+        `first_hop_alive` 가 None 인 끊김은 도달성을 아무것도 판정하지 못한
+        주기다(ICMP 로 보정된 망에서 게이트웨이를 못 잰 주기가 그렇다).
+        결론이 세는 끊김은 None 을 뺀 것들이므로, 기준도 그 끊김들의 것만
+        적어야 앞뒤가 맞는다.
+        """
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [True, True, None],
+                "first_hop_method_at_drop": ["icmp", "icmp", "arp"]}
+        self.assertEqual(VpnDrop._method_basis(crit), msg.METHOD_ICMP)
+        self.assertEqual(VpnDrop._leg(crit),
+                         msg.INV_VPN_LEG_FIRST_HOP_OK % msg.METHOD_ICMP)
+        self.assertNotIn(msg.METHOD_ARP, VpnDrop._leg(crit))
+
+    def test_a_judged_drop_without_a_labelled_method_claims_no_basis(self):
+        """판정한 끊김의 방법만 보므로, 그것이 없으면 기준을 적지 않는다."""
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [True, None],
+                "first_hop_method_at_drop": ["unknown", "icmp"]}
+        self.assertEqual(VpnDrop._method_basis(crit), "")
+        self.assertEqual(VpnDrop._leg(crit), msg.INV_VPN_LEG_FIRST_HOP_OK_PLAIN)
+
+    def test_lists_that_do_not_line_up_claim_no_basis(self):
+        """짝을 믿을 수 없으면(한쪽만 기록된 옛 조사, 복원된 상태) 적지 않는다."""
+        from netmon.investigate.playbooks import VpnDrop
+        for methods in (["icmp"], ["icmp", "icmp", "icmp"]):
+            crit = {"first_hop_alive_at_drop": [True, True],
+                    "first_hop_method_at_drop": methods}
+            self.assertEqual(VpnDrop._method_basis(crit), "", methods)
+            self.assertEqual(VpnDrop._leg(crit),
+                             msg.INV_VPN_LEG_FIRST_HOP_OK_PLAIN, methods)
+
     def test_an_unstable_first_hop_still_reads_as_before(self):
         """바꾼 것은 지목하던 갈래뿐이다. 나머지 갈래는 그대로다."""
         from netmon.investigate.playbooks import VpnDrop

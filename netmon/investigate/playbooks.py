@@ -390,10 +390,24 @@ class VpnDrop(Playbook):
         끊김마다 다를 수 있어(보정이 ICMP 와 ARP 사이를 오간다) 본 것을 모두
         적는다. 이름표가 없는 값(보정 중 `unknown`, 옛 기록의 None)은 적지
         않는다 — 하나도 없으면 기준을 밝히지 않는 문구를 쓴다.
+
+        **판정한 끊김의 방법만 모은다.** 두 리스트는 같은 끊김을 같은 자리에
+        적으므로 짝지어 훑는다. `first_hop_alive` 가 None 인 끊김은 아무것도
+        판정하지 못한 주기인데(ICMP 로 보정된 망에서 게이트웨이를 못 잰
+        주기가 그렇다), 그 주기의 방법을 함께 적으면 판정한 적 없는 것을
+        판정 기준으로 내세우게 된다. 이 함수를 부르는 쪽(_leg)이 세는 것도
+        None 을 뺀 끊김들이다.
+
+        길이가 어긋나면 짝을 믿을 수 없으므로(한쪽만 기록된 옛 조사, 복원된
+        상태) 기준을 적지 않는다.
         """
+        alive = crit.get("first_hop_alive_at_drop", []) or []
+        methods = crit.get("first_hop_method_at_drop", []) or []
+        if len(alive) != len(methods):
+            return ""
         labels: List[str] = []
-        for method in crit.get("first_hop_method_at_drop", []) or []:
-            if method not in METHOD_MESSAGES:
+        for judged, method in zip(alive, methods):
+            if judged is None or method not in METHOD_MESSAGES:
                 continue
             label = method_label(method)
             if label not in labels:

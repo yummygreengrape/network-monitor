@@ -114,6 +114,14 @@ def _probe_evidence(cur: Observation) -> Dict[str, Any]:
         loss = gw.get("loss_pct")
         if isinstance(loss, (int, float)) and not isinstance(loss, bool):
             single["first_hop_loss_pct"] = float(loss)
+        # 명령이 실행되지 못하면 수집기는 `{"reachable": False, "error": ...}`
+        # 만 남긴다(collect/link.collect 의 예외 처리). 그 `reachable` 은
+        # "무응답" 이 아니라 "재지 못함" 이다 — 근거로 옮기지 않으면 나가지도
+        # 않은 측정이 "첫 홉 무응답" 의 근거로 쓰인다. 다발 갈래와 **같은
+        # 키**로 싣는다(단수 `error` 하나뿐이어도 리스트로).
+        err = gw.get("error")
+        if err:
+            single["first_hop_errors"] = [str(err)[:80]]
         return single
     burst: Dict[str, Any] = {"first_hop_probe_mode": "burst",
                              "first_hop_concurrent": bool(gw.get("concurrent"))}
@@ -142,6 +150,10 @@ def _probe_phrase(evidence: Dict[str, Any]) -> str:
     """
     mode = evidence.get("first_hop_probe_mode")
     if mode == "single":
+        if evidence.get("first_hop_errors"):
+            # 명령이 실행되지 못한 주기다. "ping 명령 한 번" 이라고 적으면
+            # 보내지 않은 측정을 증거로 내세우게 된다.
+            return msg.FIRST_HOP_EVIDENCE_NOT_RUN
         # **발 수를 주장하지 않는다.** 관측에 남는 것은 받은 수와 손실률뿐이라
         # (collect/link.parse_ping), `ping_count` 를 올려 둔 주기가 전부
         # 손실되면 1발이었는지 5발이었는지 구분할 수 없다. 끊김 주기가 바로
@@ -157,8 +169,13 @@ def _probe_phrase(evidence: Dict[str, Any]) -> str:
         # 실행되지 못한 측정이 섞여 있으면 손실률을 네트워크 손실로 읽을 수
         # 없다. 보낸 수도 주장하지 않는다 — 발 수를 모르면 말하지 않는다는
         # 평소 주기(single) 기준과 같다.
-        if isinstance(received, int):
+        if isinstance(received, int) and received > 0:
             return msg.FIRST_HOP_EVIDENCE_BURST_FAILED % received
+        if isinstance(received, int):
+            # 받은 것이 하나도 없다. 실패 목록은 같은 문구끼리 합쳐지므로
+            # (collect/link.merge_probes) 몇 발이 실패했는지 셀 수 없고,
+            # 전부 실패했을 수도 있다 — "일부" 라고 적을 근거가 없다.
+            return msg.FIRST_HOP_EVIDENCE_BURST_NOT_RUN
         return ""
     loss = evidence.get("first_hop_loss_pct")
     if isinstance(received, int) and isinstance(loss, float):
@@ -201,6 +218,30 @@ def _mixed_first_hop(method: str, evidence: Dict[str, Any]) -> bool:
     return 0 < received < sent
 
 
+def _first_hop_not_run(method: str, evidence: Dict[str, Any]) -> bool:
+    """이번 주기의 첫 홉 측정이 실행되지 못했는가.
+
+    명령이 실행되지 못하면 수집기는 `reachable` 을 False 로 적는다
+    (collect/link.collect). 그 False 는 "무응답" 이 아니라 "재지 못함" 인데,
+    liveness 는 둘을 구분하지 않으므로 `first_hop_alive` 가 False 로 나온다.
+    그 값을 그대로 요약문에 옮기면 나가지도 않은 패킷이 "이 기기와 공유기
+    사이 구간 문제" 의 근거가 된다.
+
+    **ICMP 로 판정하는 망에서만 본다.** ARP 로 판정하는 망의 `alive` 는
+    ping 결과에서 오지 않으므로, ping 이 실행되지 못한 것이 그 판정을
+    흐리지 않는다 — `_mixed_first_hop` 의 가드와 같은 이유다.
+
+    응답이 하나라도 있으면(다발의 일부 실패) 나간 발이 있었다는 뜻이므로
+    여기서 유보하지 않는다. 그쪽은 엇갈림·손실 문구가 맡는다.
+    """
+    if method != ICMP or not evidence.get("first_hop_errors"):
+        return False
+    received = evidence.get("first_hop_received")
+    if isinstance(received, int) and not isinstance(received, bool):
+        return received <= 0
+    return True
+
+
 def _likely(cur: Observation, ctx, state: Dict[str, Any],
             evidence: Optional[Dict[str, Any]] = None) -> str:
     """가장 그럴듯한 설명. 판정을 덮어쓰지 않고 요약문에만 쓴다.
@@ -231,6 +272,9 @@ def _likely(cur: Observation, ctx, state: Dict[str, Any],
     # 의 첫 홉 판정 요약문, 조사 결론(`investigate/playbooks.py`)과 같은 말이어야
     # 한다 — 같은 기계의 같은 주기를 셋이 다른 말로 부르면 안 된다.
     label = method_label(method)
+    if _first_hop_not_run(method, evidence or {}):
+        # 재지 못한 주기다. 어느 쪽으로도 단정하지 않는다.
+        return msg.WHY_FIRST_HOP_NOT_RUN
     if _mixed_first_hop(method, evidence or {}):
         return msg.WHY_FIRST_HOP_MIXED % label
     if alive is False:

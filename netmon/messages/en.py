@@ -155,6 +155,14 @@ FIRST_HOP_EVIDENCE_BURST_PLAIN = "First-hop evidence is %d concurrent ICMP probe
 # inflates the loss. That loss must not be read as network loss (the evidence
 # field `first_hop_errors` says what failed).
 FIRST_HOP_EVIDENCE_BURST_FAILED = "First-hop evidence is a concurrent ICMP burst - some probes failed to run, so the loss cannot be read as network loss (%d answered)."
+# When nothing answered and some probes failed to run, even the number of
+# packets that actually went out is unknown - "some" cannot be claimed (they
+# may all have failed), and the loss cannot be read as network loss.
+FIRST_HOP_EVIDENCE_BURST_NOT_RUN = "First-hop evidence is a concurrent ICMP burst - nothing answered and some probes failed to run, so whether any packet went out is unknown."
+# An ordinary (single) cycle where the ping command itself failed to run. The
+# collector leaves a singular `error` key and records reachable as False
+# (collect/link.collect). Nothing was measured about the first hop.
+FIRST_HOP_EVIDENCE_NOT_RUN = "The first-hop ping command failed to run, so the first hop was not measured this cycle."
 
 # The reason string from the provider. Quoted in a summary only on an exact
 # match against a fixed list - these strings carry public addresses and ports,
@@ -182,6 +190,9 @@ WHY_FIRST_HOP_OK = "first hop answered (by %s) — which leg is at fault cannot 
 # (collect/link.merge_probes), so a lost first probe reads as "silent" even
 # when the rest answered - which contradicts the loss figure next to it.
 WHY_FIRST_HOP_MIXED = "first hop answered only some probes (by %s) — which leg is at fault cannot be told from this observation alone"
+# The probe never ran. reachable stays False, but that means "not measured",
+# not "silent" - a packet that never went out cannot point at a leg.
+WHY_FIRST_HOP_NOT_RUN = "the first-hop probe failed to run — which leg is at fault cannot be told from this observation alone"
 WHY_UNKNOWN = "not enough evidence to tell"
 
 DETECTOR_ERROR = "Detector %s stopped with an exception: %s"
