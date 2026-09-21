@@ -136,10 +136,11 @@ DUR_UNDER_SECOND = "1초 미만"
 # 첫 홉 증거가 1발인지 다발인지. 다발 주기의 reachable·rtt_ms 는 첫 발
 # 기준이라(collect/link.merge_probes), 이 문장이 없으면 3발 중 2발 손실이
 # "첫 홉은 응답함" 뒤에 가려진다.
-FIRST_HOP_EVIDENCE_ONE = "첫 홉 증거는 1발 ping."
-# `ping_count` 를 올려 둔 주기. 명령 하나가 여러 발을 보내지만 macOS 는
-# 패킷 간격이 1초 고정이라 같은 순간의 측정이 아니다 — 다발과 구별한다.
-FIRST_HOP_EVIDENCE_SEQUENTIAL = "첫 홉 증거는 ping 명령 한 번 (응답 %d발, 1초 간격 연속 측정)."
+# 다발이 아닌 평소 주기. **발 수를 주장하지 않는다** — 관측에 남는 것은
+# 받은 수(`replies`)와 손실률뿐이고 보낸 수는 기록되지 않아서, 손실이 난
+# 주기(끊김 주기가 대개 그렇다)에는 몇 발을 보냈는지 알 수 없다.
+# 기본값은 1발이지만(config.ping_count) 설정으로 올릴 수 있다.
+FIRST_HOP_EVIDENCE_ONE_COMMAND = "첫 홉 증거는 ping 명령 한 번 — 동시 다발 측정이 아님(보낸 발 수는 관측에 없음)."
 FIRST_HOP_EVIDENCE_BURST = "첫 홉 증거는 동시 %d발 ping (응답 %d발, 손실 %.0f%%)."
 FIRST_HOP_EVIDENCE_BURST_PLAIN = "첫 홉 증거는 동시 %d발 ping."
 

@@ -143,10 +143,11 @@ DUR_UNDER_SECOND = "under 1 s"
 # Whether the first-hop evidence is one probe or a burst. In burst cycles
 # reachable/rtt_ms come from the first probe only (collect/link.merge_probes),
 # so without this sentence two losses out of three hide behind "first hop answered".
-FIRST_HOP_EVIDENCE_ONE = "First-hop evidence is a single ping."
-# A cycle with a raised ping_count. One command sends several packets, but
-# macOS spaces them one second apart - not a same-instant measurement.
-FIRST_HOP_EVIDENCE_SEQUENTIAL = "First-hop evidence is one ping command (%d answered, sent one second apart)."
+# An ordinary cycle, not a burst. **No packet count is claimed** - the
+# observation keeps the number answered and the loss, not the number sent,
+# so a lossy cycle (which is what a drop cycle usually is) cannot say how
+# many went out. The default is one (config.ping_count), but it is settable.
+FIRST_HOP_EVIDENCE_ONE_COMMAND = "First-hop evidence is one ping command, not a concurrent burst (the number of packets sent is not recorded)."
 FIRST_HOP_EVIDENCE_BURST = "First-hop evidence is %d concurrent pings (%d answered, %.0f%% loss)."
 FIRST_HOP_EVIDENCE_BURST_PLAIN = "First-hop evidence is %d concurrent pings."
 

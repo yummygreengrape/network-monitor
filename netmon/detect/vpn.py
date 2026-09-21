@@ -102,11 +102,17 @@ def _probe_evidence(cur: Observation) -> Dict[str, Any]:
     if not isinstance(gw, dict):
         return {"first_hop_probe_mode": "unmeasured"}
     if gw.get("mode") != "burst":
-        out: Dict[str, Any] = {"first_hop_probe_mode": "single"}
+        # 다발에 손실을 싣는 이유가 여기에도 같이 적용된다 — `ping_count` 를
+        # 올려 둔 주기는 몇 발이 빠졌는지가 요약문에 나오지 않으므로,
+        # 근거에서라도 읽을 수 있어야 한다.
+        single: Dict[str, Any] = {"first_hop_probe_mode": "single"}
         replies = gw.get("replies")
         if isinstance(replies, int) and not isinstance(replies, bool):
-            out["first_hop_replies"] = replies
-        return out
+            single["first_hop_replies"] = replies
+        loss = gw.get("loss_pct")
+        if isinstance(loss, (int, float)) and not isinstance(loss, bool):
+            single["first_hop_loss_pct"] = float(loss)
+        return single
     burst: Dict[str, Any] = {"first_hop_probe_mode": "burst",
                              "first_hop_concurrent": bool(gw.get("concurrent"))}
     for src, dst in (("sent", "first_hop_sent"), ("received", "first_hop_received")):
@@ -127,11 +133,11 @@ def _probe_phrase(evidence: Dict[str, Any]) -> str:
     """
     mode = evidence.get("first_hop_probe_mode")
     if mode == "single":
-        # `ping_count` 를 올려 둔 주기를 "1발" 이라고 적지 않는다.
-        replies = evidence.get("first_hop_replies")
-        if isinstance(replies, int) and replies > 1:
-            return msg.FIRST_HOP_EVIDENCE_SEQUENTIAL % replies
-        return msg.FIRST_HOP_EVIDENCE_ONE
+        # **발 수를 주장하지 않는다.** 관측에 남는 것은 받은 수와 손실률뿐이라
+        # (collect/link.parse_ping), `ping_count` 를 올려 둔 주기가 전부
+        # 손실되면 1발이었는지 5발이었는지 구분할 수 없다. 끊김 주기가 바로
+        # 그 경우다. 받은 수·손실률은 근거에 싣는다.
+        return msg.FIRST_HOP_EVIDENCE_ONE_COMMAND
     if mode != "burst":
         return ""
     sent = evidence.get("first_hop_sent")
@@ -162,10 +168,13 @@ def _quotable_reason(reason: Any) -> Optional[str]:
 def _mixed_first_hop(method: str, evidence: Dict[str, Any]) -> bool:
     """다발에서 일부만 응답했는가.
 
-    **ICMP 로 판정하는 네트워크에서만 본다.** 게이트웨이가 ICMP 에 응답하지
-    않아 ARP 로 판정하는 곳에서는 ICMP 손실이 장애의 증거가 아니다
-    (netmon/liveness.py). 그런 곳의 100% 손실까지 "엇갈림" 으로 적으면
-    거짓 신호가 매 주기 붙는다.
+    **ICMP 로 판정하기로 정해진 망에서만 본다.** 가드가 실제로 갈라내는
+    경우는 "ARP 로 판정하기로 정해진 망(`icmp_gw` False)인데 ICMP 가 일부만
+    응답한 주기" 다 — 그런 망은 게이트웨이가 ICMP 를 걸러내거나 속도 제한을
+    걸어 둔 곳이고(netmon/liveness.py 가 그래서 ARP 로 판정한다), 거기서
+    나오는 ICMP 손실은 장애의 증거가 아니다. 가드가 없으면 그 주기마다
+    "응답이 엇갈림" 이 정확한 설명("첫 홉은 응답함")을 밀어낸다.
+    100% 손실은 아래 `0 < received` 에서 이미 걸러지므로 이 가드와 무관하다.
     """
     if method != ICMP or evidence.get("first_hop_probe_mode") != "burst":
         return False

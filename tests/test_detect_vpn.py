@@ -22,20 +22,25 @@ ON = {"detect.vpn": True, "detect.quality": True, "detect.l2": True,
 PING_OUT = """PING 192.0.2.1 (192.0.2.1): 56 data bytes
 %s
 --- 192.0.2.1 ping statistics ---
-%d packets transmitted, %d packets received, 0.0%% packet loss
+%d packets transmitted, %d packets received, %.1f%% packet loss
 """
 
 
-def one_command(o, count=5, rtt=3.0):
+def one_command(o, sent=5, received=None, rtt=3.0):
     """`ping_count` 를 올려 둔 평소 주기의 첫 홉 관측.
 
     명령 하나로 여러 발을 보낸 결과다. 모양을 손으로 적지 않고 수집기의
     파서(`collect/link.parse_ping`)에 실제 ping 출력을 먹여 만든다 —
     합친 관측이 아니므로 `mode` 가 없다.
+
+    `received` 를 줄이면 손실이 난 주기가 된다. **끊김 주기가 대개 그쪽이고**,
+    그 결과에는 보낸 수가 남지 않는다(파서는 받은 수와 손실률만 읽는다).
     """
+    received = sent if received is None else received
     lines = "\n".join("64 bytes from 192.0.2.1: icmp_seq=%d ttl=64 time=%.1f ms"
-                       % (i, rtt) for i in range(count))
-    result = parse_ping(PING_OUT % (lines, count, count))
+                       % (i, rtt) for i in range(received))
+    loss = 100.0 * (sent - received) / sent if sent else 0.0
+    result = parse_ping(PING_OUT % (lines, sent, received, loss))
     result["reachable"] = bool(result["replies"])
     o.data["link"]["results"]["gateway"] = result
     o.data["link"]["gateway_reachable"] = result["reachable"]
@@ -360,16 +365,23 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
         return by_kind(judge(obs(vpn=vpn_state("connected")), cur),
                        "VPN_DISCONNECTED")
 
-    def test_a_one_probe_cycle_says_it_is_one_probe(self):
+    def test_a_plain_cycle_says_one_command_without_claiming_a_count(self):
+        """다발이 아니라는 것만 적는다.
+
+        보낸 발 수는 관측에 없다 — `collect/link.parse_ping` 은 받은 수와
+        손실률만 읽는다. 기본 설정이 1발이라고 해서 요약문이 발 수를
+        주장하면, `ping_count` 를 올려 둔 기계에서 그 문장이 거짓이 된다.
+        """
         f = self._drop(obs(vpn=vpn_state("disconnected")))
-        self.assertIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_ONE_COMMAND, f.summary)
         self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
+        self.assertNotIn("first_hop_sent", f.evidence)
 
     def test_a_burst_cycle_quotes_the_loss(self):
         cur = burst(obs(vpn=vpn_state("disconnected")))
         f = self._drop(cur)
         self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST % (3, 1, 66.7), f.summary)
-        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE_COMMAND, f.summary)
         self.assertEqual(f.evidence["first_hop_probe_mode"], "burst")
         self.assertEqual(f.evidence["first_hop_sent"], 3)
         self.assertEqual(f.evidence["first_hop_received"], 1)
@@ -394,16 +406,32 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
         self.assertNotIn("mode", cur.data["link"]["results"]["gateway"])
         f = self._drop(cur)
         self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
-        # 5발을 보낸 주기를 "1발" 이라고 적지도, 동시 측정이라고 적지도 않는다.
-        self.assertIn(msg.FIRST_HOP_EVIDENCE_SEQUENTIAL % 5, f.summary)
-        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
-        self.assertNotIn("동시", f.summary)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_ONE_COMMAND, f.summary)
+        self.assertNotIn("first_hop_sent", f.evidence)
 
-    def test_the_default_one_packet_cycle_says_one_probe(self):
-        """기본 설정(`ping_count` 1)은 종전대로 1발 증거다 (AC-2 의 한계)."""
-        f = self._drop(obs(vpn=vpn_state("disconnected")))
-        self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
-        self.assertIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+    def test_a_lossy_cycle_does_not_claim_how_many_probes_went_out(self):
+        """손실이 난 주기에는 보낸 발 수를 알 수 없다 — 끊김 주기가 그쪽이다.
+
+        `ping_count` 5 에 전부 손실이면 결과에 남는 것은 "받은 수 0,
+        손실 100%" 뿐이라 1발이었는지 5발이었는지 구분할 수 없다. 그런
+        주기에 "1발 ping" 이라고 적으면 없는 근거를 주장하는 것이 된다.
+        """
+        for sent, received in ((5, 0), (5, 1), (1, 0)):
+            with self.subTest(sent=sent, received=received):
+                f = self._drop(one_command(obs(vpn=vpn_state("disconnected")),
+                                           sent=sent, received=received))
+                self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
+                self.assertIn(msg.FIRST_HOP_EVIDENCE_ONE_COMMAND, f.summary)
+                # 보낸 발 수를 주장하는 표현이 없다.
+                self.assertNotIn("1발", f.summary)
+                self.assertNotIn("%d발" % sent, f.summary)
+
+    def test_the_single_branch_keeps_the_loss_in_the_evidence(self):
+        """요약문이 발 수를 말하지 않으므로, 근거에서라도 읽을 수 있어야 한다."""
+        f = self._drop(one_command(obs(vpn=vpn_state("disconnected")),
+                                   sent=5, received=2))
+        self.assertEqual(f.evidence["first_hop_replies"], 2)
+        self.assertEqual(f.evidence["first_hop_loss_pct"], 60.0)
 
     def test_a_cycle_that_measured_nothing_claims_no_probe(self):
         """보내지도 않은 1발을 증거로 적지 않는다."""
@@ -412,7 +440,7 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
                 f = self._drop(unmeasured(obs(vpn=vpn_state("disconnected")),
                                           empty=empty))
                 self.assertEqual(f.evidence["first_hop_probe_mode"], "unmeasured")
-                self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+                self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE_COMMAND, f.summary)
                 self.assertNotIn("1발", f.summary)
                 self.assertNotIn("동시", f.summary)
 
@@ -443,8 +471,25 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
         self.assertIn(msg.WHY_FIRST_HOP_MIXED, f.summary)
         self.assertNotIn(msg.WHY_FIRST_HOP_OK, f.summary)
 
-    def test_an_icmp_silent_gateway_is_not_called_erratic(self):
-        """ARP 로 판정하는 네트워크에서는 ICMP 손실이 장애의 증거가 아니다."""
+    def test_partial_icmp_on_an_arp_judged_network_is_not_called_erratic(self):
+        """가드가 실제로 갈라내는 경로.
+
+        ARP 로 판정하기로 정해진 망(`icmp_gw` False)은 게이트웨이가 ICMP 를
+        걸러내거나 속도 제한을 건 곳이다. 거기서 3발 중 2발만 돌아온 것은
+        장애의 증거가 아니다 — 가드를 지우면 `0 < 2 < 3` 이라 "엇갈림" 이
+        정확한 설명("첫 홉은 응답함")을 밀어낸다.
+        """
+        cur = burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
+                    replies=(False, True, True))
+        f = by_kind(judge(obs(vpn=vpn_state("connected")), cur,
+                          state={"icmp_gw": False}), "VPN_DISCONNECTED")
+        self.assertEqual(f.evidence["first_hop_method"], "arp")
+        self.assertEqual(f.evidence["first_hop_received"], 2)
+        self.assertNotIn(msg.WHY_FIRST_HOP_MIXED, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_OK, f.summary)
+
+    def test_a_fully_lost_burst_on_an_arp_judged_network_is_not_erratic_either(self):
+        """전손실은 `0 < received` 에서 걸러진다 — 가드와 무관한 경로다."""
         cur = burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
                     replies=(False, False, False))
         f = by_kind(judge(obs(vpn=vpn_state("connected")), cur,
