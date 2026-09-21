@@ -148,8 +148,13 @@ DUR_UNDER_SECOND = "under 1 s"
 # so a lossy cycle (which is what a drop cycle usually is) cannot say how
 # many went out. The default is one (config.ping_count), but it is settable.
 FIRST_HOP_EVIDENCE_ONE_COMMAND = "First-hop evidence is one ping command, not a concurrent burst (the number of packets sent is not recorded)."
-FIRST_HOP_EVIDENCE_BURST = "First-hop evidence is %d concurrent pings (%d answered, %.0f%% loss)."
-FIRST_HOP_EVIDENCE_BURST_PLAIN = "First-hop evidence is %d concurrent pings."
+FIRST_HOP_EVIDENCE_BURST = "First-hop evidence is %d concurrent ICMP probes (%d answered, %.0f%% loss)."
+FIRST_HOP_EVIDENCE_BURST_PLAIN = "First-hop evidence is %d concurrent ICMP probes."
+# The burst "sent" count is the number of commands launched. If a command
+# fails or times out, no packet went out yet it still counts as sent, which
+# inflates the loss. That loss must not be read as network loss (the evidence
+# field `first_hop_errors` says what failed).
+FIRST_HOP_EVIDENCE_BURST_FAILED = "First-hop evidence is a concurrent ICMP burst - some probes failed to run, so the loss cannot be read as network loss (%d answered)."
 
 # The reason string from the provider. Quoted in a summary only on an exact
 # match against a fixed list - these strings carry public addresses and ports,
@@ -161,14 +166,22 @@ VPN_PROVIDER_REASON = "Provider reason: %s."
 WHY_USER = "disconnected by the user"
 WHY_SLEEP = "sleep"
 WHY_MOVED = "network change"
-WHY_LINK = "first hop silent — problem between this device and the router"
+# What reachability was judged by. Must say the same thing as METHOD_LABEL in
+# netmon/detect/quality.py. On an ARP-judged network "first hop answered" can
+# sit next to 100% ICMP loss; without naming the basis that reads as a
+# contradiction.
+METHOD_ARP = "ARP resolution"
+METHOD_ICMP = "ICMP reply"
+METHOD_LINK = "link state"
+
+WHY_LINK = "first hop silent (by %s) — problem between this device and the router"
 # Only the fact that the first hop answered, matching how quality.cause_note
 # words the same amount of evidence.
-WHY_FIRST_HOP_OK = "first hop answered — which leg is at fault cannot be told from this observation alone"
+WHY_FIRST_HOP_OK = "first hop answered (by %s) — which leg is at fault cannot be told from this observation alone"
 # Only some probes of a burst came back. reachable follows the first probe
 # (collect/link.merge_probes), so a lost first probe reads as "silent" even
 # when the rest answered - which contradicts the loss figure next to it.
-WHY_FIRST_HOP_MIXED = "first hop answered only some probes — which leg is at fault cannot be told from this observation alone"
+WHY_FIRST_HOP_MIXED = "first hop answered only some probes (by %s) — which leg is at fault cannot be told from this observation alone"
 WHY_UNKNOWN = "not enough evidence to tell"
 
 DETECTOR_ERROR = "Detector %s stopped with an exception: %s"

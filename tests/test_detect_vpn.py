@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import unittest
 
+from netmon import messages
 from netmon import messages as msg
 from netmon import vpn as vpnmod
 from netmon.collect.link import merge_probes, parse_ping
@@ -62,7 +63,7 @@ def unmeasured(o, empty=False):
     return o
 
 
-def burst(o, replies=(True, False, False), rtt=3.0):
+def burst(o, replies=(True, False, False), rtt=3.0, failed=()):
     """다발 주기의 첫 홉 관측.
 
     모양을 손으로 적지 않고 **실제 생산자**(collect/link.merge_probes)를
@@ -71,6 +72,10 @@ def burst(o, replies=(True, False, False), rtt=3.0):
     """
     probes = [{"reachable": bool(r), "rtt_ms": rtt if r else None,
                "replies": 1 if r else 0} for r in replies]
+    # 명령 자체가 실패하거나 제한 시간을 넘긴 발. collect/link.collect 의
+    # 예외 처리가 이 모양을 만든다 — 패킷이 나가지 않았는데 보낸 것으로 센다.
+    for i in failed:
+        probes[i] = {"reachable": False, "error": "timed out"}
     o.data["link"]["results"]["gateway"] = merge_probes(probes)
     o.data["link"]["gateway_reachable"] = bool(replies[0])
     o.data["link"]["first_hop_probes"] = len(probes)
@@ -106,7 +111,7 @@ class TestDisconnect(unittest.TestCase):
         prev = obs(vpn=vpn_state("connected"), icmp_ok=True)
         cur = obs(vpn=vpn_state("disconnected"), icmp_ok=True)
         f = by_kind(judge(prev, cur), "VPN_DISCONNECTED")
-        self.assertIn(msg.WHY_FIRST_HOP_OK, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_OK % msg.METHOD_ICMP, f.summary)
         self.assertNotIn("터널 경로", f.summary)
         self.assertIs(f.evidence["first_hop_alive"], True)
 
@@ -114,7 +119,7 @@ class TestDisconnect(unittest.TestCase):
         prev = obs(vpn=vpn_state("connected"), icmp_ok=True, gw_mac=GW_MAC)
         cur = obs(vpn=vpn_state("disconnected"), icmp_ok=False, gw_mac=None)
         f = by_kind(judge(prev, cur), "VPN_DISCONNECTED")
-        self.assertIn(msg.WHY_LINK, f.summary)
+        self.assertIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
         self.assertIs(f.evidence["first_hop_alive"], False)
 
     def test_manual_disconnect_is_attributed_not_alarmed(self):
@@ -292,14 +297,14 @@ class TestRenegotiationIsNotCalledADrop(unittest.TestCase):
     def test_connecting_is_worded_as_renegotiation(self):
         f = by_kind(self._drop("connecting"), "VPN_DISCONNECTED")
         self.assertTrue(f.summary.startswith(
-            msg.VPN_RENEGOTIATING % ("warp", msg.WHY_FIRST_HOP_OK)), f.summary)
+            msg.VPN_RENEGOTIATING % ("warp", msg.WHY_FIRST_HOP_OK % msg.METHOD_ICMP)), f.summary)
         self.assertNotIn("연결 끊김", f.summary)
         self.assertEqual(f.evidence["provider_state"], "connecting")
 
     def test_a_real_disconnect_still_says_disconnected(self):
         f = by_kind(self._drop("disconnected"), "VPN_DISCONNECTED")
         self.assertTrue(f.summary.startswith(
-            msg.VPN_DISCONNECTED % ("warp", msg.WHY_FIRST_HOP_OK)), f.summary)
+            msg.VPN_DISCONNECTED % ("warp", msg.WHY_FIRST_HOP_OK % msg.METHOD_ICMP)), f.summary)
         self.assertEqual(f.evidence["provider_state"], "disconnected")
 
     def test_the_kind_and_severity_do_not_change(self):
@@ -430,7 +435,7 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
         """요약문이 발 수를 말하지 않으므로, 근거에서라도 읽을 수 있어야 한다."""
         f = self._drop(one_command(obs(vpn=vpn_state("disconnected")),
                                    sent=5, received=2))
-        self.assertEqual(f.evidence["first_hop_replies"], 2)
+        self.assertEqual(f.evidence["first_hop_received"], 2)
         self.assertEqual(f.evidence["first_hop_loss_pct"], 60.0)
 
     def test_a_cycle_that_measured_nothing_claims_no_probe(self):
@@ -455,21 +460,21 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
                              replies=(False, True, True)))
         self.assertIs(f.evidence["first_hop_alive"], False)
         self.assertEqual(f.evidence["first_hop_received"], 2)
-        self.assertIn(msg.WHY_FIRST_HOP_MIXED, f.summary)
-        self.assertNotIn(msg.WHY_LINK, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_MIXED % msg.METHOD_ICMP, f.summary)
+        self.assertNotIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
         self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST % (3, 2, 33.3), f.summary)
 
     def test_a_burst_that_lost_everything_still_names_the_local_leg(self):
         """증거가 어긋나지 않으면 종전 문장 그대로다."""
         f = self._drop(burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
                              replies=(False, False, False)))
-        self.assertIn(msg.WHY_LINK, f.summary)
+        self.assertIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
         self.assertEqual(f.evidence["first_hop_loss_pct"], 100.0)
 
     def test_a_partly_lost_burst_does_not_claim_the_first_hop_is_fine(self):
         f = self._drop(burst(obs(vpn=vpn_state("disconnected"))))
-        self.assertIn(msg.WHY_FIRST_HOP_MIXED, f.summary)
-        self.assertNotIn(msg.WHY_FIRST_HOP_OK, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_MIXED % msg.METHOD_ICMP, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_OK % msg.METHOD_ICMP, f.summary)
 
     def test_partial_icmp_on_an_arp_judged_network_is_not_called_erratic(self):
         """가드가 실제로 갈라내는 경로.
@@ -485,17 +490,74 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
                           state={"icmp_gw": False}), "VPN_DISCONNECTED")
         self.assertEqual(f.evidence["first_hop_method"], "arp")
         self.assertEqual(f.evidence["first_hop_received"], 2)
-        self.assertNotIn(msg.WHY_FIRST_HOP_MIXED, f.summary)
-        self.assertIn(msg.WHY_FIRST_HOP_OK, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_MIXED % msg.METHOD_ARP, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_OK % msg.METHOD_ARP, f.summary)
 
-    def test_a_fully_lost_burst_on_an_arp_judged_network_is_not_erratic_either(self):
-        """전손실은 `0 < received` 에서 걸러진다 — 가드와 무관한 경로다."""
+    def test_a_fully_lost_burst_on_an_arp_judged_network_names_its_basis(self):
+        """ICMP 가 전부 빠졌는데 "첫 홉은 응답함" 이라고 적는 주기.
+
+        ARP 로 판정하는 망에서는 실제로 그렇다. 판정 기준을 밝히지 않으면
+        바로 뒤에 붙는 "응답 0발, 손실 100%" 와 모순으로만 읽힌다.
+        전손실이라 `0 < received` 에 걸려 엇갈림 갈래로도 가지 않는다.
+        """
         cur = burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
                     replies=(False, False, False))
         f = by_kind(judge(obs(vpn=vpn_state("connected")), cur,
                           state={"icmp_gw": False}), "VPN_DISCONNECTED")
-        self.assertIn(msg.WHY_FIRST_HOP_OK, f.summary)
-        self.assertNotIn(msg.WHY_FIRST_HOP_MIXED, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_OK % msg.METHOD_ARP, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_MIXED % msg.METHOD_ARP, f.summary)
+        # 무엇으로 판정했고 무엇을 쟀는지가 한 문장 안에 함께 있다.
+        self.assertIn(msg.METHOD_ARP, f.summary)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST % (3, 0, 100.0), f.summary)
+        self.assertEqual(f.evidence["first_hop_method"], "arp")
+
+    def test_the_same_observation_reads_differently_by_judging_method(self):
+        """같은 관측, 다른 판정 기준 — 요약문이 그 차이를 드러낸다."""
+        def summary(icmp_gw):
+            cur = burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
+                        replies=(False, True, True))
+            return by_kind(judge(obs(vpn=vpn_state("connected")), cur,
+                                 state={"icmp_gw": icmp_gw}),
+                           "VPN_DISCONNECTED").summary
+        self.assertIn(msg.METHOD_ARP, summary(False))
+        self.assertIn(msg.METHOD_ICMP, summary(True))
+        self.assertNotEqual(summary(False), summary(True))
+
+    def test_the_method_labels_match_the_quality_detector(self):
+        """같은 기계의 같은 주기를 두 판정이 다른 말로 부르지 않는다."""
+        from netmon.detect.quality import METHOD_LABEL
+        self.assertEqual(
+            {k: messages.get(v, "ko") for k, v in
+             {"arp": "METHOD_ARP", "icmp": "METHOD_ICMP",
+              "link": "METHOD_LINK"}.items()},
+            METHOD_LABEL)
+
+    def test_probes_that_failed_to_run_are_not_reported_as_network_loss(self):
+        """다발의 "보낸 수" 는 띄운 명령 수다.
+
+        명령이 실패하거나 제한 시간을 넘기면 패킷이 나가지 않았는데도 손실로
+        셈된다. 그 손실률을 네트워크 손실처럼 적지 않고, 무엇이 실패했는지를
+        근거에 남긴다.
+        """
+        cur = burst(obs(vpn=vpn_state("disconnected")),
+                    replies=(True, False, False), failed=(1, 2))
+        f = self._drop(cur)
+        self.assertEqual(f.evidence["first_hop_errors"], ["timed out"])
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST_FAILED % 1, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_BURST % (3, 1, 66.7), f.summary)
+        # 셈 자체는 근거에 그대로 남는다 — 지우지 않고, 읽는 법만 밝힌다.
+        self.assertEqual(f.evidence["first_hop_loss_pct"], 66.7)
+
+    def test_both_branches_report_the_reply_count_under_one_key(self):
+        """single 과 burst 가 같은 뜻을 같은 키로 적는다."""
+        single = self._drop(one_command(obs(vpn=vpn_state("disconnected")),
+                                        sent=5, received=2))
+        multi = self._drop(burst(obs(vpn=vpn_state("disconnected"))))
+        for f in (single, multi):
+            self.assertIn("first_hop_received", f.evidence)
+            self.assertNotIn("first_hop_replies", f.evidence)
+        self.assertEqual(single.evidence["first_hop_received"], 2)
+        self.assertEqual(multi.evidence["first_hop_received"], 1)
 
 
 class TestTheKindSetIsFrozen(unittest.TestCase):

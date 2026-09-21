@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from .. import messages as msg
 from .. import wifi_security
-from ..liveness import ICMP, evaluate
+from ..liveness import ARP, ICMP, LINK, evaluate
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, QUALITY, SECURITY,
                      Finding, Observation)
 
@@ -106,9 +106,11 @@ def _probe_evidence(cur: Observation) -> Dict[str, Any]:
         # 올려 둔 주기는 몇 발이 빠졌는지가 요약문에 나오지 않으므로,
         # 근거에서라도 읽을 수 있어야 한다.
         single: Dict[str, Any] = {"first_hop_probe_mode": "single"}
+        # 받은 수는 다발과 **같은 키**로 적는다. 읽는 쪽이 갈래마다 다른
+        # 이름을 알아야 하면 증거를 훑는 코드가 한쪽을 빠뜨린다.
         replies = gw.get("replies")
         if isinstance(replies, int) and not isinstance(replies, bool):
-            single["first_hop_replies"] = replies
+            single["first_hop_received"] = replies
         loss = gw.get("loss_pct")
         if isinstance(loss, (int, float)) and not isinstance(loss, bool):
             single["first_hop_loss_pct"] = float(loss)
@@ -122,6 +124,13 @@ def _probe_evidence(cur: Observation) -> Dict[str, Any]:
     loss = gw.get("loss_pct")
     if isinstance(loss, (int, float)) and not isinstance(loss, bool):
         burst["first_hop_loss_pct"] = float(loss)
+    # 보낸 수는 **띄운 명령 수**다(collect/link.merge_probes). 명령이
+    # 실패하거나 제한 시간을 넘기면 패킷이 나가지 않았는데도 손실로 셈된다.
+    # 그 사실을 증거로 옮겨야 손실이 네트워크 탓인지 실행 실패 탓인지
+    # 가릴 수 있다.
+    errors = gw.get("errors")
+    if isinstance(errors, list) and errors:
+        burst["first_hop_errors"] = [str(e)[:80] for e in errors]
     return burst
 
 
@@ -144,10 +153,28 @@ def _probe_phrase(evidence: Dict[str, Any]) -> str:
     if not isinstance(sent, int):
         return ""
     received = evidence.get("first_hop_received")
+    if evidence.get("first_hop_errors"):
+        # 실행되지 못한 측정이 섞여 있으면 손실률을 네트워크 손실로 읽을 수
+        # 없다. 보낸 수도 주장하지 않는다 — 발 수를 모르면 말하지 않는다는
+        # 평소 주기(single) 기준과 같다.
+        if isinstance(received, int):
+            return msg.FIRST_HOP_EVIDENCE_BURST_FAILED % received
+        return ""
     loss = evidence.get("first_hop_loss_pct")
     if isinstance(received, int) and isinstance(loss, float):
         return msg.FIRST_HOP_EVIDENCE_BURST % (sent, received, loss)
     return msg.FIRST_HOP_EVIDENCE_BURST_PLAIN % sent
+
+
+# 도달성을 무엇으로 판정했는가. `netmon/detect/quality.py` 가 첫 홉 판정
+# 요약문에 언제나 붙이는 이름표와 같은 말을 쓴다 — 같은 기계의 같은 주기를
+# 두 판정이 다른 말로 부르면 안 된다.
+METHOD_LABELS = {ARP: "METHOD_ARP", ICMP: "METHOD_ICMP", LINK: "METHOD_LINK"}
+
+
+def _method_label(method: Any) -> str:
+    name = METHOD_LABELS.get(method)
+    return msg.get(name) if name else str(method)
 
 
 # 요약문에 그대로 인용해도 되는 공급자 사유. **정확히 일치할 때만** 쓴다.
@@ -211,15 +238,19 @@ def _likely(cur: Observation, ctx, state: Dict[str, Any],
     # 기준이라(AC-1b), 첫 발만 빠진 주기를 "첫 홉 무응답 — 이 기기와 공유기
     # 사이 구간 문제" 라고 적으면 바로 뒤에 붙는 "응답 2발, 손실 33%" 와
     # 어긋난다. 반대 방향이지만 이것도 근거를 넘어선 단정이다.
+    label = _method_label(method)
     if _mixed_first_hop(method, evidence or {}):
-        return msg.WHY_FIRST_HOP_MIXED
+        return msg.WHY_FIRST_HOP_MIXED % label
     if alive is False:
-        return msg.WHY_LINK
+        return msg.WHY_LINK % label
     if alive is True:
-        # 첫 홉이 응답했다는 **사실**까지만 적는다. 1발(또는 한 묶음) ICMP 가
+        # 첫 홉이 응답했다는 **사실**까지만 적고, 그것을 무엇으로 판정했는지
+        # 함께 적는다. ARP 로 판정하는 망에서는 같은 주기의 ICMP 가 100%
+        # 빠져 있을 수 있어, 기준을 밝히지 않으면 바로 뒤에 붙는 다발 숫자와
+        # 모순처럼 읽힌다. 1발(또는 한 묶음) ICMP 가
         # 돌아온 것으로는 로컬 구간과 터널 상대편 구간을 나눌 수 없다 —
         # 같은 증거량에서 quality.cause_note 는 "판별 불가" 라고 적는다.
-        return msg.WHY_FIRST_HOP_OK
+        return msg.WHY_FIRST_HOP_OK % label
     return msg.WHY_UNKNOWN
 
 

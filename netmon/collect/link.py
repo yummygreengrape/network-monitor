@@ -110,7 +110,8 @@ def first_hop_anomaly(prev_link: Optional[Dict[str, Any]] = None,
 
     같은 주기의 VPN 상태로는 켤 수 없다 — 수집 순서상 link 가 vpn 보다
     먼저 돈다 (netmon/engine.py). 그래서 한 주기(5초)만에 끝나는 끊김은
-    다발 측정이 켜지지 않고 첫 홉 증거가 종전과 같이 1발이다.
+    다발 측정이 켜지지 않고, 첫 홉 증거가 평소 주기와 같이 ping 명령 한
+    번뿐이다(보낸 발 수는 `ping_count` 설정에 달렸고 관측에 남지 않는다).
     """
     if (prev_link or {}).get("gateway_reachable") is False:
         return True

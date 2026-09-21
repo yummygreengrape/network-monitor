@@ -141,8 +141,13 @@ DUR_UNDER_SECOND = "1초 미만"
 # 주기(끊김 주기가 대개 그렇다)에는 몇 발을 보냈는지 알 수 없다.
 # 기본값은 1발이지만(config.ping_count) 설정으로 올릴 수 있다.
 FIRST_HOP_EVIDENCE_ONE_COMMAND = "첫 홉 증거는 ping 명령 한 번 — 동시 다발 측정이 아님(보낸 발 수는 관측에 없음)."
-FIRST_HOP_EVIDENCE_BURST = "첫 홉 증거는 동시 %d발 ping (응답 %d발, 손실 %.0f%%)."
-FIRST_HOP_EVIDENCE_BURST_PLAIN = "첫 홉 증거는 동시 %d발 ping."
+FIRST_HOP_EVIDENCE_BURST = "첫 홉 증거는 동시 %d발 ICMP (응답 %d발, 손실 %.0f%%)."
+FIRST_HOP_EVIDENCE_BURST_PLAIN = "첫 홉 증거는 동시 %d발 ICMP."
+# 다발의 "보낸 수" 는 띄운 명령 수다. 명령이 실패하거나 제한 시간을 넘기면
+# 패킷이 나가지 않았는데도 보낸 것으로 세어 손실률이 올라간다. 그때 손실률을
+# 네트워크 손실로 읽으면 안 된다 (근거의 `first_hop_errors` 가 무엇이
+# 실패했는지 담는다).
+FIRST_HOP_EVIDENCE_BURST_FAILED = "첫 홉 증거는 동시 다발 ICMP — 일부가 실행되지 못해 손실률을 네트워크 손실로 읽을 수 없음(응답 %d발)."
 
 # 공급자가 준 사유. **고정 목록과 정확히 일치할 때만** 요약문에 인용한다 —
 # 사유 문자열에는 공인 IP·포트가 들어 있고, 감싸지 않은 문자열은 내보낼 때도
@@ -153,14 +158,22 @@ VPN_PROVIDER_REASON = "공급자 사유: %s."
 WHY_USER = "사용자가 직접 끊음"
 WHY_SLEEP = "잠자기"
 WHY_MOVED = "네트워크 이동"
-WHY_LINK = "첫 홉 무응답 — 이 기기와 공유기 사이 구간 문제"
+# 도달성을 **무엇으로 판정했는가**. netmon/detect/quality.py 의 METHOD_LABEL
+# 과 같은 말이어야 한다(tests/test_detect_vpn.py 가 고정한다). 이 망이 ARP
+# 로 판정하는 곳이면 ICMP 손실 100% 와 "첫 홉은 응답함" 이 함께 나올 수
+# 있는데, 기준을 밝히지 않으면 읽는 사람에게는 그냥 모순으로 보인다.
+METHOD_ARP = "ARP 해석"
+METHOD_ICMP = "ICMP 응답"
+METHOD_LINK = "링크 상태"
+
+WHY_LINK = "첫 홉 무응답(%s 기준) — 이 기기와 공유기 사이 구간 문제"
 # 첫 홉이 응답했다는 사실까지만 적는다. 같은 증거량에서 quality.cause_note 가
 # "이 관측만으로 판별 불가" 라고 적는 것과 어투를 맞춘다.
-WHY_FIRST_HOP_OK = "첫 홉은 응답함 — 어느 구간 문제인지는 이 관측만으로 판별 불가"
+WHY_FIRST_HOP_OK = "첫 홉은 응답함(%s 기준) — 어느 구간 문제인지는 이 관측만으로 판별 불가"
 # 다발에서 일부만 응답한 경우. 판정이 읽는 reachable 은 첫 발 기준이라
 # (collect/link.merge_probes) 첫 발만 빠지면 "무응답" 으로 보이는데, 나머지
 # 발이 돌아온 주기를 그렇게 적으면 바로 뒤에 붙는 손실률과 어긋난다.
-WHY_FIRST_HOP_MIXED = "첫 홉 응답이 엇갈림 — 어느 구간 문제인지는 이 관측만으로 판별 불가"
+WHY_FIRST_HOP_MIXED = "첫 홉 응답이 엇갈림(%s 기준) — 어느 구간 문제인지는 이 관측만으로 판별 불가"
 WHY_UNKNOWN = "판단 근거 부족"
 
 DETECTOR_ERROR = "판정기 %s 예외로 중단: %s"

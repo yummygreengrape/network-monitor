@@ -905,7 +905,7 @@ class TestExplanationUsesTheSettlingWindow(unittest.TestCase):
         """
         from netmon import messages as msg
         f = self._drop(None)
-        self.assertIn(msg.WHY_FIRST_HOP_OK, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_OK % msg.METHOD_ICMP, f.summary)
         self.assertNotIn("터널 경로", f.summary)
         self.assertIsNone(f.attribution)
 
