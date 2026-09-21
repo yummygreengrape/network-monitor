@@ -235,7 +235,7 @@ class TestAnomalyHint(unittest.TestCase):
 
 
 class TestAnomalyHintFollowsTheLivenessMethod(unittest.TestCase):
-    """무응답 판정을 이 망의 판정 방법으로 본다 (QA-3, AC-2, DEV-1b).
+    """무응답 판정을 이 망의 판정 방법으로 본다 (QA-3, AC-2, DEV-6).
 
     ICMP 를 막아 둔 게이트웨이에서는 `gateway_reachable` 이 정상 상태에도
     매 주기 False 다. 그것을 이상 징후로 세면 아무 일도 없는데 주기마다
