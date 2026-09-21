@@ -142,6 +142,23 @@ def obs(
     return o
 
 
+def command_failed(o, error="timed out"):
+    """ping 명령 자체가 실행되지 못한 평소(single) 주기.
+
+    `collect/link.collect` 의 예외 처리가 남기는 모양 그대로다 — 결과에는
+    `reachable` False 와 **단수 키** `error` 뿐이고, 받은 수도 손실률도
+    없다. 이 `reachable` 은 "무응답" 이 아니라 "재지 못함" 이다.
+
+    끊김 요약문(tests/test_detect_vpn)과 조사 결론(tests/test_investigate)이
+    같은 주기를 같은 모양으로 보게 하려고 여기 둔다.
+    """
+    o.data["link"]["results"]["gateway"] = {"reachable": False, "error": error}
+    o.data["link"]["gateway_reachable"] = False
+    o.data["link"]["gateway_rtt_ms"] = None
+    o.data["link"]["first_hop_probes"] = 1
+    return o
+
+
 def vpn_state(state="connected", reason=None, provider="warp",
               mode=None, tunnel=None):
     return {provider: {"provider": provider, "state": state,

@@ -108,6 +108,29 @@ class TestEveryMessageRenders(unittest.TestCase):
         self.assertGreater(len(seen), 12, "판정 종류가 너무 적게 생성됐다: %s" % sorted(seen))
 
 
+class TestAFailedProbeIsNotCalledPartial(unittest.TestCase):
+    """실행 실패를 "일부" 로 적으면 나머지는 실행됐다는 뜻이 된다.
+
+    이 문구는 같은 문장에서 "나간 발이 있었는지 알 수 없음" 이라고 말한다.
+    실패 목록은 같은 문구끼리 합쳐지므로(collect/link.merge_probes) 몇 발이
+    실패했는지 셀 수 없고, 여기서 말할 수 있는 것은 "하나 이상 실행되지
+    못했다" 까지다.
+    """
+
+    KEY = "FIRST_HOP_EVIDENCE_BURST_NOT_RUN"
+
+    def test_korean_does_not_imply_the_rest_ran(self):
+        text = messages.get(self.KEY, "ko")
+        self.assertIn("실행되지 못한 측정이 있어", text)
+        for implies_the_rest_ran in ("섞여", "일부"):
+            self.assertNotIn(implies_the_rest_ran, text)
+
+    def test_english_says_at_least_one(self):
+        text = messages.get(self.KEY, "en")
+        self.assertIn("at least one probe failed to run", text)
+        self.assertNotIn("some probes", text)
+
+
 class TestLanguageSelection(unittest.TestCase):
     def tearDown(self):
         messages.set_language("ko")

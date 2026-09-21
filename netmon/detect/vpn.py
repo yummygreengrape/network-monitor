@@ -218,8 +218,12 @@ def _mixed_first_hop(method: str, evidence: Dict[str, Any]) -> bool:
     return 0 < received < sent
 
 
-def _first_hop_not_run(method: str, evidence: Dict[str, Any]) -> bool:
+def first_hop_not_run(method: str, evidence: Dict[str, Any]) -> bool:
     """이번 주기의 첫 홉 측정이 실행되지 못했는가.
+
+    **모듈 밖에서도 쓴다.** 조사 결론(investigate/playbooks)이 끊김마다
+    같은 판단을 해야 하는데, 규칙을 그쪽에 다시 적으면 두 판단이 갈린다 —
+    같은 끊김을 요약문은 유보하고 결론은 단정하는 상태가 바로 그렇게 났다.
 
     명령이 실행되지 못하면 수집기는 `reachable` 을 False 로 적는다
     (collect/link.collect). 그 False 는 "무응답" 이 아니라 "재지 못함" 인데,
@@ -272,7 +276,7 @@ def _likely(cur: Observation, ctx, state: Dict[str, Any],
     # 의 첫 홉 판정 요약문, 조사 결론(`investigate/playbooks.py`)과 같은 말이어야
     # 한다 — 같은 기계의 같은 주기를 셋이 다른 말로 부르면 안 된다.
     label = method_label(method)
-    if _first_hop_not_run(method, evidence or {}):
+    if first_hop_not_run(method, evidence or {}):
         # 재지 못한 주기다. 어느 쪽으로도 단정하지 않는다.
         return msg.WHY_FIRST_HOP_NOT_RUN
     if _mixed_first_hop(method, evidence or {}):

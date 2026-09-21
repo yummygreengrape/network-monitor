@@ -155,10 +155,15 @@ FIRST_HOP_EVIDENCE_BURST_PLAIN = "First-hop evidence is %d concurrent ICMP probe
 # inflates the loss. That loss must not be read as network loss (the evidence
 # field `first_hop_errors` says what failed).
 FIRST_HOP_EVIDENCE_BURST_FAILED = "First-hop evidence is a concurrent ICMP burst - some probes failed to run, so the loss cannot be read as network loss (%d answered)."
-# When nothing answered and some probes failed to run, even the number of
-# packets that actually went out is unknown - "some" cannot be claimed (they
-# may all have failed), and the loss cannot be read as network loss.
-FIRST_HOP_EVIDENCE_BURST_NOT_RUN = "First-hop evidence is a concurrent ICMP burst - nothing answered and some probes failed to run, so whether any packet went out is unknown."
+# When nothing answered and a probe failed to run, even the number of packets
+# that actually went out is unknown - "some" cannot be claimed (they may all
+# have failed), and the loss cannot be read as network loss.
+#
+# Not "some probes failed to run": that implies the rest did run, while the
+# same sentence says whether any packet went out is unknown. The failure list
+# collapses identical messages (collect/link.merge_probes), so all that can be
+# said is that at least one probe failed to run.
+FIRST_HOP_EVIDENCE_BURST_NOT_RUN = "First-hop evidence is a concurrent ICMP burst - nothing answered and at least one probe failed to run, so whether any packet went out is unknown."
 # An ordinary (single) cycle where the ping command itself failed to run. The
 # collector leaves a singular `error` key and records reachable as False
 # (collect/link.collect). Nothing was measured about the first hop.

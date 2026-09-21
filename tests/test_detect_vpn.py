@@ -14,7 +14,8 @@ from netmon import vpn as vpnmod
 from netmon.collect.link import merge_probes, parse_ping
 from netmon.detect import Context, attributions_for, network_key, run_all
 from netmon.detect import vpn as vpn_rules
-from tests.helpers import GW_MAC, by_kind, kinds, obs, vpn_state
+from tests.helpers import (GW_MAC, by_kind, command_failed, kinds, obs,
+                           vpn_state)
 
 ON = {"detect.vpn": True, "detect.quality": True, "detect.l2": True,
       "detect.dhcp": True, "detect.dns": True, "detect.route": True,
@@ -61,20 +62,6 @@ def unmeasured(o, empty=False):
     """
     o.data["link"] = ({} if empty else
                       {"targets": {}, "note": "측정 대상 없음 (게이트웨이 미확인)"})
-    return o
-
-
-def command_failed(o, error="timed out"):
-    """ping 명령 자체가 실행되지 못한 평소(single) 주기.
-
-    `collect/link.collect` 의 예외 처리가 남기는 모양 그대로다 — 결과에는
-    `reachable` False 와 **단수 키** `error` 뿐이고, 받은 수도 손실률도
-    없다. 이 `reachable` 은 "무응답" 이 아니라 "재지 못함" 이다.
-    """
-    o.data["link"]["results"]["gateway"] = {"reachable": False, "error": error}
-    o.data["link"]["gateway_reachable"] = False
-    o.data["link"]["gateway_rtt_ms"] = None
-    o.data["link"]["first_hop_probes"] = 1
     return o
 
 

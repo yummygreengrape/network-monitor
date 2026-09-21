@@ -291,8 +291,9 @@ class TestAnomalyHintFollowsTheLivenessMethod(unittest.TestCase):
     def test_while_calibrating_both_signals_failing_turns_it_on(self):
         """여기서는 `liveness.evaluate` 와 갈라진다 — 일부러 그렇다.
 
-        같은 입력에서 liveness 는 `link_active` 까지 보고 판정을 보류하지만
-        (None), 다발 판단은 보류하지 않고 재 본다. 측정을 늘리는 쪽이라 판정을
+        같은 입력에서 liveness 는 `link_active` 까지 본다 — 그 값이 False 면
+        `(LINK, False)` 로 판정하고, 그 밖일 때만 보류한다(None). 다발 판단은
+        어느 쪽이든 보류하지 않고 재 본다. 측정을 늘리는 쪽이라 판정을
         만들지 않는다.
         """
         self.assertTrue(self.hint(self.ICMP_SILENT, self.ARP_GONE, liveness.UNKNOWN))
