@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from .. import messages as msg
 from .. import wifi_security
-from ..liveness import evaluate
+from ..liveness import ICMP, evaluate
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, QUALITY, SECURITY,
                      Finding, Observation)
 
@@ -81,41 +81,59 @@ def _down_reason(cur: Observation, ctx, state: Dict[str, Any]) -> Dict[str, Any]
 
 
 def _probe_evidence(cur: Observation) -> Dict[str, Any]:
-    """첫 홉 증거가 1발인가 다발인가.
+    """첫 홉 증거가 1발인가, 다발인가, 아예 없는가.
 
-    **판별은 `mode` 로 한다.** `link.first_hop_probes` 는 띄운 ping 명령의
-    수라서 `ping_count` 를 올려 둔 설정에서는 다발이 아닌 주기에도 1 보다
-    크다. 다발로 합친 관측만 스스로 `mode="burst"` 를 적는다
-    (collect/link.merge_probes).
+    **판별은 합친 관측의 `mode` 로 한다.** `link.first_hop_probes` 는 이번
+    주기에 띄우려 한 ping **명령**의 수이고(collect/link.collect), 실제로
+    보낸 발 수와 그것들이 하나로 합쳐졌는지는 결과 쪽이 적는다
+    (`mode`·`sent`·`loss_pct` 는 collect/link.merge_probes 만 만든다).
+    손실률도 합친 관측에만 있으므로 근거를 그쪽으로 통일한다.
+
+    **재지 않은 주기를 1발로 세지 않는다.** 게이트웨이를 못 찾으면 수집기가
+    `results` 를 아예 만들지 않고, 수집이 실패하면 link 블록이 비어 있다.
+    그때 "1발 ping" 이라고 적으면 보내지도 않은 측정을 증거로 내세우게 된다.
 
     다발 주기의 `reachable`·`rtt_ms` 는 **첫 발 기준**이므로(AC-1b), 손실
     수를 함께 남기지 않으면 3발 중 2발이 빠진 주기도 "첫 홉은 응답함" 으로만
     남는다.
     """
-    results = cur.get("link", "results") or {}
+    results = cur.get("link", "results")
     gw = results.get("gateway") if isinstance(results, dict) else None
-    if not isinstance(gw, dict) or gw.get("mode") != "burst":
-        return {"first_hop_probe_mode": "single"}
-    out: Dict[str, Any] = {"first_hop_probe_mode": "burst",
-                           "first_hop_concurrent": bool(gw.get("concurrent"))}
+    if not isinstance(gw, dict):
+        return {"first_hop_probe_mode": "unmeasured"}
+    if gw.get("mode") != "burst":
+        out: Dict[str, Any] = {"first_hop_probe_mode": "single"}
+        replies = gw.get("replies")
+        if isinstance(replies, int) and not isinstance(replies, bool):
+            out["first_hop_replies"] = replies
+        return out
+    burst: Dict[str, Any] = {"first_hop_probe_mode": "burst",
+                             "first_hop_concurrent": bool(gw.get("concurrent"))}
     for src, dst in (("sent", "first_hop_sent"), ("received", "first_hop_received")):
         value = gw.get(src)
         if isinstance(value, int) and not isinstance(value, bool):
-            out[dst] = value
+            burst[dst] = value
     loss = gw.get("loss_pct")
     if isinstance(loss, (int, float)) and not isinstance(loss, bool):
-        out["first_hop_loss_pct"] = float(loss)
-    return out
+        burst["first_hop_loss_pct"] = float(loss)
+    return burst
 
 
 def _probe_phrase(evidence: Dict[str, Any]) -> str:
     """첫 홉 증거의 성격을 요약문에 드러내는 한 문장.
 
-    다발인데 발 수를 읽지 못하면 아무 말도 하지 않는다 — 모르는 것을 1발로
-    적으면 증거가 실제보다 약해 보인다.
+    측정하지 않은 주기와, 다발인데 발 수를 읽지 못한 경우에는 아무 말도
+    하지 않는다 — 없는 증거를 적거나, 모르는 것을 1발로 적지 않는다.
     """
-    if evidence.get("first_hop_probe_mode") != "burst":
+    mode = evidence.get("first_hop_probe_mode")
+    if mode == "single":
+        # `ping_count` 를 올려 둔 주기를 "1발" 이라고 적지 않는다.
+        replies = evidence.get("first_hop_replies")
+        if isinstance(replies, int) and replies > 1:
+            return msg.FIRST_HOP_EVIDENCE_SEQUENTIAL % replies
         return msg.FIRST_HOP_EVIDENCE_ONE
+    if mode != "burst":
+        return ""
     sent = evidence.get("first_hop_sent")
     if not isinstance(sent, int):
         return ""
@@ -141,7 +159,25 @@ def _quotable_reason(reason: Any) -> Optional[str]:
     return text if text in QUOTABLE_REASONS else None
 
 
-def _likely(cur: Observation, ctx, state: Dict[str, Any]) -> str:
+def _mixed_first_hop(method: str, evidence: Dict[str, Any]) -> bool:
+    """다발에서 일부만 응답했는가.
+
+    **ICMP 로 판정하는 네트워크에서만 본다.** 게이트웨이가 ICMP 에 응답하지
+    않아 ARP 로 판정하는 곳에서는 ICMP 손실이 장애의 증거가 아니다
+    (netmon/liveness.py). 그런 곳의 100% 손실까지 "엇갈림" 으로 적으면
+    거짓 신호가 매 주기 붙는다.
+    """
+    if method != ICMP or evidence.get("first_hop_probe_mode") != "burst":
+        return False
+    sent = evidence.get("first_hop_sent")
+    received = evidence.get("first_hop_received")
+    if not isinstance(sent, int) or not isinstance(received, int):
+        return False
+    return 0 < received < sent
+
+
+def _likely(cur: Observation, ctx, state: Dict[str, Any],
+            evidence: Optional[Dict[str, Any]] = None) -> str:
     """가장 그럴듯한 설명. 판정을 덮어쓰지 않고 요약문에만 쓴다.
 
     **안정화 창까지 본다.** VPN 상태 변화는 깨어난 그 주기가 아니라 다음
@@ -161,7 +197,13 @@ def _likely(cur: Observation, ctx, state: Dict[str, Any]) -> str:
         return msg.WHY_MOVED
     if ctx.settling == "link_restart":
         return msg.WHY_LINK_BACK
-    _, alive = evaluate(cur, ctx.state)
+    method, alive = evaluate(cur, ctx.state)
+    # 다발이 엇갈리면 어느 쪽으로도 단정하지 않는다. 판정이 읽는 값은 첫 발
+    # 기준이라(AC-1b), 첫 발만 빠진 주기를 "첫 홉 무응답 — 이 기기와 공유기
+    # 사이 구간 문제" 라고 적으면 바로 뒤에 붙는 "응답 2발, 손실 33%" 와
+    # 어긋난다. 반대 방향이지만 이것도 근거를 넘어선 단정이다.
+    if _mixed_first_hop(method, evidence or {}):
+        return msg.WHY_FIRST_HOP_MIXED
     if alive is False:
         return msg.WHY_LINK
     if alive is True:
@@ -395,7 +437,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                            else ctx.quality_attribution() or ctx.settling)
             evidence = _down_reason(cur, ctx, cur_st)
             evidence["provider"] = name
-            likely = _likely(cur, ctx, cur_st)
+            likely = _likely(cur, ctx, cur_st, evidence)
 
             out.append(Finding(
                 axis=QUALITY, kind="VPN_DISCONNECTED",

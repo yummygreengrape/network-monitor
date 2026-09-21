@@ -137,6 +137,9 @@ DUR_UNDER_SECOND = "1초 미만"
 # 기준이라(collect/link.merge_probes), 이 문장이 없으면 3발 중 2발 손실이
 # "첫 홉은 응답함" 뒤에 가려진다.
 FIRST_HOP_EVIDENCE_ONE = "첫 홉 증거는 1발 ping."
+# `ping_count` 를 올려 둔 주기. 명령 하나가 여러 발을 보내지만 macOS 는
+# 패킷 간격이 1초 고정이라 같은 순간의 측정이 아니다 — 다발과 구별한다.
+FIRST_HOP_EVIDENCE_SEQUENTIAL = "첫 홉 증거는 ping 명령 한 번 (응답 %d발, 1초 간격 연속 측정)."
 FIRST_HOP_EVIDENCE_BURST = "첫 홉 증거는 동시 %d발 ping (응답 %d발, 손실 %.0f%%)."
 FIRST_HOP_EVIDENCE_BURST_PLAIN = "첫 홉 증거는 동시 %d발 ping."
 
@@ -153,6 +156,10 @@ WHY_LINK = "첫 홉 무응답 — 이 기기와 공유기 사이 구간 문제"
 # 첫 홉이 응답했다는 사실까지만 적는다. 같은 증거량에서 quality.cause_note 가
 # "이 관측만으로 판별 불가" 라고 적는 것과 어투를 맞춘다.
 WHY_FIRST_HOP_OK = "첫 홉은 응답함 — 어느 구간 문제인지는 이 관측만으로 판별 불가"
+# 다발에서 일부만 응답한 경우. 판정이 읽는 reachable 은 첫 발 기준이라
+# (collect/link.merge_probes) 첫 발만 빠지면 "무응답" 으로 보이는데, 나머지
+# 발이 돌아온 주기를 그렇게 적으면 바로 뒤에 붙는 손실률과 어긋난다.
+WHY_FIRST_HOP_MIXED = "첫 홉 응답이 엇갈림 — 어느 구간 문제인지는 이 관측만으로 판별 불가"
 WHY_UNKNOWN = "판단 근거 부족"
 
 DETECTOR_ERROR = "판정기 %s 예외로 중단: %s"

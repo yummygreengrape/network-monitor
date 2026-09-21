@@ -144,6 +144,9 @@ DUR_UNDER_SECOND = "under 1 s"
 # reachable/rtt_ms come from the first probe only (collect/link.merge_probes),
 # so without this sentence two losses out of three hide behind "first hop answered".
 FIRST_HOP_EVIDENCE_ONE = "First-hop evidence is a single ping."
+# A cycle with a raised ping_count. One command sends several packets, but
+# macOS spaces them one second apart - not a same-instant measurement.
+FIRST_HOP_EVIDENCE_SEQUENTIAL = "First-hop evidence is one ping command (%d answered, sent one second apart)."
 FIRST_HOP_EVIDENCE_BURST = "First-hop evidence is %d concurrent pings (%d answered, %.0f%% loss)."
 FIRST_HOP_EVIDENCE_BURST_PLAIN = "First-hop evidence is %d concurrent pings."
 
@@ -161,6 +164,10 @@ WHY_LINK = "first hop silent — problem between this device and the router"
 # Only the fact that the first hop answered, matching how quality.cause_note
 # words the same amount of evidence.
 WHY_FIRST_HOP_OK = "first hop answered — which leg is at fault cannot be told from this observation alone"
+# Only some probes of a burst came back. reachable follows the first probe
+# (collect/link.merge_probes), so a lost first probe reads as "silent" even
+# when the rest answered - which contradicts the loss figure next to it.
+WHY_FIRST_HOP_MIXED = "first hop answered only some probes — which leg is at fault cannot be told from this observation alone"
 WHY_UNKNOWN = "not enough evidence to tell"
 
 DETECTOR_ERROR = "Detector %s stopped with an exception: %s"

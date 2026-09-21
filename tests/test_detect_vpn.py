@@ -9,7 +9,7 @@ import unittest
 
 from netmon import messages as msg
 from netmon import vpn as vpnmod
-from netmon.collect.link import merge_probes
+from netmon.collect.link import merge_probes, parse_ping
 from netmon.detect import Context, attributions_for, network_key, run_all
 from netmon.detect import vpn as vpn_rules
 from tests.helpers import GW_MAC, by_kind, kinds, obs, vpn_state
@@ -17,6 +17,44 @@ from tests.helpers import GW_MAC, by_kind, kinds, obs, vpn_state
 ON = {"detect.vpn": True, "detect.quality": True, "detect.l2": True,
       "detect.dhcp": True, "detect.dns": True, "detect.route": True,
       "detect.wifi": True}
+
+
+PING_OUT = """PING 192.0.2.1 (192.0.2.1): 56 data bytes
+%s
+--- 192.0.2.1 ping statistics ---
+%d packets transmitted, %d packets received, 0.0%% packet loss
+"""
+
+
+def one_command(o, count=5, rtt=3.0):
+    """`ping_count` 를 올려 둔 평소 주기의 첫 홉 관측.
+
+    명령 하나로 여러 발을 보낸 결과다. 모양을 손으로 적지 않고 수집기의
+    파서(`collect/link.parse_ping`)에 실제 ping 출력을 먹여 만든다 —
+    합친 관측이 아니므로 `mode` 가 없다.
+    """
+    lines = "\n".join("64 bytes from 192.0.2.1: icmp_seq=%d ttl=64 time=%.1f ms"
+                       % (i, rtt) for i in range(count))
+    result = parse_ping(PING_OUT % (lines, count, count))
+    result["reachable"] = bool(result["replies"])
+    o.data["link"]["results"]["gateway"] = result
+    o.data["link"]["gateway_reachable"] = result["reachable"]
+    # 수집기는 명령 수를 적는다. 평소 주기에는 몇 발을 보냈든 1 이다.
+    o.data["link"]["first_hop_probes"] = 1
+    return o
+
+
+def unmeasured(o, empty=False):
+    """첫 홉을 한 번도 재지 않은 주기.
+
+    게이트웨이를 못 찾으면 수집기가 `results` 를 만들지 않고
+    (collect/link.collect 의 "측정 대상 없음" 반환), 수집이 실패하면 블록
+    자체가 비어 있다. `tests.helpers.obs()` 는 `gateway=None` 이어도
+    `results["gateway"]` 를 채우므로 그 픽스처를 지나쳐 직접 만든다.
+    """
+    o.data["link"] = ({} if empty else
+                      {"targets": {}, "note": "측정 대상 없음 (게이트웨이 미확인)"})
+    return o
 
 
 def burst(o, replies=(True, False, False), rtt=3.0):
@@ -345,13 +383,74 @@ class TestFirstHopEvidenceIsSingleOrBurst(unittest.TestCase):
         self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST % (3, 3, 0.0), f.summary)
         self.assertEqual(f.evidence["first_hop_loss_pct"], 0.0)
 
-    def test_ping_count_alone_does_not_make_it_a_burst(self):
-        """`first_hop_probes` 는 띄운 명령 수다. 다발 여부는 `mode` 로 본다."""
-        cur = obs(vpn=vpn_state("disconnected"))
-        cur.data["link"]["first_hop_probes"] = 3
+    def test_a_raised_ping_count_is_not_a_burst(self):
+        """명령 하나로 5발을 보낸 평소 주기는 다발이 아니다.
+
+        합친 관측이 아니라 `mode` 가 없고, 같은 순간의 동시 측정도 아니다.
+        `first_hop_probes` 는 이때도 1 이다(명령 수).
+        """
+        cur = one_command(obs(vpn=vpn_state("disconnected")))
+        self.assertEqual(cur.data["link"]["results"]["gateway"]["replies"], 5)
+        self.assertNotIn("mode", cur.data["link"]["results"]["gateway"])
         f = self._drop(cur)
         self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
+        # 5발을 보낸 주기를 "1발" 이라고 적지도, 동시 측정이라고 적지도 않는다.
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_SEQUENTIAL % 5, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+        self.assertNotIn("동시", f.summary)
+
+    def test_the_default_one_packet_cycle_says_one_probe(self):
+        """기본 설정(`ping_count` 1)은 종전대로 1발 증거다 (AC-2 의 한계)."""
+        f = self._drop(obs(vpn=vpn_state("disconnected")))
+        self.assertEqual(f.evidence["first_hop_probe_mode"], "single")
         self.assertIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+
+    def test_a_cycle_that_measured_nothing_claims_no_probe(self):
+        """보내지도 않은 1발을 증거로 적지 않는다."""
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                f = self._drop(unmeasured(obs(vpn=vpn_state("disconnected")),
+                                          empty=empty))
+                self.assertEqual(f.evidence["first_hop_probe_mode"], "unmeasured")
+                self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE, f.summary)
+                self.assertNotIn("1발", f.summary)
+                self.assertNotIn("동시", f.summary)
+
+    def test_only_the_first_probe_lost_does_not_accuse_the_local_leg(self):
+        """첫 발만 빠진 주기를 "첫 홉 무응답" 이라고 적지 않는다.
+
+        판정이 읽는 `reachable` 은 첫 발 기준이라(AC-1b) 이 주기의
+        `first_hop_alive` 는 False 다. 그 값은 그대로 두고, 요약문만
+        증거와 어긋나지 않게 유보한다.
+        """
+        f = self._drop(burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
+                             replies=(False, True, True)))
+        self.assertIs(f.evidence["first_hop_alive"], False)
+        self.assertEqual(f.evidence["first_hop_received"], 2)
+        self.assertIn(msg.WHY_FIRST_HOP_MIXED, f.summary)
+        self.assertNotIn(msg.WHY_LINK, f.summary)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST % (3, 2, 33.3), f.summary)
+
+    def test_a_burst_that_lost_everything_still_names_the_local_leg(self):
+        """증거가 어긋나지 않으면 종전 문장 그대로다."""
+        f = self._drop(burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
+                             replies=(False, False, False)))
+        self.assertIn(msg.WHY_LINK, f.summary)
+        self.assertEqual(f.evidence["first_hop_loss_pct"], 100.0)
+
+    def test_a_partly_lost_burst_does_not_claim_the_first_hop_is_fine(self):
+        f = self._drop(burst(obs(vpn=vpn_state("disconnected"))))
+        self.assertIn(msg.WHY_FIRST_HOP_MIXED, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_OK, f.summary)
+
+    def test_an_icmp_silent_gateway_is_not_called_erratic(self):
+        """ARP 로 판정하는 네트워크에서는 ICMP 손실이 장애의 증거가 아니다."""
+        cur = burst(obs(vpn=vpn_state("disconnected"), icmp_ok=False),
+                    replies=(False, False, False))
+        f = by_kind(judge(obs(vpn=vpn_state("connected")), cur,
+                          state={"icmp_gw": False}), "VPN_DISCONNECTED")
+        self.assertIn(msg.WHY_FIRST_HOP_OK, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_MIXED, f.summary)
 
 
 class TestTheKindSetIsFrozen(unittest.TestCase):
