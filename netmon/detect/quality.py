@@ -67,7 +67,11 @@ def measurement_gap(elapsed: float, interval: float) -> Finding:
         confidence=CONFIRMED, severity=INFO_SEV,
         summary=msg.MEASUREMENT_GAP % elapsed,
         evidence={"elapsed_s": round(elapsed, 1), "interval_s": interval},
-        attribution="sleep",
+        # **귀속을 달지 않는다.** 예전에는 "sleep" 을 상수로 박았는데, 그것은
+        # 어떤 관측에서도 나오지 않은 단정이었고(문장은 "잠자기 또는 프로세스
+        # 중단" 으로 유보하는데 기계가 읽는 칸만 단정), 귀속이 붙은 판정은
+        # 콘솔에서 억제되어 측정이 비었다는 사실이 화면에 한 번도 보이지
+        # 않았다 (2026-09-21 확인: agent.out.log 에 공백 줄 0건).
     )
 
 
