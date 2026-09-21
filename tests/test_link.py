@@ -188,10 +188,11 @@ class TestFirstHopNormalCycle(unittest.TestCase):
 
 
 class TestAnomalyHint(unittest.TestCase):
-    """다발을 켜는 세 조건 (QA-3, AC-2)."""
+    """다발을 켜는 조건 (QA-3, AC-2)."""
 
     OK_LINK = {"gateway_reachable": True}
     CONNECTED = {"warp": {"state": "connected"}}
+    OFF = {"warp": {"state": "disconnected"}}
 
     def test_quiet_cycle_is_not_an_anomaly(self):
         self.assertFalse(first_hop.first_hop_anomaly(
@@ -201,7 +202,13 @@ class TestAnomalyHint(unittest.TestCase):
         self.assertTrue(first_hop.first_hop_anomaly(
             {"gateway_reachable": False}, self.CONNECTED, self.CONNECTED))
 
-    def test_previous_vpn_not_connected(self):
+    def test_a_provider_left_switched_off_never_turns_it_on(self):
+        """설치만 해 두고 꺼 둔 공급자 때문에 매 주기 3발이 나가면 안 된다."""
+        for _ in range(5):
+            self.assertFalse(first_hop.first_hop_anomaly(
+                self.OK_LINK, self.OFF, self.OFF))
+
+    def test_a_disconnection_that_just_happened(self):
         self.assertTrue(first_hop.first_hop_anomaly(
             self.OK_LINK, {"warp": {"state": "connecting"}}, self.CONNECTED))
 
@@ -210,10 +217,15 @@ class TestAnomalyHint(unittest.TestCase):
         self.assertTrue(first_hop.first_hop_anomaly(
             self.OK_LINK, self.CONNECTED, {"warp": {"state": "connecting"}}))
 
+    def test_a_provider_appearing_or_vanishing_counts_as_a_change(self):
+        self.assertTrue(first_hop.first_hop_anomaly(self.OK_LINK, self.CONNECTED, {}))
+        self.assertTrue(first_hop.first_hop_anomaly(self.OK_LINK, {}, self.CONNECTED))
+
     def test_no_vpn_block_is_not_an_anomaly(self):
         """VPN 감시를 끈 사람에게 없던 패킷이 생기지 않는다."""
         self.assertFalse(first_hop.first_hop_anomaly(self.OK_LINK, None, None))
         self.assertFalse(first_hop.first_hop_anomaly(None, None, None))
+        self.assertFalse(first_hop.first_hop_anomaly(self.OK_LINK, None, {}))
 
     def test_unmeasured_first_hop_is_not_called_silent(self):
         """측정하지 않은 것(None)은 무응답이 아니다."""
@@ -243,7 +255,6 @@ class TestBurstCycle(unittest.TestCase):
         self.assertEqual(g["loss_pct"], 33.3)
         self.assertEqual(g["rtt_min_ms"], 10.0)
         self.assertEqual(g["rtt_max_ms"], 30.0)
-        self.assertEqual(g["rtt_ms"], 20.0)
         self.assertTrue(g["reachable"])
 
     def test_evidence_says_the_probes_were_simultaneous(self):
@@ -302,12 +313,21 @@ class TestBurstFitsTheCycle(unittest.TestCase):
             self.assertEqual(c["timeout"], first_hop.PING_TIMEOUT_SECONDS)
 
     def test_three_probes_take_about_as_long_as_one(self):
-        """가짜 run 으로 소요를 고정해서 잰다. 직렬이면 세 배가 된다."""
-        delay = 0.2
+        """가짜 run 으로 소요를 고정해서 잰다.
+
+        판정은 벽시계가 아니라 Barrier 로 한다 — 세 발이 모두 도착해야 풀리므로,
+        직렬로 돌면 barrier 가 깨져 응답 수가 모자란다. 부하가 큰 기계에서
+        시간 비교만으로 판정하면 흔들린다.
+        """
+        delay = 0.1
+        fake = FakeRun(delay=delay, barrier=threading.Barrier(3))
         t0 = time.monotonic()
-        collect_with(FakeRun(delay=delay), first_hop_burst=True, interval=5)
+        g = collect_with(fake, first_hop_burst=True,
+                         interval=5)["results"]["gateway"]
         spent = time.monotonic() - t0
-        self.assertLess(spent, delay * 2)
+        self.assertEqual(g["received"], 3)        # 셋이 같은 순간에 돌았다
+        self.assertNotIn("errors", g)
+        self.assertLess(spent, delay * 3)         # 직렬이면 최소 세 배다
 
     def test_no_burst_while_the_cycle_is_short(self):
         """조사 중 2~3초 주기에서는 다발을 하지 않는다."""
@@ -334,7 +354,8 @@ class TestBurstPartialFailure(unittest.TestCase):
         g = self.burst(FakeRun(outs=[LOST, reply_with(9.0), LOST]))["results"]["gateway"]
         self.assertEqual((g["sent"], g["received"]), (3, 1))
         self.assertEqual(g["loss_pct"], 66.7)
-        self.assertTrue(g["reachable"])
+        self.assertFalse(g["reachable"])          # 첫 발이 답하지 않았다
+        self.assertTrue(g["any_reachable"])       # 그래도 하나는 왔다 (증거)
 
     def test_nothing_answers(self):
         g = self.burst(FakeRun(outs=[LOST]))["results"]["gateway"]
@@ -430,6 +451,76 @@ class TestEngineRemembersTheLastTwoCycles(unittest.TestCase):
                            helpers.obs(gateway=None, icmp_ok=None,
                                        vpn=helpers.vpn_state("disconnected")))
         self.assertTrue(eng._burst_hint())
+
+
+class TestBurstDoesNotChangeExistingJudgements(unittest.TestCase):
+    """다발이 기존 판정을 바꾸지 않는다 (AC-1b).
+
+    `gateway_reachable`·`gateway_rtt_ms` 는 첫 홉 연속 실패 셈과 지연
+    기준선으로 흘러간다 (netmon/liveness.py, netmon/baseline.py).
+    여기서 값이 바뀌면 `FIRST_HOP_BRIEF_GAP` 이 전과 다르게 뜬다.
+    """
+
+    def burst(self, outs):
+        return collect_with(FakeRun(outs=outs), first_hop_burst=True, interval=5)
+
+    def test_reachability_follows_the_first_probe(self):
+        first_lost = self.burst([LOST, REPLY, REPLY])
+        self.assertFalse(first_lost["gateway_reachable"])
+        self.assertIsNone(first_lost["gateway_rtt_ms"])
+        first_ok = self.burst([reply_with(7.0), LOST, LOST])
+        self.assertTrue(first_ok["gateway_reachable"])
+        self.assertEqual(first_ok["gateway_rtt_ms"], 7.0)
+
+    def test_rtt_baseline_gets_the_first_probe_not_the_average(self):
+        """느린 두 발이 기준선을 끌어올리면 RTT_SPIKE 판정이 달라진다."""
+        out = self.burst([reply_with(10.0), reply_with(300.0), reply_with(300.0)])
+        self.assertEqual(out["gateway_rtt_ms"], 10.0)
+
+    def test_fail_streak_counts_the_same_as_a_single_shot_cycle(self):
+        """1/3 응답 주기가 연속 실패 셈을 초기화하지 않는다."""
+        from netmon import baseline
+
+        def streak(observation):
+            state = {"icmp_gw": True, "gw_fail_streak": 4}
+            return baseline.update_counters(state, observation, [], 5.0, 5.0)
+
+        partial = self.burst([LOST, reply_with(9.0), LOST])
+        burst_obs = helpers.obs(icmp_ok=None)
+        burst_obs.data["link"] = partial
+        single = helpers.obs(icmp_ok=False)
+        self.assertEqual(streak(burst_obs)["gw_fail_streak"],
+                         streak(single)["gw_fail_streak"])
+        self.assertEqual(streak(burst_obs)["gw_fail_streak"], 5)
+
+    def test_a_burst_whose_first_probe_answers_clears_the_streak_as_before(self):
+        from netmon import baseline
+
+        out = self.burst([reply_with(9.0), LOST, LOST])
+        o = helpers.obs(icmp_ok=None)
+        o.data["link"] = out
+        new = baseline.update_counters({"icmp_gw": True, "gw_fail_streak": 4},
+                                       o, [], 5.0, 5.0)
+        self.assertEqual(new["gw_fail_streak"], 0)
+        self.assertEqual(new["gw_fail_streak_prev"], 4)
+
+
+class TestPingCountInteraction(unittest.TestCase):
+    """`ping_count` 를 올려 둔 사람 (QA-13, AC-12)."""
+
+    def test_burst_never_sends_fewer_than_the_configured_count(self):
+        fake = FakeRun()
+        out = collect_with(fake, first_hop_burst=True, interval=5, ping_count=5)
+        self.assertEqual(len(fake.calls), 5)
+        for c in fake.calls:
+            self.assertEqual(c["argv"][3], "1")   # 다발은 1발씩 쪼개서 동시에
+        self.assertEqual(out["first_hop_probes"], 5)
+        self.assertEqual(out["results"]["gateway"]["sent"], 5)
+
+    def test_the_usual_three_when_the_count_is_the_default(self):
+        fake = FakeRun()
+        collect_with(fake, first_hop_burst=True, interval=5, ping_count=1)
+        self.assertEqual(len(fake.calls), 3)
 
 
 if __name__ == "__main__":

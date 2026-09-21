@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional
 
 from ..model import ident
 from ..util import OK, Capability, run
-from ..vpn import CONNECTED
 
 NAME = "link"
 
@@ -101,10 +100,13 @@ def first_hop_anomaly(prev_link: Optional[Dict[str, Any]] = None,
                       before_vpn: Optional[Dict[str, Any]] = None) -> bool:
     """이번 주기에 다발로 잴 만한 이상 징후가 **직전 주기**에 있었는가.
 
-    셋 중 하나면 참이다.
+    둘 중 하나면 참이다 (AC-2).
       - 직전 주기의 첫 홉이 무응답
-      - 직전 주기의 VPN 이 connected 가 아님
-      - 직전 주기에 VPN 상태가 바뀜 (직전 주기와 그 앞 주기의 비교)
+      - 직전 주기에 VPN 상태가 바뀌었다 (직전 주기와 그 앞 주기의 비교).
+        "connected 가 아니면서 그 앞과 다름" 은 이 조건에 포함된다.
+
+    **상태가 그대로면 켜지 않는다.** connected 가 아닌 것만으로 켜면,
+    설치만 해 두고 꺼 둔 공급자가 있는 사람에게 매 주기 3발이 나간다.
 
     같은 주기의 VPN 상태로는 켤 수 없다 — 수집 순서상 link 가 vpn 보다
     먼저 돈다 (netmon/engine.py). 그래서 한 주기(5초)만에 끝나는 끊김은
@@ -112,14 +114,11 @@ def first_hop_anomaly(prev_link: Optional[Dict[str, Any]] = None,
     """
     if (prev_link or {}).get("gateway_reachable") is False:
         return True
+    if before_vpn is None:
+        return False  # 비교할 앞 주기가 없다. 바뀌었다고 말할 수 없다.
     now = vpn_states(prev_vpn)
-    if any(state != CONNECTED for state in now.values()):
-        return True
-    if before_vpn is not None:
-        before = vpn_states(before_vpn)
-        if any(now.get(k) != before.get(k) for k in set(now) | set(before)):
-            return True
-    return False
+    before = vpn_states(before_vpn)
+    return any(now.get(k) != before.get(k) for k in set(now) | set(before))
 
 
 def burst_probes(ctx: Dict[str, Any]) -> int:
@@ -142,10 +141,17 @@ def burst_probes(ctx: Dict[str, Any]) -> int:
 def merge_probes(probes: List[Dict[str, Any]]) -> Dict[str, Any]:
     """동시에 띄운 1발 ping 들을 관측 하나로 합친다.
 
+    **판정이 보는 값(`reachable`·`rtt_ms`)은 첫 발 그대로다** (AC-1b).
+    3발 중 하나만 응답한 것을 "도달함" 으로 삼으면 첫 홉 연속 실패 셈
+    (`baseline.gw_fail_streak`)과 지연 기준선(`rtt_ewma`)이 1발 때와 달라져,
+    같은 네트워크에서 `FIRST_HOP_BRIEF_GAP`·`FIRST_HOP_UNREACHABLE` 이
+    전과 다르게 뜬다. 나머지 발은 **증거로만** 싣는다.
+
     보낸 수는 **실제로 띄운 개수**다. 명령이 실패했거나 제한 시간을 넘긴
     것도 보낸 것으로 세고 응답 없음으로 친다 — 그래야 손실률이 관측의
     범위(0~100) 안에 머문다.
     """
+    first = probes[0] if probes else {}
     sent = len(probes)
     received = 0
     rtts: List[float] = []
@@ -160,15 +166,20 @@ def merge_probes(probes: List[Dict[str, Any]]) -> Dict[str, Any]:
         err = p.get("error")
         if err and err not in errors:
             errors.append(str(err)[:80])
+    first_rtt = first.get("rtt_ms")
     out: Dict[str, Any] = {
-        "reachable": received > 0,
-        "rtt_ms": round(sum(rtts) / len(rtts), 2) if rtts else None,
+        # --- 종전 의미 그대로: 판정이 읽는 값 ---
+        "reachable": bool(first.get("reachable")),
+        "rtt_ms": float(first_rtt) if isinstance(first_rtt, (int, float)) else None,
+        "reachable_basis": "first_probe",
+        # --- 여기부터는 증거 ---
         "rtt_min_ms": round(min(rtts), 2) if rtts else None,
         "rtt_max_ms": round(max(rtts), 2) if rtts else None,
         "loss_pct": round(100.0 * (sent - received) / sent, 1) if sent else None,
         "sent": sent,
         "received": received,
         "replies": received,
+        "any_reachable": received > 0,
         "mode": "burst",
         "concurrent": True,
         "note": BURST_NOTE,
@@ -194,6 +205,10 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
 
     count = int(ctx.get("ping_count", DEFAULT_COUNT))
     probes = burst_probes(ctx) if "gateway" in targets else 1
+    if probes > 1:
+        # ping_count 를 올려 둔 사람이 이상 징후 주기에 오히려 적게 보내면
+        # 놀란다. 평소보다 적게 보내지 않는다.
+        probes = max(probes, count)
 
     # 대상 하나에 여러 번 띄울 수 있으므로 작업 단위로 펼친다. 다발은 1발씩
     # 쪼개서 보낸다 — 한 명령으로 여러 발을 쏘면 패킷 간격 1초가 붙는다.
