@@ -920,9 +920,9 @@ class TestTheProbeCap(unittest.TestCase):
     def test_a_claim_that_would_pass_the_cap_sends_nothing_and_says_so(self):
         """상한을 넘겨 보내느니 재지 않는다. 그 사실은 표시로 남는다.
 
-        (DEV-13 (g) 전에는 `ping_count=13` 으로 이 갈래를 열었다. 이제 설정은
-        `MAX_COUNT` 로 잘려서 한 주기에 그만큼 나갈 수 없으므로, 남은 예산이
-        이번 주기의 발 수를 못 받는 실제 경로 — 끊김 중반 — 로 연다.)
+        남은 예산이 이번 주기의 발 수를 못 받는 실제 경로 — 끊김 중반 — 로
+        연다. `ping_count` 하나로도 열리지만(아래 13발 테스트) 그쪽은 첫
+        주기부터 막히는 갈래라 여기서 보려는 것과 다르다.
         """
         eng = self._engine(ping_count=3,
                            state={enginemod.ENDPOINT_PROBES_KEY:
@@ -930,23 +930,24 @@ class TestTheProbeCap(unittest.TestCase):
         self.assertEqual(eng._claim_tunnel_probe(), (None, True))
         self.assertEqual(self._counts(eng), {"warp": {"shots": 10, "capped": True}})
 
-    def test_a_ping_count_over_the_limit_is_cut_not_obeyed(self):
-        """범위 밖 설정은 잘린다 — 세는 값과 실제 인자가 같아야 한다 (DEV-13 (b)(g)).
+    def test_a_ping_count_over_twelve_is_obeyed_and_the_cap_refuses_it(self):
+        """큰 설정도 **자르지 않는다** — 세는 값과 실제 인자가 같아야 한다.
 
-        자르지 않으면 `ping -c 13` 한 명령이 subprocess 제한(4초)을 넘겨
-        **응답이 오는 정상 주기까지** "재지 못함" 이 된다. 엔진이 세는 값과
-        수집기가 넘기는 인자가 같은 함수에서 오는지도 여기서 본다.
+        (DEV-16: 상한 자르기를 없앴다. 잘라 두면 `ping_count` 를 올려 둔
+        사람의 평소 주기가 말없이 얇아진다.) 13발은 한 끊김 상한 12발보다
+        많으므로 엔드포인트 측정은 첫 주기부터 거절된다 — 상한을 넘겨
+        보내느니 보내지 않는다. 엔진이 세는 값과 수집기가 넘기는 인자가 같은
+        함수에서 오는지도 여기서 본다.
         """
         eng = self._engine(ping_count=13)
-        self.assertEqual(eng._endpoint_shots(), first_hop.MAX_COUNT)
-        self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False))
-        self.assertEqual(self._counts(eng)["warp"]["shots"], first_hop.MAX_COUNT)
+        self.assertEqual(eng._endpoint_shots(), 13)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng), {"warp": {"shots": 0, "capped": True}})
 
         fake = FakeRun()
-        collect_with(fake, ping_count=13, allow_tunnel_probe=True,
-                     tunnel_endpoint=ENDPOINT)
+        collect_with(fake, ping_count=13)
         for c in fake.calls:
-            self.assertEqual(c["argv"][3], str(first_hop.MAX_COUNT))
+            self.assertEqual(c["argv"][3], "13")
 
     def test_a_ping_count_below_one_is_raised_not_passed_through(self):
         """0·음수를 그대로 넘기면 `ping -c 0` 이 나가고 세는 값과 어긋난다."""
@@ -1478,28 +1479,21 @@ class TestTheFutureBranchCarriesNoPathOrAddress(unittest.TestCase):
 
 
 class TestThePingCountBounds(unittest.TestCase):
-    """범위 밖 `ping_count` 를 어떻게 다루는가 (DEV-13 (b)(g))."""
+    """범위 밖 `ping_count` 를 어떻게 다루는가 (DEV-13 (b), DEV-16).
 
-    def test_the_upper_bound_keeps_one_command_inside_the_subprocess_limit(self):
-        """상한의 근거: 한 명령의 소요가 제한 시간을 넘으면 안 된다.
+    **하한만 있다.** 위로 자르지 않는 이유와 그 대가는
+    `TestARaisedPingCount` 에 있다.
+    """
 
-        넘으면 응답이 오는 **정상 주기도** 매번 제한에 걸려 결과가 통째로
-        "재지 못함" 이 된다 — 설정 하나로 이 도구가 눈이 먼다.
-        """
-        self.assertLess(first_hop.ping_seconds(count=first_hop.MAX_COUNT),
-                        first_hop.PING_TIMEOUT_SECONDS)
-        self.assertGreater(first_hop.ping_seconds(count=first_hop.MAX_COUNT + 1),
-                           first_hop.PING_TIMEOUT_SECONDS)
-
-    def test_values_inside_the_range_are_untouched(self):
-        for n in range(1, first_hop.MAX_COUNT + 1):
+    def test_a_raised_count_is_passed_through_untouched(self):
+        """설정한 사람의 발 수를 말없이 줄이지 않는다 (사용자 결정 2026-09-22)."""
+        for n in (1, 2, 3, 4, 12, 13, 100):
             self.assertEqual(first_hop.packets_per_command(n), n)
         self.assertEqual(first_hop.packets_per_command(), first_hop.DEFAULT_COUNT)
 
-    def test_values_outside_the_range_are_cut_to_it(self):
+    def test_values_below_one_are_raised_to_one(self):
         self.assertEqual(first_hop.packets_per_command(0), 1)
         self.assertEqual(first_hop.packets_per_command(-3), 1)
-        self.assertEqual(first_hop.packets_per_command(13), first_hop.MAX_COUNT)
 
     def test_a_value_that_is_not_a_number_falls_back_to_the_default(self):
         for bad in ("많이", None, [], {}, object()):
@@ -1512,7 +1506,7 @@ class TestThePingCountBounds(unittest.TestCase):
         어긋나면 한 끊김당 12발이라는 상한이 그만큼 틀어진다. 엔진 쪽 확인은
         TestTheProbeCap 에 있다.
         """
-        for raw in (0, -3, 1, 2, 13, "많이"):
+        for raw in (0, -3, 1, 2, 4, 13, "많이"):
             fake = FakeRun()
             collect_with(fake, ping_count=raw)
             self.assertEqual(fake.calls[0]["argv"][3],
@@ -1541,19 +1535,98 @@ class TestThePingCountBounds(unittest.TestCase):
         collect_with(fake2, ping_count=0)
         self.assertEqual(fake2.calls[0]["argv"][3], "1")
 
-    def test_a_burst_is_not_cut_by_the_command_limit(self):
-        """다발은 1발짜리 명령을 여러 개 띄우므로 그 상한이 걸리지 않는다.
+    def test_a_burst_sends_one_packet_per_command(self):
+        """다발은 1발짜리 명령을 **여러 개** 띄운다. 설정만큼은 보낸다.
 
-        여기서 자르면 `ping_count` 를 올려 둔 사람이 이상 징후 주기에 오히려
-        적게 재게 된다 (AC-12).
+        `ping_count` 를 올려 둔 사람이 이상 징후 주기에 오히려 적게 재면
+        안 된다 (AC-12). 한 명령이 1발이라 다발 주기는 `ping_count` 가 커도
+        제한 시간에 걸리지 않는다 — 평소 주기와 다른 점이다
+        (`TestARaisedPingCount`).
         """
         fake = FakeRun()
         out = collect_with(fake, first_hop_burst=True, interval=5, ping_count=5)
         self.assertEqual(len(fake.calls), 5)
-        self.assertGreater(5, first_hop.MAX_COUNT)
         self.assertEqual(out["results"]["gateway"]["sent"], 5)
         for c in fake.calls:
             self.assertEqual(c["argv"][3], "1")
+        self.assertLess(first_hop.ping_seconds(count=1),
+                        first_hop.PING_TIMEOUT_SECONDS)
+
+
+class TestARaisedPingCount(unittest.TestCase):
+    """`ping_count` 를 4 이상으로 올린 주기는 **유보된다** (DEV-16).
+
+    상한 자르기를 없앤 대가다. 한 명령의 소요(`ping_seconds`)가 subprocess
+    제한(`PING_TIMEOUT_SECONDS`)을 넘으면 응답이 오는 평소 주기도 제한에
+    걸려, 그 주기는 "끝나지 못함"(`PROBE_TIMED_OUT`)으로 남는다.
+
+    **이것은 버그가 아니라 고른 동작이다.** 대안이 둘이었다: (a) 설정을
+    말없이 잘라 적게 재면서 그 사실을 남기지 않는다, (b) 설정대로 보내고
+    못 잰 주기를 못 쟀다고 적는다. 잘못된 손실률을 적지 않는 (b) 를 골랐다
+    (사용자 결정 2026-09-22). 되돌리려면 그 결정부터 다시 받아야 한다.
+    """
+
+    def _timing_run(self):
+        """`util.run` 의 제한 시간 동작을 흉내 낸다. ping 을 돌리지 않는다.
+
+        실제 `run` 은 `subprocess.TimeoutExpired` 를 `timed_out=True` 인
+        빈 결과로 바꾼다(netmon/util.py). 여기서는 `-c` 인자로 그 명령이
+        걸릴 시간을 계산해 같은 결과를 만든다.
+        """
+        calls = []
+
+        def fake(argv, timeout=None, stdin=""):
+            calls.append(list(argv))
+            count = int(argv[argv.index("-c") + 1])
+            if first_hop.ping_seconds(count=count) > (timeout or 0):
+                return CmdResult(list(argv), -1, "", "제한 시간 초과",
+                                 timed_out=True)
+            return CmdResult(list(argv), 0, REPLY, "")
+
+        fake.calls = calls
+        return fake
+
+    def test_four_packets_no_longer_fit_in_one_command(self):
+        """경계를 코드로 고정한다 — 3발까지는 들어가고 4발부터 넘는다."""
+        self.assertLess(first_hop.ping_seconds(count=3),
+                        first_hop.PING_TIMEOUT_SECONDS)
+        self.assertGreater(first_hop.ping_seconds(count=4),
+                           first_hop.PING_TIMEOUT_SECONDS)
+
+    def test_a_cycle_that_did_not_finish_says_so_instead_of_losing_it(self):
+        """응답이 오는 대상이어도 유보로 남는다. **손실로 적지 않는다.**"""
+        fake = self._timing_run()
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.collect({"gateway": GW, "ping_count": 4})
+        got = out["results"]["gateway"]
+        self.assertEqual(fake.calls[0][3], "4")      # 자르지 않고 보냈다
+        self.assertEqual(got["error"], PROBE_TIMED_OUT)
+        self.assertNotEqual(got["error"], PROBE_NOT_RUN)  # 나갔을 수는 있다
+        self.assertFalse(got["reachable"])
+
+    def test_the_judgement_holds_that_cycle_instead_of_blaming_the_first_hop(self):
+        """유보의 뜻이 판정까지 간다 — 재지 못한 주기가 근거로 쓰이지 않는다.
+
+        `_only_timed_out` 이 참이어야 요약문이 "끝나지 못함" 쪽으로 간다
+        (netmon/detect/vpn.py). 이 값이 판정에 닿는 경로는
+        tests/test_detect_vpn.py 가 덮는다.
+        """
+        fake = self._timing_run()
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.collect({"gateway": GW, "ping_count": 4,
+                                     "first_hop_burst": False})
+        self.assertEqual(out["results"]["gateway"]["error"], PROBE_TIMED_OUT)
+        self.assertFalse(out["gateway_reachable"])
+        self.assertIsNone(out.get("gateway_rtt_ms"))
+
+    def test_three_still_measures(self):
+        """바로 아래 값은 종전대로 잰다 — 유보가 전부에 걸리는 것이 아니다."""
+        fake = self._timing_run()
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.collect({"gateway": GW, "ping_count": 3})
+        got = out["results"]["gateway"]
+        self.assertNotIn("error", got)
+        self.assertTrue(got["reachable"])
 
 
 if __name__ == "__main__":

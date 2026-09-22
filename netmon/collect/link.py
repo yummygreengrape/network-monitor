@@ -51,32 +51,20 @@ PING_OVERHEAD_SECONDS = 1.0
 # subprocess 제한과 결과 대기. **둘 다 위 소요보다 넉넉히 크게 잡는다** —
 # 여기서 먼저 끊으면 응답할 수 있었던 대상이 손실로 둔갑해서, 손실률이
 # 네트워크가 아니라 우리 제한 시간의 산물이 된다.
+#
+# 넉넉한 것은 **기본값(1발) 기준**이다. `ping_count` 를 4 이상으로 올리면
+# 한 명령의 소요가 이 제한을 넘어 평소 주기도 "끝나지 못함" 으로 유보된다.
+# 그 설정을 자르지 않는 이유는 `packets_per_command` 에 적어 두었다.
 PING_TIMEOUT_SECONDS = 4.0
 RESULT_WAIT_SECONDS = 10.0
 
 
-def _max_count(wait_ms: int = DEFAULT_WAIT_MS,
-               timeout: float = PING_TIMEOUT_SECONDS) -> int:
-    """한 `ping` 명령에 실을 수 있는 발 수의 상한. 지금 값으로 3 이다.
-
-    한 명령의 소요는 `ping_seconds()` 이고, 그것이 subprocess 제한을 넘으면
-    **응답이 오는 정상 주기도 매번 제한에 걸린다** — 결과가 통째로
-    "재지 못함" 이 되어 설정 하나로 이 도구가 눈이 먼다. 값을 여기서
-    계산하는 것은 세 상수 중 하나만 바뀌어도 함께 움직이게 하려는 것이다.
-    """
-    n = int((timeout - PING_OVERHEAD_SECONDS) / (wait_ms / 1000.0))
-    return max(DEFAULT_COUNT, n)
-
-
-MAX_COUNT = _max_count()
-
-
 def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
-    """`ping_count` 설정을 **한 명령에 실을 발 수**로 바꾼다.
+    """`ping_count` 설정을 **한 명령에 실을 발 수**로 바꾼다. 하한만 있다.
 
-    범위 밖(0·음수·상한 초과)은 **자른다**. 거부하고 그 주기를 재지 않는
-    쪽은 고르지 않았다 — 잘못 적은 설정 하나가 측정을 통째로 없애는 것보다
-    범위 안으로 자르고 재는 편이 낫다. 읽을 수 없는 값은 기본값 1 이다
+    1 미만은 1 로 올린다. **위로는 자르지 않는다** — 설정한 사람이 적어 둔
+    발 수를 말없이 줄이면 평소 주기가 조용히 얇아지고, 그 사실이 어디에도
+    남지 않는다(사용자 결정 2026-09-22). 읽을 수 없는 값은 기본값 1 이다
     (설정 기본값과 같다 — netmon/config.py).
 
     **하한이 없으면 재지 못한 주기가 "손실 100%" 로 적힌다.** macOS ping 은
@@ -85,6 +73,17 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
     64 는 `NOT_RUN_RCS` 에 없으므로 `probe_failure` 가 아무 표시도 남기지
     않고, `parse_ping("")` 이 `{replies: 0, loss_pct: 100.0, reachable: False}`
     를 만든다 — 한 발도 나가지 않은 주기가 **잰 것처럼** 기록된다.
+
+    **`ping_count` 가 4 이상이면 주기가 유보된다 — 버그가 아니라 의도다.**
+    한 명령의 소요는 `ping_seconds(count=4)` = 4.2초로 subprocess 제한
+    (`PING_TIMEOUT_SECONDS`, 4.0초)을 넘는다. 그래서 그 설정에서는 응답이
+    오는 평소 주기도 제한에 걸리고, `probe_failure` 가 `PROBE_TIMED_OUT` 을
+    남겨 판정이 그 주기를 **재지 못한 것으로 유보**한다
+    (netmon/detect/vpn.py `_only_timed_out`, `_probe_phrase`). 재는 주기가
+    줄어드는 대신 **없는 손실률을 적지 않고, 재지 못했다는 사실이 기록에
+    남는다.** 여기서 상한으로 잘라 버리면 설정보다 적게 재면서 그 사실조차
+    남지 않으므로, 자르지 않고 유보되게 둔다
+    (되돌리지 말 것 — tests/test_link.py `TestARaisedPingCount`).
 
     **부르는 곳이 둘이라 함수로 둔다.** 수집기는 이 값을 `ping -c` 에 넘기고,
     엔진은 같은 값으로 터널 엔드포인트의 상한을 센다
@@ -95,21 +94,7 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
         n = int(value)
     except (TypeError, ValueError):
         return DEFAULT_COUNT
-    return max(DEFAULT_COUNT, min(n, MAX_COUNT))
-
-
-def _burst_floor(value: Any) -> int:
-    """다발 주기에 띄울 명령 수의 하한 — 설정값을 **자르지 않고** 쓴다.
-
-    `MAX_COUNT` 는 한 명령이 제한 시간 안에 끝나게 하는 상한이다. 다발은
-    1발짜리 명령을 여러 개 **동시에** 띄우므로(`collect` 의 `per`) 그 제한이
-    걸리지 않는다. 여기서까지 자르면 `ping_count` 를 올려 둔 사람이 이상
-    징후 주기에 오히려 적게 재게 된다.
-    """
-    try:
-        return max(1, int(value))
-    except (TypeError, ValueError):
-        return 1
+    return max(DEFAULT_COUNT, n)
 
 
 def ping_seconds(wait_ms: int = DEFAULT_WAIT_MS, count: int = DEFAULT_COUNT) -> float:
@@ -433,14 +418,13 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
 
     # 한 명령에 실을 발 수는 **검증한 값**이다. 엔진이 상한을 셀 때 쓰는
     # 것과 같은 함수여야 세는 값과 실제 인자가 어긋나지 않는다.
-    raw_count = ctx.get("ping_count", DEFAULT_COUNT)
-    count = packets_per_command(raw_count)
+    count = packets_per_command(ctx.get("ping_count", DEFAULT_COUNT))
     probes = burst_probes(ctx) if "gateway" in targets else 1
     if probes > 1:
         # ping_count 를 올려 둔 사람이 이상 징후 주기에 오히려 적게 보내면
-        # 놀란다. 평소보다 적게 보내지 않는다. 여기는 1발짜리 명령의 **개수**라
-        # 한 명령의 상한(MAX_COUNT)이 걸리지 않는다 (_burst_floor).
-        probes = max(probes, _burst_floor(raw_count))
+        # 놀란다. 평소보다 적게 보내지 않는다. 다발은 1발짜리 명령을 여러 개
+        # 띄우므로 여기서 `count` 는 **명령 수**로 쓰인다.
+        probes = max(probes, count)
 
     # 대상 하나에 여러 번 띄울 수 있으므로 작업 단위로 펼친다. 다발은 1발씩
     # 쪼개서 보낸다 — 한 명령으로 여러 발을 쏘면 패킷 간격 1초가 붙는다.
