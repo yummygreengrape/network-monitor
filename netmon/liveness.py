@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
+from . import messages as msg
 from .model import Observation, unwrap
 
 # 이 주기 수만큼 지켜봤는데 ICMP 응답이 한 번도 없고 ARP 는 계속 정상이면
@@ -33,6 +34,17 @@ ARP = "arp"
 ICMP = "icmp"
 LINK = "link"
 UNKNOWN = "unknown"
+
+# 도달성을 **무엇으로 판정했는가**의 사람용 이름표. 판정 방법을 고르는 곳이
+# 여기이므로 이름표도 여기 둔다 — 끊김 요약문(detect/vpn)과 조사 결론
+# (investigate/playbooks)이 같은 주기를 다른 말로 부르면 안 된다.
+METHOD_MESSAGES = {ARP: "METHOD_ARP", ICMP: "METHOD_ICMP", LINK: "METHOD_LINK"}
+
+
+def method_label(method: Any) -> str:
+    """판정 방법의 이름표. 이름표가 없는 방법(보정 중 `unknown`)은 값 그대로."""
+    name = METHOD_MESSAGES.get(method)
+    return msg.get(name) if name else str(method)
 
 
 def signals(obs: Observation) -> Dict[str, Optional[bool]]:

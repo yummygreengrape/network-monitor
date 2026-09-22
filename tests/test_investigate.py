@@ -12,8 +12,8 @@ from netmon.detect import Context, attributions_for, network_key, run_all
 from netmon.investigate import triggers
 from netmon.investigate.model import ABANDONED, CONCLUDED, OPEN
 from netmon.model import Finding
-from tests.helpers import (BSSID, DNS1, GW_MAC, GW_MAC_ALT, by_kind, kinds,
-                           obs, vpn_state)
+from tests.helpers import (BSSID, DNS1, GW_MAC, GW_MAC_ALT, by_kind,
+                           command_failed, kinds, obs, vpn_state)
 
 FEATURES = {"detect.l2": True, "detect.dhcp": True, "detect.dns": True,
             "detect.route": True, "detect.wifi": True, "detect.quality": True,
@@ -170,7 +170,13 @@ class TestVpnInvestigation(unittest.TestCase):
         self.assertTrue(inv.criteria.get("watch_link"))
         self.assertIn("FIRST_HOP_UNREACHABLE", inv.criteria["watch_kinds"])
 
-    def test_three_drops_with_healthy_link_blames_the_tunnel(self):
+    def test_three_drops_with_a_healthy_first_hop_conclude_without_naming_a_leg(self):
+        """되풀이돼도 증거는 같다 — 한 묶음 ICMP 를 세 번 본 것이다.
+
+        종전에는 이 갈래가 "터널 쪽에서 되풀이되는 끊김" 이라고 구간을
+        지목했다. 끊김 요약문(detect/vpn)이 같은 증거로 유보하므로 조사
+        결론도 같은 기준으로 말한다.
+        """
         h = Harness()
         self._drop_cycle(h, 0)
         self._drop_cycle(h, 10)
@@ -178,14 +184,219 @@ class TestVpnInvestigation(unittest.TestCase):
         done = h.closed("vpn_drop")
         self.assertEqual(len(done), 1)
         self.assertEqual(done[0].status, CONCLUDED)
-        self.assertEqual(done[0].verdict, msg.INV_VPN_VERDICT_TUNNEL)
+        self.assertEqual(done[0].verdict, msg.INV_VPN_VERDICT_FIRST_HOP_OK)
         self.assertEqual(h.opened("vpn_drop"), [],
                          "결론을 낸 주기에 같은 조사가 또 열리면 안 된다")
+        concluded = by_kind(h.all, "INVESTIGATION_CONCLUDED")
+        self.assertIn(msg.INV_VPN_LEG_FIRST_HOP_OK % msg.METHOD_ICMP,
+                      concluded.summary)
+        for word in ("터널", "tunnel"):
+            self.assertNotIn(word, concluded.summary)
+            self.assertNotIn(word, done[0].verdict)
+
+    def test_the_judging_method_is_recorded_at_every_drop(self):
+        """무엇으로 판정했는지를 남겨야 "첫 홉은 응답했음" 이 뜻을 가진다.
+
+        ARP 로 판정하는 망에서는 같은 주기의 ICMP 가 전부 빠져 있어도
+        `first_hop_alive` 가 True 다(netmon/liveness.py).
+        """
+        h = Harness()
+        self._drop_cycle(h, 0)
+        self._drop_cycle(h, 10)
+        crit = h.only("vpn_drop")[0].criteria
+        self.assertEqual(crit["first_hop_method_at_drop"], ["icmp", "icmp"])
+        self.assertEqual(len(crit["first_hop_method_at_drop"]),
+                         len(crit["first_hop_alive_at_drop"]))
+
+    def test_an_arp_judged_network_says_so_in_the_conclusion(self):
+        """ICMP 가 전부 빠진 망에서도 결론이 판정 기준을 밝힌다."""
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [True, True],
+                "first_hop_method_at_drop": ["arp", "arp"]}
+        self.assertEqual(VpnDrop._leg(crit),
+                         msg.INV_VPN_LEG_FIRST_HOP_OK % msg.METHOD_ARP)
+
+    def test_a_mixed_basis_lists_both(self):
+        """보정이 ICMP 와 ARP 사이를 오가면 둘 다 적는다."""
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [True, True, True],
+                "first_hop_method_at_drop": ["icmp", "arp", "icmp"]}
+        self.assertEqual(
+            VpnDrop._leg(crit),
+            msg.INV_VPN_LEG_FIRST_HOP_OK % ("%s\u00b7%s" % (msg.METHOD_ICMP, msg.METHOD_ARP)))
+
+    def test_without_a_recorded_basis_it_claims_none(self):
+        """기준을 기록하지 못한 조사(옛 기록, 보정 중)는 기준을 주장하지 않는다."""
+        from netmon.investigate.playbooks import VpnDrop
+        for methods in ([], [None, None], ["unknown", "unknown"]):
+            crit = {"first_hop_alive_at_drop": [True, True],
+                    "first_hop_method_at_drop": methods}
+            self.assertEqual(VpnDrop._leg(crit), msg.INV_VPN_LEG_FIRST_HOP_OK_PLAIN,
+                             methods)
+
+    def test_a_drop_that_judged_nothing_does_not_lend_its_basis(self):
+        """판정한 적 없는 끊김의 방법을 기준으로 내세우지 않는다.
+
+        `first_hop_alive` 가 None 인 끊김은 도달성을 아무것도 판정하지 못한
+        주기다(ICMP 로 보정된 망에서 게이트웨이를 못 잰 주기가 그렇다).
+        결론이 세는 끊김은 None 을 뺀 것들이므로, 기준도 그 끊김들의 것만
+        적어야 앞뒤가 맞는다.
+        """
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [True, True, None],
+                "first_hop_method_at_drop": ["icmp", "icmp", "arp"]}
+        self.assertEqual(VpnDrop._method_basis(crit), msg.METHOD_ICMP)
+        self.assertEqual(VpnDrop._leg(crit),
+                         msg.INV_VPN_LEG_FIRST_HOP_OK % msg.METHOD_ICMP)
+        self.assertNotIn(msg.METHOD_ARP, VpnDrop._leg(crit))
+
+    def test_a_judged_drop_without_a_labelled_method_claims_no_basis(self):
+        """판정한 끊김의 방법만 보므로, 그것이 없으면 기준을 적지 않는다."""
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [True, None],
+                "first_hop_method_at_drop": ["unknown", "icmp"]}
+        self.assertEqual(VpnDrop._method_basis(crit), "")
+        self.assertEqual(VpnDrop._leg(crit), msg.INV_VPN_LEG_FIRST_HOP_OK_PLAIN)
+
+    def test_lists_that_do_not_line_up_claim_no_basis(self):
+        """짝을 믿을 수 없으면(한쪽만 기록된 옛 조사, 복원된 상태) 적지 않는다."""
+        from netmon.investigate.playbooks import VpnDrop
+        for methods in (["icmp"], ["icmp", "icmp", "icmp"]):
+            crit = {"first_hop_alive_at_drop": [True, True],
+                    "first_hop_method_at_drop": methods}
+            self.assertEqual(VpnDrop._method_basis(crit), "", methods)
+            self.assertEqual(VpnDrop._leg(crit),
+                             msg.INV_VPN_LEG_FIRST_HOP_OK_PLAIN, methods)
+
+    def test_an_unstable_first_hop_still_reads_as_before(self):
+        """바꾼 것은 지목하던 갈래뿐이다. 나머지 갈래는 그대로다."""
+        from netmon.investigate.playbooks import VpnDrop
+        self.assertEqual(
+            VpnDrop._leg({"first_hop_alive_at_drop": [False, False],
+                          "first_hop_not_run_at_drop": [False, False],
+                          "first_hop_method_at_drop": ["icmp", "icmp"]}),
+            msg.INV_VPN_LEG_LINK)
+        self.assertEqual(
+            VpnDrop._leg({"first_hop_alive_at_drop": [True, True],
+                          "first_hop_method_at_drop": ["icmp", "icmp"],
+                          "link_events": 2}),
+            msg.INV_VPN_LEG_LINK)
+        self.assertEqual(VpnDrop._leg({"first_hop_alive_at_drop": [None]}),
+                         msg.INV_VPN_LEG_UNKNOWN)
 
     def test_single_drop_does_not_conclude_yet(self):
         h = Harness()
         self._drop_cycle(h, 0)
         self.assertTrue(h.only("vpn_drop")[0].open)
+
+    def test_a_connecting_transition_opens_the_same_investigation(self):
+        """재협상(`connecting`)으로 바뀐 전환도 종전처럼 조사를 연다.
+
+        요약문만 "재협상 중" 으로 바뀌었고 판정 종류는 그대로라서, 조사를
+        여는 기준(`triggers.DEFAULT_RULES` 의 VPN_DISCONNECTED)도 그대로다.
+        이 픽스처들이 `disconnected` 만 써서 이 경로를 지나지 않았다.
+        """
+        h = Harness()
+        h.feed(obs(ts=ts(0), vpn=vpn_state("connected"), icmp_ok=True))
+        f = h.feed(obs(ts=ts(5), vpn=vpn_state("connecting"), icmp_ok=True))
+        self.assertIn("INVESTIGATION_OPENED", kinds(f))
+        self.assertEqual(len(h.opened("vpn_drop")), 1)
+        self.assertIn("재협상", by_kind(f, "VPN_DISCONNECTED").summary)
+
+    def test_a_connecting_drop_counts_like_any_other(self):
+        """세 번 끊기면 상태가 `connecting` 이어도 같은 결론에 닿는다."""
+        h = Harness()
+        for n in (0, 10, 20):
+            h.feed(obs(ts=ts(n), vpn=vpn_state("connected"), icmp_ok=True))
+            h.feed(obs(ts=ts(n + 5), vpn=vpn_state("connecting"), icmp_ok=True))
+        done = h.closed("vpn_drop")
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0].status, CONCLUDED)
+
+
+class TestAProbeThatNeverRanIsNotEvidence(unittest.TestCase):
+    """나가지 않은 ping 으로 구간을 지목하지 않는다.
+
+    명령이 실행되지 못하면 `first_hop_alive` 가 False 로 나오는데
+    (netmon/detect/vpn.first_hop_not_run), 그 False 는 "무응답" 이 아니라
+    "재지 못함" 이다. 끊김 요약문은 그때 어느 쪽으로도 단정하지 않는다
+    (tests/test_detect_vpn). 조사 결론이 같은 끊김을 "첫 홉 구간도
+    불안정했음" 이라고 적으면, 한 도구가 같은 관측을 두 가지 확신으로
+    말하게 된다.
+    """
+
+    def _drops(self, h, count, make=None):
+        for i in range(count):
+            n = i * 10
+            h.feed(obs(ts=ts(n), vpn=vpn_state("connected"), icmp_ok=True,
+                       gw_mac=GW_MAC))
+            cur = obs(ts=ts(n + 5), vpn=vpn_state("disconnected"),
+                      icmp_ok=False, gw_mac=None)
+            h.feed(make(cur) if make else cur)
+        return h
+
+    def test_drops_whose_probe_never_ran_do_not_accuse_the_first_hop(self):
+        h = self._drops(Harness(), 3, make=command_failed)
+        done = h.closed("vpn_drop")[0]
+        summary = by_kind(h.all, "INVESTIGATION_CONCLUDED").summary
+        self.assertNotIn(msg.INV_VPN_LEG_LINK, summary)
+        self.assertIn(msg.INV_VPN_LEG_UNKNOWN, summary)
+        self.assertEqual(done.verdict, msg.INV_VPN_VERDICT_UNKNOWN)
+        # 판정값 자체는 종전 그대로다 — 세는 법만 바꿨다.
+        self.assertEqual(done.criteria["first_hop_alive_at_drop"],
+                         [False, False, False])
+        self.assertEqual(done.criteria["first_hop_not_run_at_drop"],
+                         [True, True, True])
+
+    def test_a_probe_that_did_run_and_stayed_silent_still_names_the_leg(self):
+        """가드가 넘치지 않는다 — 실제로 나갔는데 무응답인 끊김은 그대로다."""
+        h = self._drops(Harness(), 3)
+        done = h.closed("vpn_drop")[0]
+        self.assertEqual(done.criteria["first_hop_not_run_at_drop"],
+                         [False, False, False])
+        self.assertIn(msg.INV_VPN_LEG_LINK,
+                      by_kind(h.all, "INVESTIGATION_CONCLUDED").summary)
+
+    def test_the_run_flag_is_recorded_from_the_first_drop(self):
+        """조사를 여는 끊김에도 표시가 붙는다 — 뒤 끊김과 짝이 맞아야 한다."""
+        h = self._drops(Harness(), 1, make=command_failed)
+        crit = h.only("vpn_drop")[0].criteria
+        self.assertEqual(crit["first_hop_not_run_at_drop"], [True])
+        self.assertEqual(len(crit["first_hop_not_run_at_drop"]),
+                         len(crit["first_hop_alive_at_drop"]))
+
+    def test_a_drop_that_never_ran_does_not_lend_its_basis(self):
+        """판정한 적 없는 끊김의 방법을 기준으로 내세우지 않는다."""
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [True, True, False],
+                "first_hop_not_run_at_drop": [False, False, True],
+                "first_hop_method_at_drop": ["icmp", "icmp", "icmp"]}
+        self.assertEqual(VpnDrop._judged(crit), ([True, True], True))
+        self.assertEqual(VpnDrop._leg(crit),
+                         msg.INV_VPN_LEG_FIRST_HOP_OK % msg.METHOD_ICMP)
+
+    def test_flags_that_do_not_line_up_do_not_claim_an_unstable_leg(self):
+        """표시를 짝지을 수 없으면(이 표시 전에 열려 저장된 조사) 말하지 않는다.
+
+        길이가 어긋난 채로 짝지으면 다른 끊김의 표시를 읽게 된다 — 조사가
+        열린 뒤에 표시가 붙기 시작하면 실제로 어긋난다.
+        """
+        from netmon.investigate.playbooks import VpnDrop
+        for flags in (None, [], [True]):
+            crit = {"first_hop_alive_at_drop": [False, False],
+                    "first_hop_method_at_drop": ["icmp", "icmp"]}
+            if flags is not None:
+                crit["first_hop_not_run_at_drop"] = flags
+            self.assertEqual(VpnDrop._leg(crit), msg.INV_VPN_LEG_UNKNOWN, flags)
+
+    def test_a_recorded_link_event_still_points_at_the_link(self):
+        """실행되지 못한 측정과 무관한 근거(링크 사건)는 그대로 쓴다."""
+        from netmon.investigate.playbooks import VpnDrop
+        crit = {"first_hop_alive_at_drop": [False, False],
+                "first_hop_not_run_at_drop": [True, True],
+                "first_hop_method_at_drop": ["icmp", "icmp"],
+                "link_events": 2}
+        self.assertEqual(VpnDrop._leg(crit), msg.INV_VPN_LEG_LINK)
 
 
 class TestPathConfigInvestigation(unittest.TestCase):

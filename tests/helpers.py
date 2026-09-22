@@ -142,6 +142,51 @@ def obs(
     return o
 
 
+def command_failed(o, error="timed out"):
+    """ping 명령 자체가 실행되지 못한 평소(single) 주기.
+
+    `collect/link.collect` 의 예외 처리가 남기는 모양 그대로다 — 결과에는
+    `reachable` False 와 **단수 키** `error` 뿐이고, 받은 수도 손실률도
+    없다. 이 `reachable` 은 "무응답" 이 아니라 "재지 못함" 이다.
+
+    끊김 요약문(tests/test_detect_vpn)과 조사 결론(tests/test_investigate)이
+    같은 주기를 같은 모양으로 보게 하려고 여기 둔다.
+    """
+    o.data["link"]["results"]["gateway"] = {"reachable": False, "error": error}
+    o.data["link"]["gateway_reachable"] = False
+    o.data["link"]["gateway_rtt_ms"] = None
+    o.data["link"]["first_hop_probes"] = 1
+    return o
+
+
+# 터널 엔드포인트. 문서용 대역이다 — 실제 공급자가 준 주소를 적지 않는다.
+ENDPOINT = "198.51.100.7"
+ENDPOINT_REASON = "No Network via 198.51.100.7:2408"
+
+
+def endpoint_probe(o, addr=ENDPOINT, reachable=True, rtt=25.0, error=None):
+    """터널 엔드포인트를 잰 주기의 link 관측.
+
+    `collect/link.collect` 가 만드는 모양 그대로다 — `targets` 에는 **감싼**
+    주소가, `results` 에는 ping 결과(또는 실행 실패 표시)가 들어간다.
+    실행 실패의 `error` 는 예외 종류 이름까지다(`collect/link._error_note`).
+
+    실제 수집기로 만든 관측과 같은 모양인지는 `tests/test_link.py` 와
+    `tests/test_detect_vpn.py` 의 수집기 연결 시험이 함께 본다.
+    """
+    o.data["link"].setdefault("targets", {})["tunnel_endpoint"] = ident("ipv4", addr)
+    if error:
+        got = {"reachable": False, "error": error}
+    else:
+        got = {"rtt_ms": rtt if reachable else None,
+               "rtt_max_ms": rtt if reachable else None,
+               "loss_pct": 0.0 if reachable else 100.0,
+               "replies": 1 if reachable else 0,
+               "reachable": bool(reachable)}
+    o.data["link"].setdefault("results", {})["tunnel_endpoint"] = got
+    return o
+
+
 def vpn_state(state="connected", reason=None, provider="warp",
               mode=None, tunnel=None):
     return {provider: {"provider": provider, "state": state,

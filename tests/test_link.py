@@ -1,16 +1,38 @@
-"""어디서나 netmon 으로 실행되게 하는 링크.
+"""어디서나 netmon 으로 실행되게 하는 링크, 그리고 첫 홉 측정.
 
 `./netmon.sh` 는 저장소 안에서만 통한다. 다른 곳에서 치면 셸이
 `no such file or directory` 를 내는데, 이 단계에서는 우리 코드가 아직 돌지
 않아 안내를 띄울 수도 없다. 그래서 링크가 필요하다.
+
+이름이 `link` 인 모듈이 둘이다. 실행 링크(`netmon/link.py`)와 연결 품질
+측정(`netmon/collect/link.py`)이고, 둘 다 이 파일에서 본다. 측정 쪽은
+**실제로 ping 을 보내지 않는다** — `run` 을 대체해 고정값으로 판정한다.
 """
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
 import os
+import shutil
 import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 
-from netmon import link
+from netmon import baseline
+from netmon import config as configmod
+from netmon import engine as enginemod
+from netmon import link, liveness
+from netmon import vpn as vpnmod
+from netmon.collect import link as first_hop
+from netmon.detect import SLEEP, Context, network_key, quality
+from netmon.engine import Engine
+from netmon.investigate import triggers
+from netmon import util
+from netmon.model import PROBE_NOT_RUN, PROBE_TIMED_OUT, Observation, ident
+from netmon.util import CmdResult
+from tests import helpers
 
 
 class TestChooseDir(unittest.TestCase):
@@ -92,6 +114,1818 @@ class TestInstall(unittest.TestCase):
         self.assertIn(".zshrc", link.path_hint("/opt/x", shell="zsh"))
         self.assertIn(".bash_profile", link.path_hint("/opt/x", shell="bash"))
         self.assertIn("/opt/x", link.path_hint("/opt/x", shell="zsh"))
+
+
+# --- 첫 홉 측정 (netmon/collect/link.py) ---
+
+GW = "192.0.2.1"
+RESOLVER = "198.51.100.53"
+PUBLIC = "203.0.113.9"
+
+REPLY = ("PING 192.0.2.1 (192.0.2.1): 56 data bytes\n"
+         "64 bytes from 192.0.2.1: icmp_seq=0 ttl=64 time=12.30 ms\n"
+         "\n--- 192.0.2.1 ping statistics ---\n"
+         "1 packets transmitted, 1 packets received, 0.0% packet loss\n")
+LOST = ("PING 192.0.2.1 (192.0.2.1): 56 data bytes\n"
+        "\n--- 192.0.2.1 ping statistics ---\n"
+        "1 packets transmitted, 0 packets received, 100.0% packet loss\n")
+
+
+def reply_with(ms):
+    return REPLY.replace("time=12.30 ms", "time=%.2f ms" % ms)
+
+
+class FakeRun:
+    """`run` 을 대신한다. 실제 네트워크로 아무것도 보내지 않는다."""
+
+    def __init__(self, outs=None, delay=0.0, barrier=None, rc=0, timed_out=False):
+        # outs: 호출 순서대로 돌려줄 출력. 모자라면 마지막 것을 되쓴다.
+        self.outs = list(outs) if outs else [REPLY]
+        self.delay = delay
+        self.barrier = barrier
+        self.rc = rc
+        self.timed_out = timed_out
+        self.calls = []
+        self._lock = threading.Lock()
+
+    def __call__(self, argv, timeout=None, stdin=""):
+        with self._lock:
+            i = len(self.calls)
+            self.calls.append({"argv": list(argv), "timeout": timeout})
+        if self.barrier is not None:
+            self.barrier.wait(timeout=5)
+        if self.delay:
+            time.sleep(self.delay)
+        out = self.outs[i] if i < len(self.outs) else self.outs[-1]
+        return CmdResult(list(argv), self.rc, out, "", timed_out=self.timed_out)
+
+    def targets(self):
+        return [c["argv"][-1] for c in self.calls]
+
+
+def collect_with(fake, **ctx):
+    base = {"gateway": GW}
+    base.update(ctx)
+    with mock.patch.object(first_hop, "run", fake):
+        return first_hop.collect(base)
+
+
+class TestFirstHopNormalCycle(unittest.TestCase):
+    """평소 주기는 지금과 똑같이 1발이다 (QA-1, AC-1, AC-12)."""
+
+    def test_sends_exactly_one_packet_with_the_same_command(self):
+        fake = FakeRun()
+        out = collect_with(fake)
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(fake.calls[0]["argv"],
+                         ["ping", "-n", "-c", "1", "-W", "800", GW])
+        self.assertEqual(out["first_hop_probes"], 1)
+        self.assertTrue(out["gateway_reachable"])
+        self.assertEqual(out["gateway_rtt_ms"], 12.3)
+
+    def test_single_shot_result_shape_is_unchanged(self):
+        out = collect_with(FakeRun())
+        self.assertEqual(set(out["results"]["gateway"]),
+                         {"rtt_ms", "rtt_max_ms", "loss_pct", "replies", "reachable"})
+
+    def test_ping_count_setting_is_still_honoured(self):
+        fake = FakeRun()
+        collect_with(fake, ping_count=2)
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(fake.calls[0]["argv"][3], "2")
+
+    def test_default_count_is_one(self):
+        self.assertEqual(first_hop.DEFAULT_COUNT, 1)
+
+
+class TestAnomalyHint(unittest.TestCase):
+    """다발을 켜는 조건 (QA-3, AC-2)."""
+
+    OK_LINK = {"gateway_reachable": True}
+    CONNECTED = {"warp": {"state": "connected"}}
+    OFF = {"warp": {"state": "disconnected"}}
+
+    def test_quiet_cycle_is_not_an_anomaly(self):
+        self.assertFalse(first_hop.first_hop_anomaly(
+            self.OK_LINK, self.CONNECTED, self.CONNECTED))
+
+    def test_previous_first_hop_silent(self):
+        self.assertTrue(first_hop.first_hop_anomaly(
+            {"gateway_reachable": False}, self.CONNECTED, self.CONNECTED))
+
+    def test_a_provider_left_switched_off_never_turns_it_on(self):
+        """설치만 해 두고 꺼 둔 공급자 때문에 매 주기 3발이 나가면 안 된다."""
+        for _ in range(5):
+            self.assertFalse(first_hop.first_hop_anomaly(
+                self.OK_LINK, self.OFF, self.OFF))
+
+    def test_a_disconnection_that_just_happened(self):
+        self.assertTrue(first_hop.first_hop_anomaly(
+            self.OK_LINK, {"warp": {"state": "connecting"}}, self.CONNECTED))
+
+    def test_previous_vpn_state_changed(self):
+        """직전 주기의 상태가 connected 여도, 그 앞과 다르면 켠다."""
+        self.assertTrue(first_hop.first_hop_anomaly(
+            self.OK_LINK, self.CONNECTED, {"warp": {"state": "connecting"}}))
+
+    def test_a_provider_appearing_or_vanishing_counts_as_a_change(self):
+        self.assertTrue(first_hop.first_hop_anomaly(self.OK_LINK, self.CONNECTED, {}))
+        self.assertTrue(first_hop.first_hop_anomaly(self.OK_LINK, {}, self.CONNECTED))
+
+    def test_no_vpn_block_is_not_an_anomaly(self):
+        """VPN 감시를 끈 사람에게 없던 패킷이 생기지 않는다."""
+        self.assertFalse(first_hop.first_hop_anomaly(self.OK_LINK, None, None))
+        self.assertFalse(first_hop.first_hop_anomaly(None, None, None))
+        self.assertFalse(first_hop.first_hop_anomaly(self.OK_LINK, None, {}))
+
+    def test_unmeasured_first_hop_is_not_called_silent(self):
+        """측정하지 않은 것(None)은 무응답이 아니다."""
+        self.assertFalse(first_hop.first_hop_anomaly({"gateway_reachable": None},
+                                                     None, None))
+
+
+class TestAnomalyHintFollowsTheLivenessMethod(unittest.TestCase):
+    """무응답 판정을 이 망의 판정 방법으로 본다 (QA-3, AC-2, DEV-6).
+
+    ICMP 를 막아 둔 게이트웨이에서는 `gateway_reachable` 이 정상 상태에도
+    매 주기 False 다. 그것을 이상 징후로 세면 아무 일도 없는데 주기마다
+    다발이 나간다 — liveness 가 ARP 로 판정을 바꾸는 바로 그 망이다.
+    """
+
+    ARP_OK = {"gateway_mac": ident("mac", helpers.GW_MAC), "neighbors": 4}
+    ARP_GONE = {"gateway_mac": None, "neighbors": 4}
+    ICMP_SILENT = {"gateway_reachable": False}
+    ICMP_OK = {"gateway_reachable": True}
+    CONNECTED = {"warp": {"state": "connected"}}
+
+    def hint(self, link_block, arp_block, method):
+        return first_hop.first_hop_anomaly(link_block, self.CONNECTED, self.CONNECTED,
+                                           prev_arp=arp_block, method=method)
+
+    def test_icmp_silent_network_never_turns_it_on_while_things_are_fine(self):
+        for _ in range(5):
+            self.assertFalse(self.hint(self.ICMP_SILENT, self.ARP_OK, liveness.ARP))
+
+    def test_icmp_silent_network_watches_the_arp_signal_instead(self):
+        """그 망에서는 `arp.gateway_mac` 이 빈 것을 이상 징후로 센다.
+
+        liveness 가 그 망에서 도달성을 판정하는 신호가 이것이라서다. **이 신호가
+        실제 끊김을 드러낸다는 근거는 없다** — 보관 샘플에는 첫 홉이 살아 있는데도
+        이 값이 빈 주기가 있고, 끊긴 뒤 언제 비는지는 모른다
+        (netmon/collect/link.py 의 주석). 여기서 고정하는 것은 입력→출력뿐이다.
+        """
+        self.assertTrue(self.hint(self.ICMP_SILENT, self.ARP_GONE, liveness.ARP))
+
+    def test_an_arp_collector_failure_is_not_an_outage(self):
+        """블록이 통째로 비면 수집 실패다. 모르는 것을 근거로 쏘지 않는다.
+
+        `liveness.evaluate` 는 같은 입력을 ARP 판정 망에서 "죽음" 으로 읽어
+        `gw_fail_streak` 를 올린다. 다발 판단은 보수적인 쪽으로 갈라진다.
+        """
+        self.assertFalse(self.hint(self.ICMP_SILENT, {}, liveness.ARP))
+        self.assertFalse(self.hint(self.ICMP_SILENT, None, liveness.ARP))
+
+    def test_icmp_network_keeps_the_old_behaviour(self):
+        self.assertTrue(self.hint(self.ICMP_SILENT, self.ARP_OK, liveness.ICMP))
+        self.assertFalse(self.hint(self.ICMP_OK, self.ARP_GONE, liveness.ICMP))
+        self.assertFalse(self.hint({"gateway_reachable": None}, self.ARP_OK,
+                                   liveness.ICMP))
+
+    def test_while_calibrating_a_live_signal_wins(self):
+        """보정 중에는 liveness.evaluate 와 같은 우선순위다."""
+        self.assertFalse(self.hint(self.ICMP_SILENT, self.ARP_OK, liveness.UNKNOWN))
+        self.assertFalse(self.hint(self.ICMP_OK, self.ARP_GONE, liveness.UNKNOWN))
+        self.assertFalse(self.hint({"gateway_reachable": None}, self.ARP_GONE,
+                                   liveness.UNKNOWN))
+
+    def test_while_calibrating_both_signals_failing_turns_it_on(self):
+        """여기서는 `liveness.evaluate` 와 갈라진다 — 일부러 그렇다.
+
+        같은 입력에서 liveness 는 `link_active` 까지 본다 — 그 값이 False 면
+        `(LINK, False)` 로 판정하고, 그 밖일 때만 보류한다(None). 다발 판단은
+        어느 쪽이든 보류하지 않고 재 본다. 측정을 늘리는 쪽이라 판정을
+        만들지 않는다.
+        """
+        self.assertTrue(self.hint(self.ICMP_SILENT, self.ARP_GONE, liveness.UNKNOWN))
+
+    def test_the_vpn_branch_is_untouched(self):
+        """판정 방법과 무관하게 VPN 상태 변화는 그대로 켠다."""
+        for method, quiet_link in ((liveness.ARP, self.ICMP_SILENT),
+                                   (liveness.ICMP, self.ICMP_OK),
+                                   (liveness.UNKNOWN, self.ICMP_SILENT)):
+            self.assertTrue(first_hop.first_hop_anomaly(
+                quiet_link, self.CONNECTED, {"warp": {"state": "connecting"}},
+                prev_arp=self.ARP_OK, method=method))
+            self.assertFalse(first_hop.first_hop_anomaly(
+                quiet_link, self.CONNECTED, self.CONNECTED,
+                prev_arp=self.ARP_OK, method=method))
+
+
+class TestBurstCycle(unittest.TestCase):
+    """이상 징후 주기의 다발 측정 (QA-2, AC-1, AC-3)."""
+
+    def burst(self, fake, **ctx):
+        return collect_with(fake, first_hop_burst=True, interval=5, **ctx)
+
+    def test_three_single_packet_pings(self):
+        fake = FakeRun()
+        out = self.burst(fake)
+        self.assertEqual(len(fake.calls), 3)
+        for c in fake.calls:
+            self.assertEqual(c["argv"], ["ping", "-n", "-c", "1", "-W", "800", GW])
+        self.assertEqual(out["first_hop_probes"], 3)
+
+    def test_records_sent_received_loss_and_rtt_range(self):
+        fake = FakeRun(outs=[reply_with(10.0), LOST, reply_with(30.0)])
+        g = self.burst(fake)["results"]["gateway"]
+        self.assertEqual(g["sent"], 3)
+        self.assertEqual(g["received"], 2)
+        self.assertEqual(g["loss_pct"], 33.3)
+        self.assertEqual(g["rtt_min_ms"], 10.0)
+        self.assertEqual(g["rtt_max_ms"], 30.0)
+        self.assertTrue(g["reachable"])
+
+    def test_evidence_says_the_probes_were_simultaneous(self):
+        """읽는 쪽이 시간에 걸친 지터로 오해하지 않게 관측에 적는다."""
+        g = self.burst(FakeRun())["results"]["gateway"]
+        self.assertEqual(g["mode"], "burst")
+        self.assertTrue(g["concurrent"])
+        self.assertIn("동시", g["note"])
+
+    def test_burst_is_not_serialised_next_to_other_targets(self):
+        """게이트웨이 3발 + 리졸버 + 공개 IP 가 모두 같은 순간에 나간다."""
+        barrier = threading.Barrier(5)
+        fake = FakeRun(barrier=barrier)
+        seen = []
+        real = first_hop.concurrent.futures.ThreadPoolExecutor
+
+        def recording(max_workers=None, **kw):
+            seen.append(max_workers)
+            return real(max_workers=max_workers, **kw)
+
+        with mock.patch.object(first_hop.concurrent.futures, "ThreadPoolExecutor",
+                               recording):
+            out = self.burst(fake, resolver_external=RESOLVER,
+                             allow_external=True, external_target=PUBLIC)
+        self.assertEqual(len(fake.calls), 5)          # 막히지 않고 다섯이 다 돌았다
+        self.assertEqual(seen, [5])                   # worker 수 >= 작업 수
+        self.assertNotIn("errors", out["results"]["gateway"])
+        self.assertEqual(out["results"]["gateway"]["received"], 3)
+        self.assertEqual(sorted(fake.targets()), sorted([GW, GW, GW, PUBLIC, RESOLVER]))
+
+    def test_other_targets_keep_one_probe_each(self):
+        fake = FakeRun()
+        out = self.burst(fake, resolver_external=RESOLVER)
+        self.assertEqual(fake.targets().count(RESOLVER), 1)
+        self.assertNotIn("sent", out["results"]["resolver"])
+
+
+class TestBurstFitsTheCycle(unittest.TestCase):
+    """다발이 주기를 넘기지 않는다 (QA-4, AC-3)."""
+
+    def test_individual_wait_is_unchanged(self):
+        self.assertEqual(first_hop.DEFAULT_WAIT_MS, 800)
+
+    def test_timeouts_are_larger_than_the_measured_duration(self):
+        """제한 시간이 먼저 끊으면 손실률이 네트워크가 아니라 우리 탓이 된다."""
+        one = first_hop.ping_seconds()
+        self.assertAlmostEqual(one, 1.8, places=2)   # 실측 1.84초와 같은 자리
+        self.assertGreater(first_hop.PING_TIMEOUT_SECONDS, one)
+        self.assertGreater(first_hop.RESULT_WAIT_SECONDS,
+                           first_hop.PING_TIMEOUT_SECONDS)
+
+    def test_subprocess_timeout_is_passed_down(self):
+        fake = FakeRun()
+        collect_with(fake, first_hop_burst=True, interval=5)
+        for c in fake.calls:
+            self.assertEqual(c["timeout"], first_hop.PING_TIMEOUT_SECONDS)
+
+    def test_three_probes_take_about_as_long_as_one(self):
+        """가짜 run 으로 소요를 고정해서 잰다.
+
+        판정은 벽시계가 아니라 Barrier 로 한다 — 세 발이 모두 도착해야 풀리므로,
+        직렬로 돌면 barrier 가 깨져 응답 수가 모자란다. 부하가 큰 기계에서
+        시간 비교만으로 판정하면 흔들린다.
+        """
+        delay = 0.1
+        fake = FakeRun(delay=delay, barrier=threading.Barrier(3))
+        t0 = time.monotonic()
+        g = collect_with(fake, first_hop_burst=True,
+                         interval=5)["results"]["gateway"]
+        spent = time.monotonic() - t0
+        self.assertEqual(g["received"], 3)        # 셋이 같은 순간에 돌았다
+        self.assertNotIn("errors", g)
+        self.assertLess(spent, delay * 3)         # 직렬이면 최소 세 배다
+
+    def test_no_burst_while_the_cycle_is_short(self):
+        """조사 중 2~3초 주기에서는 다발을 하지 않는다."""
+        fake = FakeRun()
+        out = collect_with(fake, first_hop_burst=True, interval=2.5)
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(out["first_hop_probes"], 1)
+        self.assertEqual(first_hop.burst_probes({"first_hop_burst": True,
+                                                 "interval": 3.0}), 3)
+
+    def test_unknown_interval_still_bursts(self):
+        self.assertEqual(first_hop.burst_probes({"first_hop_burst": True}), 3)
+        self.assertEqual(first_hop.burst_probes({"first_hop_burst": True,
+                                                 "interval": "?"}), 3)
+
+    def test_unreadable_numbers_do_not_end_the_cycle(self):
+        """읽을 수 없는 수가 와도 **예외로 끝나지 않는다** (DEV-15).
+
+        `float(10**400)` 과 `int(float("inf"))` 는 `OverflowError` 를 던지는데
+        그것은 `TypeError`·`ValueError` 가 아니다. 잡지 않으면 수집기 주기
+        하나가 통째로 예외로 끝난다. JSON 은 `Infinity` 와 큰 정수를 그대로
+        읽으므로(`json.loads` 기본값) 손으로 고친 설정에서 올 수 있다.
+        `packets_per_command` 쪽은 DEV-16 이 같은 이유로 고쳤고, 여기 두
+        `except` 가 남아 있었다.
+        """
+        for interval in (10 ** 400, float("inf"), float("nan")):
+            with self.subTest(interval=interval):
+                self.assertEqual(first_hop.burst_probes(
+                    {"first_hop_burst": True, "interval": interval}), 3)
+        # 읽히는 값은 종전대로다 — 짧은 주기면 다발을 끈다.
+        self.assertEqual(first_hop.burst_probes(
+            {"first_hop_burst": True, "interval": float("-inf")}), 1)
+        for want in (float("inf"), float("nan"), "많이"):
+            with self.subTest(burst_probes=want):
+                self.assertEqual(first_hop.burst_probes(
+                    {"first_hop_burst": True, "interval": 5,
+                     "burst_probes": want}), first_hop.BURST_PROBES)
+
+
+class TestBurstPartialFailure(unittest.TestCase):
+    """다발이 부분적으로 실패해도 관측으로 끝난다 (ADV-4, AC-1, AC-3)."""
+
+    def burst(self, fake, **ctx):
+        return collect_with(fake, first_hop_burst=True, interval=5, **ctx)
+
+    def test_only_one_of_three_answers(self):
+        g = self.burst(FakeRun(outs=[LOST, reply_with(9.0), LOST]))["results"]["gateway"]
+        self.assertEqual((g["sent"], g["received"]), (3, 1))
+        self.assertEqual(g["loss_pct"], 66.7)
+        self.assertFalse(g["reachable"])          # 첫 발이 답하지 않았다
+        self.assertTrue(g["any_reachable"])       # 그래도 하나는 왔다 (증거)
+
+    def test_nothing_answers(self):
+        g = self.burst(FakeRun(outs=[LOST]))["results"]["gateway"]
+        self.assertEqual((g["sent"], g["received"]), (3, 0))
+        self.assertEqual(g["loss_pct"], 100.0)
+        self.assertFalse(g["reachable"])
+        self.assertIsNone(g["rtt_ms"])
+        self.assertIsNone(g["rtt_min_ms"])
+
+    def test_command_itself_fails(self):
+        g = self.burst(FakeRun(outs=[""], rc=127))["results"]["gateway"]
+        self.assertEqual((g["sent"], g["received"]), (3, 0))
+        self.assertEqual(g["loss_pct"], 100.0)
+
+    def test_command_times_out(self):
+        g = self.burst(FakeRun(outs=[""], timed_out=True))["results"]["gateway"]
+        self.assertEqual((g["sent"], g["received"]), (3, 0))
+        self.assertEqual(g["loss_pct"], 100.0)
+
+    def test_a_probe_raising_is_an_observation_not_an_exception(self):
+        def boom(target, count=1, **kw):
+            if boom.n:
+                boom.n -= 1
+                raise RuntimeError("측정 실패")
+            return {"rtt_ms": 5.0, "rtt_max_ms": 5.0, "loss_pct": 0.0,
+                    "replies": 1, "reachable": True}
+        boom.n = 2
+        with mock.patch.object(first_hop, "ping", boom):
+            out = first_hop.collect({"gateway": GW, "first_hop_burst": True,
+                                     "interval": 5})
+        g = out["results"]["gateway"]
+        self.assertEqual((g["sent"], g["received"]), (3, 1))
+        self.assertEqual(g["loss_pct"], 66.7)
+        # 남는 것은 **예외 종류 이름**이다. 메시지를 옮기면 거기에 경로나
+        # 주소가 섞여 들어올 수 있다 (DEV-13 (e), collect/link._error_note).
+        self.assertEqual(g["errors"], ["RuntimeError"])
+        self.assertNotIn("측정 실패", repr(out))
+
+    def test_loss_stays_inside_the_observed_range(self):
+        for outs in ([LOST], [REPLY], [REPLY, LOST, LOST]):
+            g = self.burst(FakeRun(outs=outs))["results"]["gateway"]
+            self.assertGreaterEqual(g["loss_pct"], 0.0)
+            self.assertLessEqual(g["loss_pct"], 100.0)
+            self.assertEqual(g["sent"], 3)
+
+    def test_no_gateway_means_no_measurement(self):
+        fake = FakeRun()
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.collect({"first_hop_burst": True, "interval": 5})
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(out["targets"], {})
+        self.assertNotIn("first_hop_probes", out)
+
+
+class TestEngineRemembersTheLastTwoCycles(unittest.TestCase):
+    """엔진이 직전 주기(그리고 그 앞)를 제대로 들고 있는가 (QA-3, AC-2).
+
+    수집은 돌리지 않는다 — 합성 관측을 그대로 기억시키고 판단만 본다.
+    """
+
+    def _engine(self, *observations, state=None):
+        eng = Engine.__new__(Engine)
+        # 보정 상태는 판정 방법을 정한다. 주지 않으면 보정 중(unknown)이다.
+        eng.state = dict(state or {})
+        for o in observations:
+            eng._remember_for_burst(o)
+        return eng
+
+    def test_first_cycle_is_quiet(self):
+        self.assertFalse(self._engine()._burst_hint())
+
+    def test_quiet_cycles_stay_quiet(self):
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connected")),
+                           helpers.obs(vpn=helpers.vpn_state("connected")))
+        self.assertFalse(eng._burst_hint())
+
+    def test_silent_first_hop_last_cycle_turns_it_on(self):
+        """ICMP 로 판정하는 망에서는 종전 그대로다."""
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connected")),
+                           helpers.obs(icmp_ok=False,
+                                       vpn=helpers.vpn_state("connected")),
+                           state={"icmp_gw": True})
+        self.assertTrue(eng._burst_hint())
+
+    def test_an_icmp_silent_network_stays_quiet(self):
+        """게이트웨이가 ICMP 를 막아 둔 망(보정 결과 ARP 판정).
+
+        그 망에서는 `gateway_reachable` 이 정상 상태에도 매 주기 False 라,
+        그것만 보고 켜면 아무 일도 없는데 5초마다 3발이 나간다 (AC-2).
+        """
+        eng = self._engine(state={"icmp_gw": False})
+        for _ in range(5):
+            eng._remember_for_burst(helpers.obs(icmp_ok=False,
+                                                vpn=helpers.vpn_state("connected")))
+            self.assertFalse(eng._burst_hint())
+
+    def test_an_icmp_silent_network_turns_it_on_when_the_arp_signal_goes(self):
+        """같은 망에서 `arp.gateway_mac` 이 비면 켠다.
+
+        그 망의 도달성 판정 신호가 그것이기 때문이다. 이 신호가 실제 끊김을
+        드러낸다는 근거는 없다(netmon/collect/link.py 의 주석).
+        """
+        eng = self._engine(helpers.obs(icmp_ok=False,
+                                       vpn=helpers.vpn_state("connected")),
+                           helpers.obs(icmp_ok=False, gw_mac=None,
+                                       vpn=helpers.vpn_state("connected")),
+                           state={"icmp_gw": False})
+        self.assertTrue(eng._burst_hint())
+
+    def test_a_network_being_calibrated_stays_quiet_while_arp_is_fine(self):
+        """보정 중(unknown)에는 liveness 와 같은 우선순위로 본다."""
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connected")),
+                           helpers.obs(icmp_ok=False,
+                                       vpn=helpers.vpn_state("connected")))
+        self.assertFalse(eng._burst_hint())
+
+    def test_a_state_change_one_cycle_ago_turns_it_on(self):
+        """직전 주기에 다시 connected 가 됐어도, 바뀐 주기 다음은 재 본다."""
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connecting")),
+                           helpers.obs(vpn=helpers.vpn_state("connected")))
+        self.assertTrue(eng._burst_hint())
+
+    def test_it_goes_quiet_again_two_cycles_later(self):
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connecting")),
+                           helpers.obs(vpn=helpers.vpn_state("connected")),
+                           helpers.obs(vpn=helpers.vpn_state("connected")))
+        self.assertFalse(eng._burst_hint())
+
+    def test_a_cycle_without_a_link_still_counts(self):
+        """판정을 건너뛰는 주기야말로 다음 주기를 다발로 재야 할 이유다."""
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connected")),
+                           helpers.obs(gateway=None, icmp_ok=None,
+                                       vpn=helpers.vpn_state("disconnected")))
+        self.assertTrue(eng._burst_hint())
+
+
+class TestBurstDoesNotChangeExistingJudgements(unittest.TestCase):
+    """다발이 기존 판정을 바꾸지 않는다 (AC-1b).
+
+    `gateway_reachable`·`gateway_rtt_ms` 는 첫 홉 연속 실패 셈과 지연
+    기준선으로 흘러간다 (netmon/liveness.py, netmon/baseline.py).
+    여기서 값이 바뀌면 `FIRST_HOP_BRIEF_GAP` 이 전과 다르게 뜬다.
+    """
+
+    def burst(self, outs):
+        return collect_with(FakeRun(outs=outs), first_hop_burst=True, interval=5)
+
+    def test_reachability_follows_the_first_probe(self):
+        first_lost = self.burst([LOST, REPLY, REPLY])
+        self.assertFalse(first_lost["gateway_reachable"])
+        self.assertIsNone(first_lost["gateway_rtt_ms"])
+        first_ok = self.burst([reply_with(7.0), LOST, LOST])
+        self.assertTrue(first_ok["gateway_reachable"])
+        self.assertEqual(first_ok["gateway_rtt_ms"], 7.0)
+
+    def test_rtt_baseline_gets_the_first_probe_not_the_average(self):
+        """느린 두 발이 기준선을 끌어올리면 RTT_SPIKE 판정이 달라진다."""
+        out = self.burst([reply_with(10.0), reply_with(300.0), reply_with(300.0)])
+        self.assertEqual(out["gateway_rtt_ms"], 10.0)
+
+    def test_fail_streak_counts_the_same_as_a_single_shot_cycle(self):
+        """1/3 응답 주기가 연속 실패 셈을 초기화하지 않는다."""
+        from netmon import baseline
+
+        def streak(observation):
+            state = {"icmp_gw": True, "gw_fail_streak": 4}
+            return baseline.update_counters(state, observation, [], 5.0, 5.0)
+
+        partial = self.burst([LOST, reply_with(9.0), LOST])
+        burst_obs = helpers.obs(icmp_ok=None)
+        burst_obs.data["link"] = partial
+        single = helpers.obs(icmp_ok=False)
+        self.assertEqual(streak(burst_obs)["gw_fail_streak"],
+                         streak(single)["gw_fail_streak"])
+        self.assertEqual(streak(burst_obs)["gw_fail_streak"], 5)
+
+    def test_a_burst_whose_first_probe_answers_clears_the_streak_as_before(self):
+        from netmon import baseline
+
+        out = self.burst([reply_with(9.0), LOST, LOST])
+        o = helpers.obs(icmp_ok=None)
+        o.data["link"] = out
+        new = baseline.update_counters({"icmp_gw": True, "gw_fail_streak": 4},
+                                       o, [], 5.0, 5.0)
+        self.assertEqual(new["gw_fail_streak"], 0)
+        self.assertEqual(new["gw_fail_streak_prev"], 4)
+
+
+class TestPingCountInteraction(unittest.TestCase):
+    """`ping_count` 를 올려 둔 사람 (QA-13, AC-12)."""
+
+    def test_burst_never_sends_fewer_than_the_configured_count(self):
+        fake = FakeRun()
+        out = collect_with(fake, first_hop_burst=True, interval=5, ping_count=5)
+        self.assertEqual(len(fake.calls), 5)
+        for c in fake.calls:
+            self.assertEqual(c["argv"][3], "1")   # 다발은 1발씩 쪼개서 동시에
+        self.assertEqual(out["first_hop_probes"], 5)
+        self.assertEqual(out["results"]["gateway"]["sent"], 5)
+
+    def test_the_usual_three_when_the_count_is_the_default(self):
+        fake = FakeRun()
+        collect_with(fake, first_hop_burst=True, interval=5, ping_count=1)
+        self.assertEqual(len(fake.calls), 3)
+
+
+# --- 터널 엔드포인트 (AC-4, AC-4b, AC-4c) ---
+
+ENDPOINT = helpers.ENDPOINT
+
+
+class TestTunnelEndpointTarget(unittest.TestCase):
+    """동의·기능이 켜졌을 때만, 공인 유니캐스트에만 (QA-5, ADV-5, ADV-6)."""
+
+    def test_without_the_gate_nothing_goes_out_and_nothing_is_recorded(self):
+        """동의·기능이 없으면 관측 항목도 만들지 않는다 (AC-4)."""
+        fake = FakeRun()
+        out = collect_with(fake, tunnel_endpoint=ENDPOINT)
+        self.assertEqual(fake.targets(), [GW])
+        self.assertNotIn("tunnel_endpoint", out["targets"])
+        self.assertNotIn("tunnel_endpoint", out["results"])
+
+    def test_the_gate_alone_sends_nothing(self):
+        """주소를 모르는 주기 — 끊김 첫 주기가 이쪽이다 (AC-4c)."""
+        fake = FakeRun()
+        out = collect_with(fake, allow_tunnel_probe=True)
+        self.assertEqual(fake.targets(), [GW])
+        self.assertNotIn("tunnel_endpoint", out["results"])
+
+    def test_with_both_it_is_measured_and_the_address_is_wrapped(self):
+        fake = FakeRun()
+        out = collect_with(fake, allow_tunnel_probe=True, tunnel_endpoint=ENDPOINT)
+        self.assertEqual(sorted(fake.targets()), sorted([GW, ENDPOINT]))
+        self.assertEqual(out["targets"]["tunnel_endpoint"], ident("ipv4", ENDPOINT))
+        self.assertTrue(out["results"]["tunnel_endpoint"]["reachable"])
+
+    def test_blocked_addresses_are_never_probed(self):
+        """대상 주소를 외부 문자열이 정한다 (ADV-6).
+
+        부르는 쪽이 이미 걸렀어야 하지만, 여기서도 다시 본다.
+        """
+        for addr in ("127.0.0.1", "::1", "169.254.0.0", "224.0.0.0",
+                     "255.255.255.255", "10.0.0.0", "192.168.0.0", "172.16.0.0",
+                     "100.64.0.0", "0.0.0.0", "fe80::1", "not-an-address"):
+            fake = FakeRun()
+            out = collect_with(fake, allow_tunnel_probe=True, tunnel_endpoint=addr)
+            self.assertEqual(fake.targets(), [GW], addr)
+            self.assertNotIn("tunnel_endpoint", out["results"], addr)
+
+    def test_it_does_not_change_the_first_hop_verdict(self):
+        """판정이 읽는 값은 게이트웨이 것 그대로다 (AC-1b, AC-12)."""
+        fake = FakeRun(outs=[REPLY, LOST])
+        out = collect_with(fake, allow_tunnel_probe=True, tunnel_endpoint=ENDPOINT)
+        self.assertTrue(out["gateway_reachable"])
+        self.assertEqual(out["gateway_rtt_ms"], 12.3)
+        self.assertEqual(out["first_hop_probes"], 1)
+
+    def test_a_failure_records_only_the_error_kind(self):
+        """실패 문구에는 주소·경로가 섞일 수 있다 (DEV-8 검수 지적, DEV-13 (e)).
+
+        감싸지 않은 문자열은 내보낼 때도 가려지지 않으므로 **대상을 가리지
+        않고** 예외 종류 이름까지만 남긴다. 처음에는 엔드포인트만 그랬는데,
+        게이트웨이 쪽 문구도 그대로 `first_hop_errors` 로 이벤트 증거에
+        실린다는 것이 뒤에 드러났다.
+        """
+        def exploding(argv, timeout=None, stdin=""):
+            raise RuntimeError("ping %s failed" % argv[-1])
+
+        with mock.patch.object(first_hop, "run", exploding):
+            out = first_hop.collect({"gateway": GW, "allow_tunnel_probe": True,
+                                     "tunnel_endpoint": ENDPOINT})
+        endpoint = out["results"]["tunnel_endpoint"]
+        self.assertEqual(endpoint["error"], "RuntimeError")
+        self.assertNotIn(ENDPOINT, endpoint["error"])
+        self.assertFalse(endpoint["reachable"])
+        # 게이트웨이 쪽도 같다 — 메시지에는 대상 주소가 들어 있다.
+        self.assertEqual(out["results"]["gateway"]["error"], "RuntimeError")
+        self.assertNotIn("failed", repr(out))
+        self.assertNotIn(GW, repr(out["results"]))
+
+
+class TestTunnelEndpointRidesWithTheBurst(unittest.TestCase):
+    """같은 묶음에서 동시에 나간다 (QA-22, AC-4c).
+
+    직렬로 뒤에 붙이면 무응답 대상 기준 약 1.84초가 더 들어 조사 중 2~3초
+    주기를 넘긴다.
+    """
+
+    def test_four_jobs_one_moment(self):
+        barrier = threading.Barrier(4)     # 네 발이 다 도착해야 풀린다
+        fake = FakeRun(barrier=barrier)
+        seen = []
+        real = first_hop.concurrent.futures.ThreadPoolExecutor
+
+        def recording(max_workers=None, **kw):
+            seen.append(max_workers)
+            return real(max_workers=max_workers, **kw)
+
+        with mock.patch.object(first_hop.concurrent.futures, "ThreadPoolExecutor",
+                               recording):
+            out = collect_with(fake, first_hop_burst=True, interval=5,
+                               allow_tunnel_probe=True, tunnel_endpoint=ENDPOINT)
+        self.assertEqual(len(fake.calls), 4)
+        self.assertEqual(seen, [4])        # worker 수 = 작업 수. 직렬화되지 않는다
+        self.assertEqual(sorted(fake.targets()), sorted([GW, GW, GW, ENDPOINT]))
+        self.assertEqual(out["results"]["gateway"]["sent"], 3)
+        self.assertNotIn("sent", out["results"]["tunnel_endpoint"])
+
+
+class TestTheEndpointHonoursPingCount(unittest.TestCase):
+    """엔드포인트도 `ping_count` 만큼 보낸다 (AC-4 수정분).
+
+    README 가 "ICMP 한 발" 이라고 적고 있었는데, 실제로는 설정값만큼 나간다
+    (`collect/link.collect` 의 `per`). 설정을 올려 둔 사람에게는 틀린
+    문장이었다.
+    """
+
+    def _endpoint_call(self, fake):
+        return [c for c in fake.calls if c["argv"][-1] == ENDPOINT][0]
+
+    def test_the_default_is_one_packet(self):
+        fake = FakeRun()
+        collect_with(fake, allow_tunnel_probe=True, tunnel_endpoint=ENDPOINT)
+        self.assertEqual(self._endpoint_call(fake)["argv"][3], "1")
+
+    def test_a_raised_setting_raises_the_endpoint_too(self):
+        fake = FakeRun()
+        collect_with(fake, ping_count=3, allow_tunnel_probe=True,
+                     tunnel_endpoint=ENDPOINT)
+        self.assertEqual(self._endpoint_call(fake)["argv"][3], "3")
+
+
+class TestTheCollectorMarksACappedCycle(unittest.TestCase):
+    """상한에 닿아 보내지 않은 주기를 관측에서 알아볼 수 있는가 (AC-4 수정분).
+
+    결과를 만들지 않는 이유는 여럿이다(동의 없음, 주소 모름, 상한). 셋이
+    같은 모양이면 기록을 읽는 쪽이 왜 안 보냈는지 알 수 없다.
+    """
+
+    def test_a_capped_cycle_is_marked_and_sends_nothing(self):
+        fake = FakeRun()
+        out = collect_with(fake, allow_tunnel_probe=True, tunnel_endpoint=None,
+                           tunnel_probe_capped=True)
+        self.assertTrue(out[first_hop.TUNNEL_CAPPED])
+        self.assertNotIn(ENDPOINT, fake.targets())
+        self.assertNotIn("tunnel_endpoint", out["results"])
+        self.assertNotIn("tunnel_endpoint", out["targets"])
+
+    def test_the_mark_survives_a_cycle_with_no_targets_at_all(self):
+        """게이트웨이를 모르는 주기에도 남는다 — 그 주기가 바로 끊김 주기다."""
+        fake = FakeRun()
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.collect({"tunnel_probe_capped": True})
+        self.assertTrue(out[first_hop.TUNNEL_CAPPED])
+        self.assertEqual(out["targets"], {})
+        self.assertEqual(fake.calls, [])
+
+    def test_a_normal_cycle_carries_no_mark(self):
+        out = collect_with(FakeRun())
+        self.assertNotIn(first_hop.TUNNEL_CAPPED, out)
+        out = collect_with(FakeRun(), allow_tunnel_probe=True,
+                           tunnel_endpoint=ENDPOINT)
+        self.assertNotIn(first_hop.TUNNEL_CAPPED, out)
+
+
+class TestEngineDecidesWhetherToProbeTheEndpoint(unittest.TestCase):
+    """직전 주기의 VPN 상태와 동의로 정한다 (QA-5, QA-19, QA-22, ADV-5).
+
+    수집은 돌리지 않는다 — 합성 관측을 기억시키고 판단만 본다.
+    """
+
+    def _engine(self, *observations, consent=True, feature=True):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cfg = configmod.load(os.path.join(d, "config.json"))
+        if consent:
+            cfg.grant("external_probes", note="테스트")
+        cfg.set_feature("vpn.tunnel_probe", feature)
+        eng = Engine.__new__(Engine)
+        eng.cfg = cfg
+        eng.state = {}
+        for o in observations:
+            eng._remember_for_burst(o)
+        return eng
+
+    def _down(self, reason=helpers.ENDPOINT_REASON, state="disconnected"):
+        return helpers.obs(vpn=helpers.vpn_state(state, reason=reason))
+
+    def test_a_cycle_after_a_disconnection_gets_the_address(self):
+        self.assertEqual(self._engine(self._down())._claim_tunnel_probe()[0], ENDPOINT)
+
+    def test_the_first_cycle_of_an_outage_has_no_address_yet(self):
+        """직전 주기가 connected 면 주소가 없다. 한 주기 늦게 시작된다 (AC-4c)."""
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connected")))
+        self.assertIsNone(eng._claim_tunnel_probe()[0])
+
+    def test_a_normal_cycle_sends_nothing(self):
+        """평소 주기에는 보내지 않는다 (QA-19)."""
+        eng = self._engine(helpers.obs(vpn=helpers.vpn_state(
+            "connected", reason=helpers.ENDPOINT_REASON)))
+        self.assertIsNone(eng._claim_tunnel_probe()[0])
+
+    def test_no_previous_cycle_no_address(self):
+        self.assertIsNone(self._engine()._claim_tunnel_probe()[0])
+
+    def test_the_feature_alone_does_not_open_the_gate(self):
+        self.assertIsNone(self._engine(self._down(), consent=False)._claim_tunnel_probe()[0])
+
+    def test_the_consent_alone_does_not_open_the_gate(self):
+        self.assertIsNone(self._engine(self._down(), feature=False)._claim_tunnel_probe()[0])
+
+    def test_revoking_the_consent_closes_it_again(self):
+        eng = self._engine(self._down())
+        self.assertEqual(eng._claim_tunnel_probe()[0], ENDPOINT)
+        eng.cfg.revoke("external_probes")
+        self.assertIsNone(eng._claim_tunnel_probe()[0])
+
+    def test_a_hostile_address_never_becomes_a_target(self):
+        eng = self._engine(self._down(reason="No Network via 127.0.0.1:2408"))
+        self.assertIsNone(eng._claim_tunnel_probe()[0])
+
+
+class TestTheProbeCap(unittest.TestCase):
+    """**한 공급자의 한 끊김에 최대 12발** (AC-4 수정분, 사용자 결정 2026-09-22).
+
+    67분짜리 끊김에서 수백 발이 제3자에게 나가는 일을 막는다. 세는 단위는
+    공급자 하나의 끊김 하나이고, 그 공급자가 다시 연결되면 0 부터 센다.
+
+    **부르는 것이 곧 예산을 쓰는 것이다** — `_claim_tunnel_probe()` 는 보내기로
+    정하면서 그 발 수를 센다. 아래에서 한 테스트가 여러 번 부르는 것은 여러
+    주기를 흉내 내는 것이다.
+    """
+
+    def _engine(self, state=None, last_vpn=None, ping_count=None):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cfg = configmod.load(os.path.join(d, "config.json"))
+        cfg.grant("external_probes", note="테스트")
+        cfg.set_feature("vpn.tunnel_probe", True)
+        if ping_count is not None:
+            cfg.data["ping_count"] = ping_count
+        eng = Engine.__new__(Engine)
+        eng.cfg = cfg
+        eng.state = {} if state is None else state
+        eng._last_vpn = last_vpn if last_vpn is not None else helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON)
+        return eng
+
+    def _counts(self, eng):
+        return eng.state.get(enginemod.ENDPOINT_PROBES_KEY)
+
+    def test_the_cap_is_twelve(self):
+        self.assertEqual(vpnmod.TUNNEL_PROBE_CAP, 12)
+
+    def test_twelve_go_out_and_the_thirteenth_does_not(self):
+        eng = self._engine()
+        for i in range(12):
+            self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False), i)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng),
+                         {"warp": {"shots": 12, "capped": True}})
+
+    def test_the_cap_counts_packets_not_cycles(self):
+        """한 주기에 나가는 발 수는 `ping_count` 에 달렸다 (AC-4 는 "12발").
+
+        주기를 세면 `ping_count` 를 올려 둔 사람에게는 12발보다 많이 나간다
+        — 엔드포인트는 대상이 하나라 한 주기에 `ping_count` 발이 나간다
+        (`collect/link.collect` 의 `per = 1 if n > 1 else count`).
+        """
+        eng = self._engine(ping_count=3)
+        for i in range(4):
+            self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False), i)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng)["warp"]["shots"], 12)
+
+    def test_a_claim_that_would_pass_the_cap_sends_nothing_and_says_so(self):
+        """상한을 넘겨 보내느니 재지 않는다. 그 사실은 표시로 남는다.
+
+        남은 예산이 이번 주기의 발 수를 못 받는 실제 경로 — 끊김 중반 — 로
+        연다. `ping_count` 하나로도 열리지만(아래 13발 테스트) 그쪽은 첫
+        주기부터 막히는 갈래라 여기서 보려는 것과 다르다.
+        """
+        eng = self._engine(ping_count=3,
+                           state={enginemod.ENDPOINT_PROBES_KEY:
+                                  {"warp": {"shots": 10, "capped": False}}})
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng), {"warp": {"shots": 10, "capped": True}})
+
+    def test_a_ping_count_over_twelve_is_obeyed_and_the_cap_refuses_it(self):
+        """큰 설정도 **자르지 않는다** — 세는 값과 실제 인자가 같아야 한다.
+
+        (DEV-16: 상한 자르기를 없앴다. 잘라 두면 `ping_count` 를 올려 둔
+        사람의 평소 주기가 말없이 얇아진다.) 13발은 한 끊김 상한 12발보다
+        많으므로 엔드포인트 측정은 첫 주기부터 거절된다 — 상한을 넘겨
+        보내느니 보내지 않는다. 엔진이 세는 값과 수집기가 넘기는 인자가 같은
+        함수에서 오는지도 여기서 본다.
+        """
+        eng = self._engine(ping_count=13)
+        self.assertEqual(eng._endpoint_shots(), 13)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng), {"warp": {"shots": 0, "capped": True}})
+
+        # 상한이 거절하지 않았다면 실제로 나갔을 인자. 엔진이 센 값과 같아야
+        # 12발 상한이 뜻대로 센 것이 된다 (DEV-13 (b) 가 세우고 DEV-16 이
+        # 상한 값 대신 설정값으로 다시 맞춘 단언).
+        fake = FakeRun()
+        collect_with(fake, ping_count=13, allow_tunnel_probe=True,
+                     tunnel_endpoint=ENDPOINT)
+        for c in fake.calls:
+            self.assertEqual(c["argv"][3], str(eng._endpoint_shots()))
+
+        fake = FakeRun()
+        collect_with(fake, ping_count=13)
+        for c in fake.calls:
+            self.assertEqual(c["argv"][3], "13")
+
+    def test_a_ping_count_below_one_is_raised_not_passed_through(self):
+        """0·음수를 그대로 넘기면 `ping -c 0` 이 나가고 세는 값과 어긋난다."""
+        for bad in (0, -3):
+            eng = self._engine(ping_count=bad)
+            self.assertEqual(eng._endpoint_shots(), 1)
+            fake = FakeRun()
+            collect_with(fake, ping_count=bad)
+            self.assertEqual(fake.calls[0]["argv"][3], "1")
+
+    def test_a_broken_ping_count_is_read_as_one(self):
+        eng = self._engine(ping_count="많이")
+        self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False))
+        self.assertEqual(self._counts(eng)["warp"]["shots"], 1)
+
+    def test_the_count_is_where_a_restart_can_find_it(self):
+        """launchd 가 되살려도 상한이 남아 있어야 한다.
+
+        메모리에 두면 재시작마다 0 이 되어 긴 끊김에서 상한이 사실상
+        없어진다. 그래서 `state.json` 에 둔다.
+        """
+        eng = self._engine()
+        for _ in range(12):
+            eng._claim_tunnel_probe()
+        restarted = self._engine(state=dict(eng.state))
+        self.assertEqual(restarted._claim_tunnel_probe(), (None, True))
+
+    def test_it_works_without_the_key(self):
+        """키가 없거나 이상한 값이어도 0 부터 센다 (상태 파일 규칙).
+
+        정수 하나였던 옛 모양도 여기에 든다 — 그 판은 공급자를 가리지 않고
+        하나로 셌다.
+        """
+        KEY = enginemod.ENDPOINT_PROBES_KEY
+        for state in ({}, {KEY: "많이"}, {KEY: None}, {KEY: True}, {KEY: 12},
+                      {KEY: {"warp": 12}}, {KEY: {"warp": None}},
+                      {KEY: {"warp": {"shots": "많이"}}}):
+            eng = self._engine(state=dict(state))
+            self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False), state)
+
+    def test_reconnecting_starts_the_count_again(self):
+        eng = self._engine()
+        for _ in range(12):
+            eng._claim_tunnel_probe()
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+        eng._last_vpn = helpers.vpn_state("connected")
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        self.assertNotIn(enginemod.ENDPOINT_PROBES_KEY, eng.state)
+
+        eng._last_vpn = helpers.vpn_state("disconnected",
+                                          reason=helpers.ENDPOINT_REASON)
+        for i in range(12):
+            self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False), i)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+    def test_a_provider_that_is_always_unknown_does_not_eat_the_budget(self):
+        """늘 `unknown` 인 공급자가 있어도 상한은 "한 끊김" 으로 남는다.
+
+        `MacOSNative` 는 직접 담당할 서비스가 없으면 설계상 늘 `unknown` 을
+        돌려주고(`vpn/__init__.py` 의 "직접 담당할 서비스 없음"), `scutil` 은
+        모든 맥에 있어 기본 설정에서 그 공급자가 늘 목록에 든다. 창을
+        "아무 공급자나 비connected" 로 세면 창이 영영 닫히지 않아, 첫 12발을
+        쓰고 나면 **그 뒤의 어떤 끊김에서도 한 발도 나가지 않았다**
+        (검수 1차 지적).
+        """
+        def block(warp_state):
+            out = {"macos": {"provider": "macos", "state": "unknown",
+                             "reason": "직접 담당할 서비스 없음 (전용 공급자가 처리)"}}
+            out.update(helpers.vpn_state(warp_state,
+                                         reason=helpers.ENDPOINT_REASON))
+            return out
+
+        eng = self._engine(last_vpn=block("disconnected"))
+        for _ in range(12):
+            eng._claim_tunnel_probe()
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+        # 끊김이 끝났다. 늘 unknown 인 공급자가 옆에 있어도 창이 닫힌다.
+        eng._last_vpn = block("connected")
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        self.assertNotIn(enginemod.ENDPOINT_PROBES_KEY, eng.state)
+
+        # 다음 끊김에서는 다시 잰다 — 이 작업이 만들려는 근거가 그 시점부터
+        # 수집되지 않는 것이 고치기 전의 결함이었다.
+        eng._last_vpn = block("disconnected")
+        self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False))
+
+    def test_a_failed_provider_query_does_not_refill_the_cap(self):
+        """`unknown` 주기는 보내지도 않고 세던 것을 버리지도 않는다.
+
+        버리면 조회가 간헐적으로 실패하는 동안 상한이 계속 되살아난다.
+        """
+        eng = self._engine()
+        for _ in range(12):
+            eng._claim_tunnel_probe()
+        eng._last_vpn = helpers.vpn_state("unknown",
+                                          reason=helpers.ENDPOINT_REASON)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        eng._last_vpn = helpers.vpn_state("disconnected",
+                                          reason=helpers.ENDPOINT_REASON)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+    def test_a_missing_vpn_block_does_not_refill_the_cap(self):
+        """수집이 통째로 실패한 주기도 "연결됐다" 가 아니다."""
+        eng = self._engine()
+        for _ in range(12):
+            eng._claim_tunnel_probe()
+        eng._last_vpn = {}
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        eng._last_vpn = helpers.vpn_state("disconnected",
+                                          reason=helpers.ENDPOINT_REASON)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+    def test_a_provider_that_replaces_another_in_the_block_has_its_own_budget(self):
+        """예산은 공급자별이다 — **블록을 바꿔 끼워** 확인한다 (DEV-13 (c)).
+
+        여기서 보는 것은 "한 공급자가 예산을 다 쓴 뒤, 블록에 다른 공급자가
+        올라오면 그쪽은 제 예산으로 잰다" 까지다. 두 공급자가 **같은 블록에
+        동시에** 비연결인 경우는 이 경로를 지나지 않는다 — 아래 테스트가 본다.
+        """
+        other = "No Network via 203.0.113.9:2408"
+        eng = self._engine(last_vpn=helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON))
+        for _ in range(12):
+            eng._claim_tunnel_probe()
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+        eng._last_vpn = helpers.vpn_state("disconnected", reason=other,
+                                          provider="tailscale")
+        self.assertEqual(eng._claim_tunnel_probe(), ("203.0.113.9", False))
+        self.assertEqual(self._counts(eng)["tailscale"]["shots"], 1)
+        self.assertEqual(self._counts(eng)["warp"]["shots"], 12)
+
+    def test_two_providers_down_together_share_one_cycle_and_the_first_name_wins(self):
+        """같은 블록에 둘이 동시에 비연결이면 **이름 순 첫 공급자만** 잰다.
+
+        `tunnel_probe_target` 이 블록을 이름 순으로 훑어 첫 후보 하나만
+        돌려주고(netmon/vpn), 엔진은 한 주기에 한 번만 청구한다. 그래서 그가
+        상한에 닿으면 둘째는 그 끊김 내내 한 발도 못 잰다. 방향은 안전하지만
+        (적게 보낸다) 기록에는 둘째의 측정이 아예 없다 — 기록을 읽는 쪽이
+        "쟀는데 안 됐다" 로 읽지 않도록 여기에 적어 둔다.
+        """
+        block = dict(helpers.vpn_state("disconnected",
+                                       reason=helpers.ENDPOINT_REASON))
+        block.update(helpers.vpn_state("disconnected", provider="tailscale",
+                                       reason="No Network via 203.0.113.9:2408"))
+        eng = self._engine(last_vpn=block)
+        for i in range(12):
+            # tailscale < warp — 이름 순 첫 공급자다.
+            self.assertEqual(eng._claim_tunnel_probe(), ("203.0.113.9", False), i)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng),
+                         {"tailscale": {"shots": 12, "capped": True}})
+        self.assertNotIn("warp", self._counts(eng))
+
+    def test_a_cycle_without_an_address_is_not_counted(self):
+        """주소를 못 고른 주기는 보내지 않은 주기다."""
+        eng = self._engine(last_vpn=helpers.vpn_state("disconnected",
+                                                      reason="No Network"))
+        for _ in range(20):
+            self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        self.assertNotIn(enginemod.ENDPOINT_PROBES_KEY, eng.state)
+
+    def test_a_closed_gate_never_counts_or_caps(self):
+        """동의가 없으면 세지도 않고 상한 표시도 만들지 않는다 (ADV-5)."""
+        eng = self._engine()
+        eng.cfg.revoke("external_probes")
+        for _ in range(20):
+            self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        self.assertNotIn(enginemod.ENDPOINT_PROBES_KEY, eng.state)
+
+    def test_the_first_cycle_of_a_process_does_not_touch_the_count(self):
+        """직전 주기가 아직 없는 주기는 "끊김이 끝났다" 가 아니다.
+
+        `_last_vpn` 은 `observe()` 끝에서야 채워지므로 새 프로세스의 첫
+        주기에는 없다. 여기서 기록을 지우면 launchd 가 되살릴 때마다 12발이
+        새로 채워진다 (검수 1차 지적). `observe()` 를 통째로 돌리는 확인은
+        TestEnginePassesBothGatesToTheCollector 에 있다.
+        """
+        saved = {"warp": {"shots": 12, "capped": True}}
+        eng = self._engine(state={enginemod.ENDPOINT_PROBES_KEY: dict(saved)})
+        del eng._last_vpn  # 클래스 기본값(None)으로 되돌린다 = 첫 주기
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        self.assertEqual(self._counts(eng), saved)
+
+
+class TestEnginePassesBothGatesToTheCollector(unittest.TestCase):
+    """엔진이 수집기에 넘기는 ctx 키가 실제로 맞물리는가 (QA-5, QA-22).
+
+    수집기는 `allow_tunnel_probe` 와 `tunnel_endpoint` 를 본다. 이름이 어긋나면
+    기능이 조용히 죽거나(꺼짐) 조용히 산다(켜짐) — 어느 쪽도 로그에 남지 않는다.
+    그래서 `observe()` 를 한 번 돌려 무엇이 넘어가는지 본다. 수집기는 전부
+    가짜라 명령이 실행되지 않는다.
+    """
+
+    def _observe(self, consent=True, feature=True, last_vpn=None,
+                 vpn_now=None, state=None):
+        from netmon.collect import arp, dhcp, dns, iface, route, wifi
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cfg = configmod.load(os.path.join(d, "config.json"))
+        if consent:
+            cfg.grant("external_probes", note="테스트")
+        cfg.set_feature("vpn.tunnel_probe", feature)
+        eng = Engine.__new__(Engine)
+        eng.cfg = cfg
+        eng.state = {} if state is None else state
+        eng.needs = {}
+        eng.prev = None
+        eng.prev_wall = None
+        eng._arp_log_read_at = None
+        if last_vpn is not None:
+            # **넘기지 않으면 세팅하지 않는다.** 새 프로세스의 첫 주기에는
+            # `_last_vpn` 이 아예 없다(클래스 기본값 None) — 그 주기를
+            # 모사하려면 여기서 대신 채워 주면 안 된다 (검수 1차 지적).
+            eng._last_vpn = last_vpn
+        seen = {}
+
+        def fake_link_collect(ctx):
+            seen.update(ctx)
+            return {}
+
+        with contextlib.ExitStack() as stack:
+            for mod in (iface, arp, dhcp, route, dns, wifi):
+                stack.enter_context(mock.patch.object(mod, "collect",
+                                                      lambda ctx=None: {}))
+            stack.enter_context(mock.patch.object(first_hop, "collect",
+                                                  fake_link_collect))
+            if vpn_now is not None:
+                # 이번 주기의 VPN 상태를 정해 준다. 공급자 조회는 하지 않는다.
+                cfg.set_feature("vpn.enabled", True)
+                stack.enter_context(mock.patch.object(vpnmod, "resolve",
+                                                      lambda names: []))
+                stack.enter_context(mock.patch.object(vpnmod, "collect",
+                                                      lambda providers: vpn_now))
+            self.obs = eng.observe()
+        return seen
+
+    def test_the_address_and_the_gate_both_reach_the_collector(self):
+        seen = self._observe(last_vpn=helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON))
+        self.assertTrue(seen["allow_tunnel_probe"])
+        self.assertEqual(seen["tunnel_endpoint"], ENDPOINT)
+
+    def test_without_consent_the_collector_gets_nothing_to_send(self):
+        seen = self._observe(consent=False, last_vpn=helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON))
+        self.assertFalse(seen["allow_tunnel_probe"])
+        self.assertIsNone(seen["tunnel_endpoint"])
+
+    def test_a_probe_can_still_go_out_right_after_reconnecting(self):
+        """직전 주기에 주소가 있었으면 재접속 직후 첫 주기에도 나간다.
+
+        이번 주기의 VPN 상태는 이 결정을 내릴 때 아직 없다 — link 가 vpn
+        보다 먼저 돌기 때문이다(`netmon/engine.py` 의 수집 순서).
+
+        **"나간다" 가 아니라 "나갈 수 있다" 다.** 이 픽스처는 직전 주기 사유에
+        주소가 있는 경우를 준다(`helpers.ENDPOINT_REASON`). 주소가 없었으면
+        대상이 없어 한 발도 나가지 않는다. 발 수도 "한 번" 이 아니라
+        `ping_count` 만큼이다. 문구 네 곳이 그렇게 적혀 있고(AC-4 수정분 (d)),
+        여기서 고정하는 것은 **주소가 있었을 때의 동작**이다.
+        """
+        seen = self._observe(
+            last_vpn=helpers.vpn_state("disconnected",
+                                       reason=helpers.ENDPOINT_REASON),
+            vpn_now=helpers.vpn_state("connected"))
+        self.assertEqual(seen["tunnel_endpoint"], ENDPOINT)
+        # 이번 주기의 관측에는 이미 connected 로 적힌다.
+        self.assertEqual(self.obs.data["vpn"]["warp"]["state"], "connected")
+
+    def test_a_capped_cycle_reaches_the_collector_as_a_mark(self):
+        """상한에 닿은 주기는 주소 없이 '상한' 표시만 넘어간다."""
+        eng_state = {enginemod.ENDPOINT_PROBES_KEY:
+                     {"warp": {"shots": vpnmod.TUNNEL_PROBE_CAP, "capped": True}}}
+        seen = self._observe(last_vpn=helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON), state=eng_state)
+        self.assertIsNone(seen["tunnel_endpoint"])
+        self.assertTrue(seen["tunnel_probe_capped"])
+
+    def test_the_first_cycle_after_a_restart_keeps_the_count_on_disk(self):
+        """새 프로세스의 첫 주기가 디스크에서 읽어 온 카운터를 지우지 않는다.
+
+        `_last_vpn` 은 `observe()` **끝**에서 채워지는데 `observe()` 는 맨 첫
+        줄에서 이 판단을 한다. 그래서 첫 주기는 늘 "직전 주기가 없다" 이고,
+        그것을 "끊김이 끝났다" 로 읽으면 launchd 가 되살릴 때마다 12발이
+        새로 채워진다 — 카운터를 `state.json` 에 둔 까닭이 바로 그 경로에서
+        무너진다 (검수 1차 지적). 여기서는 `_last_vpn` 을 **세팅하지 않고**
+        `observe()` 를 돌려 실제 첫 주기를 그대로 모사한다.
+        """
+        saved = {"warp": {"shots": vpnmod.TUNNEL_PROBE_CAP, "capped": True}}
+        state = {enginemod.ENDPOINT_PROBES_KEY: dict(saved)}
+        seen = self._observe(state=state)
+        # 그 주기에는 어차피 주소가 없다. 아무것도 나가지 않는다.
+        self.assertIsNone(seen["tunnel_endpoint"])
+        self.assertFalse(seen["tunnel_probe_capped"])
+        # **값으로 확인한다** — 디스크에서 읽어 온 카운터가 그대로 있어야 한다.
+        self.assertEqual(state[enginemod.ENDPOINT_PROBES_KEY], saved)
+
+        # 그다음 주기(직전 주기가 생긴 뒤)에는 상한이 그대로 걸린다.
+        seen = self._observe(state=state, last_vpn=helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON))
+        self.assertIsNone(seen["tunnel_endpoint"])
+        self.assertTrue(seen["tunnel_probe_capped"])
+
+
+# --- 실행되지 못한 탐침 (DEV-10, AC-10) ---------------------------------
+#
+# 아래 두 클래스는 **`util.run` 이 실제로 돌려주는 모양**으로 판정한다.
+# CmdResult 를 손으로 지어내면 실제 실패 경로(`FileNotFoundError` 갈래가
+# not_found 와 rc 를 함께 세우는 것 등)가 바뀌어도 통과해 버린다.
+
+MISSING_COMMAND = ["netmon-no-such-command-for-tests"]
+
+
+@contextlib.contextmanager
+def a_file_without_the_execute_bit():
+    d = tempfile.mkdtemp()
+    try:
+        path = os.path.join(d, "ping")
+        with open(path, "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(path, 0o644)
+        yield path
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+class TestTheShapesRunReallyReturns(unittest.TestCase):
+    """`util.run` 의 실패 갈래 세 가지. 네트워크로 아무것도 보내지 않는다."""
+
+    def test_a_command_that_is_not_there(self):
+        r = util.run(MISSING_COMMAND)
+        self.assertTrue(r.not_found)
+        self.assertEqual(r.rc, 127)
+        self.assertEqual(r.out, "")
+        self.assertFalse(r.ok)
+
+    def test_a_command_that_cannot_be_executed(self):
+        with a_file_without_the_execute_bit() as path:
+            r = util.run([path])
+        self.assertEqual(r.rc, 126)
+        self.assertFalse(r.not_found)
+        self.assertFalse(r.timed_out)
+        self.assertEqual(r.out, "")
+
+    def test_a_command_that_outlives_its_limit(self):
+        r = util.run(["sleep", "5"], timeout=0.05)
+        self.assertTrue(r.timed_out)
+        self.assertEqual(r.out, "")
+
+    def test_a_silent_ping_is_not_one_of_those(self):
+        """응답이 없는 ping 도 rc 는 0 이 아니다 — 실행은 됐다."""
+        r = CmdResult(["ping", GW], 2, LOST, "")
+        self.assertFalse(r.ok)
+        self.assertFalse(r.not_found)
+        self.assertFalse(r.timed_out)
+
+
+def ping_through(real_argv, limit=None, target=GW):
+    """`ping()` 을 `util.run` 의 **진짜 실패 결과**로 돌린다.
+
+    ping 명령은 실행하지 않는다. 대신 실패하는 다른 명령(없는 명령, 실행
+    권한이 없는 파일, 시간을 넘기는 sleep)을 실제로 돌려 그 CmdResult 를
+    ping 자리에 넣는다.
+    """
+    def fake(argv, timeout=None, stdin=""):
+        # 제한 시간은 이 시험이 정한다 — ping 의 4초를 실제로 기다리지 않는다.
+        return util.run(real_argv, timeout=limit) if limit else util.run(real_argv)
+
+    with mock.patch.object(first_hop, "run", fake):
+        return first_hop.ping(target)
+
+
+class TestAProbeThatCouldNotRunSaysSo(unittest.TestCase):
+    """나가지 않은 패킷을 무응답으로 적지 않는다 (DEV-10, AC-10).
+
+    `ping()` 이 `run` 의 rc·timed_out·not_found 를 버리면, 명령을 찾지
+    못한 주기도 `{replies: 0, loss_pct: 100.0, reachable: False}` 로만 나와
+    판정이 그것을 "무응답" 으로 읽는다. 관측에 남는 신호는 기존 `error`
+    키다 — 새 키를 만들지 않는다.
+    """
+
+    def test_a_missing_binary_is_recorded_as_not_run(self):
+        out = ping_through(MISSING_COMMAND)
+        self.assertEqual(out["error"], PROBE_NOT_RUN)
+        self.assertFalse(out["reachable"])
+
+    def test_a_binary_that_cannot_be_executed_is_recorded_as_not_run(self):
+        with a_file_without_the_execute_bit() as path:
+            out = ping_through([path])
+        self.assertEqual(out["error"], PROBE_NOT_RUN)
+
+    def test_a_timeout_is_recorded_as_a_different_thing(self):
+        """"실행되지 못함" 과 "끝나지 못함" 은 뜻이 다르다."""
+        out = ping_through(["sleep", "5"], limit=0.05)
+        self.assertEqual(out["error"], PROBE_TIMED_OUT)
+        self.assertNotEqual(PROBE_TIMED_OUT, PROBE_NOT_RUN)
+
+    def test_a_silent_but_real_ping_carries_no_error(self):
+        """가드가 넘치지 않는다 — 무응답 주기는 rc 가 0 이 아니어도 실행됐다."""
+        fake = FakeRun(outs=[LOST], rc=2)
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.ping(GW)
+        self.assertNotIn("error", out)
+        self.assertEqual(out["loss_pct"], 100.0)
+        self.assertFalse(out["reachable"])
+
+    def test_an_answered_ping_keeps_its_shape(self):
+        with mock.patch.object(first_hop, "run", FakeRun()):
+            out = first_hop.ping(GW)
+        self.assertEqual(set(out),
+                         {"rtt_ms", "rtt_max_ms", "loss_pct", "replies", "reachable"})
+
+    def test_the_note_is_a_fixed_word_without_the_target(self):
+        """터널 엔드포인트에도 같은 문구가 쓰인다 — 주소가 섞이면 안 된다.
+
+        `_error_note` 가 지키는 제약(고정된 낱말, 주소·경로 불포함)을 여기서도
+        지킨다. 권한 오류 메시지에는 실행 파일 경로가 들어 있다.
+        """
+        with a_file_without_the_execute_bit() as path:
+            out = ping_through([path], target=helpers.ENDPOINT)
+            self.assertNotIn(path, repr(out))
+        self.assertNotIn(helpers.ENDPOINT, repr(out))
+        self.assertIn(out["error"], (PROBE_NOT_RUN, PROBE_TIMED_OUT))
+
+    def test_the_whole_cycle_carries_the_failure(self):
+        """수집기를 통과해도 남는다. 다발은 합쳐진 `errors` 로 실린다."""
+        def fake(argv, timeout=None, stdin=""):
+            return util.run(MISSING_COMMAND)
+        with mock.patch.object(first_hop, "run", fake):
+            single = first_hop.collect({"gateway": GW})
+            burst = first_hop.collect({"gateway": GW, "first_hop_burst": True,
+                                       "interval": 5})
+        self.assertEqual(single["results"]["gateway"]["error"], PROBE_NOT_RUN)
+        self.assertEqual(burst["results"]["gateway"]["errors"], [PROBE_NOT_RUN])
+        self.assertEqual(burst["results"]["gateway"]["sent"], 3)
+
+    def test_the_endpoint_result_carries_it_without_the_address(self):
+        """엔드포인트 결과에도 주소가 섞이지 않는다 (DEV-10 4번)."""
+        with a_file_without_the_execute_bit() as path:
+            def fake(argv, timeout=None, stdin=""):
+                return util.run([path])
+            with mock.patch.object(first_hop, "run", fake):
+                block = first_hop.collect({"gateway": GW,
+                                           "allow_tunnel_probe": True,
+                                           "tunnel_endpoint": helpers.ENDPOINT})
+            got = block["results"][first_hop.TUNNEL_ENDPOINT]
+            self.assertEqual(got["error"], PROBE_NOT_RUN)
+            self.assertNotIn(path, repr(got))
+        self.assertNotIn(helpers.ENDPOINT, repr(got))
+
+
+class TestTheFutureBranchNeverLeavesAnEmptyError(unittest.TestCase):
+    """결과를 기다리다 만 주기가 **빈 오류 문구**로 남지 않는가 (DEV-13 (d)).
+
+    `fut.result(timeout=...)` 이 던지는 예외는 인자가 없어 `str(exc)` 가 빈
+    문자열이다. 그것을 그대로 `error` 에 넣으면 판정의 가드 두 곳
+    (`_probe_evidence` 의 `if err:` 와 `first_hop_not_run`)이 **둘 다 거짓**이
+    되어, 재지 못한 주기가 다시 "첫 홉 무응답 — 이 기기와 공유기 사이 구간
+    문제" 의 근거로 쓰인다.
+
+    빈 문자열을 손으로 넣어 보는 것으로는 이 경로를 못 덮는다. **실제로
+    기다리다 만다** — 대기 시간을 좁히고 느린 ping 을 세워 둔다.
+    """
+
+    def test_the_exception_this_branch_catches_really_carries_no_message(self):
+        """전제를 코드로 고정한다. 이것이 참이라 위 가드가 꺼졌다."""
+        self.assertEqual(str(concurrent.futures.TimeoutError()), "")
+
+    def test_a_result_that_never_arrived_is_recorded_as_timed_out(self):
+        fake = FakeRun(delay=0.2)
+        with mock.patch.object(first_hop, "RESULT_WAIT_SECONDS", 0.01):
+            out = collect_with(fake)
+        got = out["results"]["gateway"]
+        self.assertTrue(got["error"])          # 빈 문자열이면 가드가 꺼진다
+        self.assertEqual(got["error"], PROBE_TIMED_OUT)
+        self.assertFalse(got["reachable"])
+
+    def test_the_same_branch_on_the_endpoint_too(self):
+        fake = FakeRun(delay=0.2)
+        with mock.patch.object(first_hop, "RESULT_WAIT_SECONDS", 0.01):
+            out = collect_with(fake, allow_tunnel_probe=True,
+                               tunnel_endpoint=ENDPOINT)
+        got = out["results"][first_hop.TUNNEL_ENDPOINT]
+        self.assertEqual(got["error"], PROBE_TIMED_OUT)
+        self.assertNotIn(ENDPOINT, repr(got))
+
+
+class TestTheFutureBranchCarriesNoPathOrAddress(unittest.TestCase):
+    """`util.run` 이 잡지 않는 예외의 메시지가 관측에 들어가지 않는가 (DEV-13 (e)).
+
+    `util.run` 은 FileNotFoundError·PermissionError·TimeoutExpired 만 잡는다.
+    그 밖의 OSError(예: `Exec format error`)는 `ping()` 을 뚫고 올라와 이
+    갈래에 잡히는데, 그 메시지에는 **실행 파일 경로**가 들어 있다. 감싸지
+    않은 문자열은 `redact` 가 바꾸지 않으므로(netmon/redact.py 는 ident 로
+    감싼 값만 바꾼다) 내보낼 때도 그대로 나간다.
+    """
+
+    # 합성 경로다. 실제 홈 경로를 적으면 공개 저장소에 그대로 남는다
+    # (tools/leak-check.sh 의 PATH 규칙).
+    PATH = "/opt/netmon-not-a-real-path/bin/ping"
+
+    def _oserror(self):
+        return OSError(8, "Exec format error", self.PATH)
+
+    def test_the_message_really_contains_the_path(self):
+        """전제를 코드로 고정한다. 이것이 참이라 가릴 것이 있었다."""
+        self.assertIn(self.PATH, str(self._oserror()))
+
+    def test_the_observation_keeps_only_the_kind(self):
+        def exploding(argv, timeout=None, stdin=""):
+            raise self._oserror()
+
+        with mock.patch.object(first_hop, "run", exploding):
+            out = first_hop.collect({"gateway": GW, "allow_tunnel_probe": True,
+                                     "tunnel_endpoint": ENDPOINT})
+        self.assertEqual(out["results"]["gateway"]["error"], "OSError")
+        self.assertEqual(out["results"][first_hop.TUNNEL_ENDPOINT]["error"],
+                         "OSError")
+        self.assertNotIn(self.PATH, repr(out))
+        self.assertNotIn("Exec format error", repr(out))
+
+    def test_the_burst_branch_too(self):
+        def exploding(argv, timeout=None, stdin=""):
+            raise self._oserror()
+
+        with mock.patch.object(first_hop, "run", exploding):
+            out = first_hop.collect({"gateway": GW, "first_hop_burst": True,
+                                     "interval": 5})
+        self.assertEqual(out["results"]["gateway"]["errors"], ["OSError"])
+        self.assertNotIn(self.PATH, repr(out))
+
+
+class TestThePingCountBounds(unittest.TestCase):
+    """범위 밖 `ping_count` 를 어떻게 다루는가 (DEV-13 (b), DEV-16).
+
+    **하한만 있다.** 위로 자르지 않는 이유와 그 대가는
+    `TestARaisedPingCount` 에 있다.
+    """
+
+    def test_a_raised_count_is_passed_through_untouched(self):
+        """설정한 사람의 발 수를 말없이 줄이지 않는다 (사용자 결정 2026-09-22)."""
+        for n in (1, 2, 3, 4, 12, 13, 100):
+            self.assertEqual(first_hop.packets_per_command(n), n)
+        self.assertEqual(first_hop.packets_per_command(), first_hop.DEFAULT_COUNT)
+
+    def test_values_below_one_are_raised_to_one(self):
+        self.assertEqual(first_hop.packets_per_command(0), 1)
+        self.assertEqual(first_hop.packets_per_command(-3), 1)
+
+    def test_a_value_that_is_not_a_number_falls_back_to_the_default(self):
+        """수로 읽을 수 없는 값은 기본값 1 이다.
+
+        `float("inf")` 도 여기 든다 — `int()` 가 `OverflowError` 를 던지는데
+        그것은 `TypeError`·`ValueError` 가 아니라, 잡지 않으면 수집기 주기
+        하나가 통째로 예외로 끝난다. JSON 은 `Infinity`·`NaN` 을 그대로 읽으므로
+        (`json.loads` 기본값) 손으로 고친 설정에서 올 수 있다. DEV-16 검수 1차
+        지적으로 확인했고, `except` 에 `OverflowError` 를 더해 맞췄다.
+        """
+        for bad in ("많이", None, [], {}, object(),
+                    float("inf"), float("-inf"), float("nan")):
+            self.assertEqual(first_hop.packets_per_command(bad),
+                             first_hop.DEFAULT_COUNT, bad)
+
+    def test_the_argument_and_the_tally_come_from_the_same_function(self):
+        """수집기가 넘기는 `-c` 와 엔진이 세는 발 수가 같아야 한다.
+
+        어긋나면 한 끊김당 12발이라는 상한이 그만큼 틀어진다. 엔진 쪽 확인은
+        TestTheProbeCap 에 있다.
+        """
+        for raw in (0, -3, 1, 2, 4, 13, "많이"):
+            fake = FakeRun()
+            collect_with(fake, ping_count=raw)
+            self.assertEqual(fake.calls[0]["argv"][3],
+                             str(first_hop.packets_per_command(raw)), raw)
+
+    def test_what_the_lower_bound_prevents(self):
+        """하한이 없으면 **재지 못한 주기가 "손실 100%" 로** 적힌다.
+
+        macOS ping 은 `-c 0`·`-c -3` 을 거절한다 — rc 64(EX_USAGE)에 stdout 이
+        비어 있다(실측 2026-09-22: `ping -n -c 0 -W 800 127.0.0.1` → rc 64,
+        0바이트). 64 는 `NOT_RUN_RCS` 에 없으므로 `probe_failure` 가 아무 표시도
+        남기지 않고, `parse_ping("")` 이 손실 100% 를 만든다.
+
+        여기서는 그 종료 코드를 **흉내 내어** 가드가 없을 때 무엇이 되는지
+        고정한다. ping 을 실제로 돌리지 않는다.
+        """
+        fake = FakeRun(outs=[""], rc=64)
+        with mock.patch.object(first_hop, "run", fake):
+            got = first_hop.ping(GW, count=0)
+        self.assertNotIn("error", got)          # 재지 못했다는 표시가 없다
+        self.assertEqual(got["loss_pct"], 100.0)  # 잰 것처럼 보인다
+        self.assertNotIn(64, first_hop.NOT_RUN_RCS)
+
+        # 그래서 그 인자가 애초에 나가지 못하게 막는다.
+        fake2 = FakeRun()
+        collect_with(fake2, ping_count=0)
+        self.assertEqual(fake2.calls[0]["argv"][3], "1")
+
+    def test_a_burst_sends_one_packet_per_command(self):
+        """다발은 1발짜리 명령을 **여러 개** 띄운다. 설정만큼은 보낸다.
+
+        `ping_count` 를 올려 둔 사람이 이상 징후 주기에 오히려 적게 재면
+        안 된다 (AC-12). 한 명령이 1발이라 다발 주기는 `ping_count` 가 커도
+        제한 시간에 걸리지 않는다 — 평소 주기와 다른 점이다
+        (`TestARaisedPingCount`).
+        """
+        fake = FakeRun()
+        out = collect_with(fake, first_hop_burst=True, interval=5, ping_count=5)
+        self.assertEqual(len(fake.calls), 5)
+        self.assertEqual(out["results"]["gateway"]["sent"], 5)
+        for c in fake.calls:
+            self.assertEqual(c["argv"][3], "1")
+        self.assertLess(first_hop.ping_seconds(count=1),
+                        first_hop.PING_TIMEOUT_SECONDS)
+
+
+class TestARaisedPingCount(unittest.TestCase):
+    """제한을 넘기는 `ping_count` 주기는 **유보로 남는다** (DEV-16).
+
+    상한 자르기를 없앤 대가다. 한 명령의 소요가 subprocess 제한
+    (`PING_TIMEOUT_SECONDS`)을 넘으면 그 주기는 "끝나지 못함"
+    (`PROBE_TIMED_OUT`)으로 남는다.
+
+    **넘기 시작하는 발 수를 하나로 말하지 않는다.** 여기서 고정하는 경계는
+    `ping_seconds`, 곧 **무응답 대상 기준 추정**의 경계(4발)뿐이다. 응답이
+    오는 대상은 패킷 간격 1초 모형(collect/link.py 의 `DEFAULT_COUNT` 위
+    주석)을 따르므로 경계가 그보다 뒤이고, 그 값은 재지 않았다. 아래 가짜
+    `run` 도 무응답 모형을 쓴다(`_timing_run` 참고).
+
+    **유보되는 것은 VPN 끊김 판정뿐이다.** 품질 축은 같은 주기를
+    `gateway_reachable=False` 로 읽는다(netmon/baseline.py,
+    netmon/detect/quality.py). 다만 그 뒤가 한 갈래가 아니다 — 유보된 주기는
+    다음 주기의 다발 측정을 켜고, 다발 주기는 명령 하나가 1발이라
+    `ping_count` 가 커도 제한에 걸리지 않는다. 갈래별 파급은 collect/link.py
+    `packets_per_command` 의 docstring 에 적혀 있고, 주기를 이어서 도는 쪽은
+    아래 `TestTheBurstFeedbackOfAHeldCycle` 이 고정한다. **이 클래스가 보는
+    것은 그중 평소 주기 하나뿐이다.**
+
+    **이것은 버그가 아니라 고른 동작이다.** 대안이 둘이었다: (a) 설정을
+    말없이 잘라 적게 재면서 그 사실을 남기지 않는다, (b) 설정대로 보내고
+    못 잰 주기를 못 쟀다고 적는다. (b) 를 골랐다
+    (사용자 결정 2026-09-22). 되돌리려면 그 결정부터 다시 받아야 한다.
+    """
+
+    def _timing_run(self):
+        """`util.run` 의 제한 시간 동작을 흉내 낸다. ping 을 돌리지 않는다.
+
+        실제 `run` 은 `subprocess.TimeoutExpired` 를 `timed_out=True` 인
+        빈 결과로 바꾼다(netmon/util.py). 여기서는 `-c` 인자로 그 명령이
+        걸릴 시간을 계산해 같은 결과를 만든다.
+
+        **무엇을 모형화하는가**: 소요 계산에 `ping_seconds`, 곧 **무응답 대상
+        기준 추정**을 모든 대상에 쓴다. 제한을 넘긴 명령이 관측과 판정에
+        어떻게 남는지만 보려는 것이고, 응답이 오는 대상이 실제로 몇 발부터
+        제한을 넘는지는 여기서 모형화하지 않는다. 제한 안에 든 명령은
+        응답(`REPLY`)을 돌려준다.
+        """
+        calls = []
+
+        def fake(argv, timeout=None, stdin=""):
+            calls.append(list(argv))
+            count = int(argv[argv.index("-c") + 1])
+            if first_hop.ping_seconds(count=count) > (timeout or 0):
+                return CmdResult(list(argv), -1, "", "제한 시간 초과",
+                                 timed_out=True)
+            return CmdResult(list(argv), 0, REPLY, "")
+
+        fake.calls = calls
+        return fake
+
+    def test_four_packets_no_longer_fit_the_silent_target_estimate(self):
+        """**무응답 대상 추정**의 경계를 고정한다 — 3발까지 들고 4발부터 넘는다.
+
+        `ping_seconds` 가 스스로 "무응답 대상 기준" 이라고 적은 추정이다
+        (netmon/collect/link.py). 응답이 오는 대상의 경계는 이 식으로 말할 수
+        없다 — 그쪽은 패킷 간격 1초 모형을 따르고, 재지 않았다.
+        """
+        self.assertLess(first_hop.ping_seconds(count=3),
+                        first_hop.PING_TIMEOUT_SECONDS)
+        self.assertGreater(first_hop.ping_seconds(count=4),
+                           first_hop.PING_TIMEOUT_SECONDS)
+
+    def test_a_cycle_that_did_not_finish_says_so_instead_of_losing_it(self):
+        """제한을 넘긴 주기는 `PROBE_TIMED_OUT` 표시를 달고 남는다.
+
+        이 표시가 있어야 끊김 판정이 그 주기를 유보한다. 수집기 관측에는
+        `loss_pct=100.0` 이 **그대로 남는다** — 그 값을 증거에서 빼는 것은
+        netmon/detect/vpn.py 쪽이고 tests/test_detect_vpn.py 가 덮는다.
+        """
+        fake = self._timing_run()
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.collect({"gateway": GW, "ping_count": 4})
+        got = out["results"]["gateway"]
+        self.assertEqual(fake.calls[0][3], "4")      # 자르지 않고 보냈다
+        self.assertEqual(got["error"], PROBE_TIMED_OUT)
+        self.assertNotEqual(got["error"], PROBE_NOT_RUN)  # 나갔을 수는 있다
+        self.assertFalse(got["reachable"])
+
+    def test_only_the_disconnect_judgement_gets_the_held_cycle(self):
+        """유보의 뜻이 **끊김 판정에만** 간다.
+
+        `error` 가 실려야 `_only_timed_out` 이 참이 되어 요약문이 "끝나지
+        못함" 쪽으로 간다(netmon/detect/vpn.py). 이 값이 판정에 닿는 경로는
+        tests/test_detect_vpn.py 가 덮는다.
+
+        **품질 축은 유보하지 않는다.** 같은 관측의 `gateway_reachable` 은
+        거짓 그대로다. 아래 단언이 고정하는 것은 딱 거기까지 —
+        **수집기 출력 네 값**(`error`·`gateway_reachable`·`gateway_rtt_ms`·
+        `loss_pct`)이다. netmon/baseline.py 도 netmon/detect/quality.py 도
+        여기서 한 줄도 돌지 않으므로, 그 뒤에 무엇이 나오는지는 이 테스트가
+        말하지 않는다(갈래별 파급은 `packets_per_command` docstring).
+        아래는 다발을 명시로 꺼서 **평소 주기 하나**만 본다 — 유보가 켜는
+        다음 다발 주기는 여기 들어 있지 않다.
+        """
+        fake = self._timing_run()
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.collect({"gateway": GW, "ping_count": 4,
+                                     "first_hop_burst": False})
+        self.assertEqual(out["results"]["gateway"]["error"], PROBE_TIMED_OUT)
+        # 품질 축이 읽는 두 값. 유보 표시가 이 값들을 바꾸지 않는다
+        # (netmon/liveness.py `signals`, netmon/baseline.py `rtt_elevated`).
+        self.assertFalse(out["gateway_reachable"])
+        self.assertIsNone(out.get("gateway_rtt_ms"))
+        # 이 값은 품질 축이 읽지 않는다 — 독자는 netmon/detect/vpn.py 뿐이다.
+        self.assertEqual(out["results"]["gateway"]["loss_pct"], 100.0)
+
+    def test_three_still_measures(self):
+        """바로 아래 값은 종전대로 잰다 — 유보가 전부에 걸리는 것이 아니다."""
+        fake = self._timing_run()
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.collect({"gateway": GW, "ping_count": 3})
+        got = out["results"]["gateway"]
+        self.assertNotIn("error", got)
+        self.assertTrue(got["reachable"])
+
+
+class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
+    """유보된 주기가 켜는 **다음 주기의 다발**까지 이어서 본다 (DEV-16).
+
+    `TestARaisedPingCount` 는 유보된 주기 **하나**만 본다. 그런데 그 주기의
+    `gateway_reachable=False` 는 다음 주기의 다발 측정을 켜고
+    (`first_hop_silent` → `first_hop_anomaly` → netmon/engine.py
+    `_burst_hint`), 다발 주기는 명령 하나가 1발이라 `ping_count` 가 커도
+    제한 시간에 걸리지 않는다. 그래서 품질 축 파급이 **갈래 둘**로 갈린다.
+    `packets_per_command` docstring 이 적은 그 두 갈래가 여기 있다.
+
+    이 주장은 기록에 두 번 틀리게 적혔다(1차 정정, 2차 검수 지적). 그래서
+    글이 아니라 **돌아가는 테스트**로 고정한다.
+
+    **엔진과 같은 순서로 돈다**: `_burst_hint` → `collect` →
+    `baseline.update_counters` → `quality.detect`. 힌트는 흉내가 아니라
+    진짜 엔진 메서드다.
+
+    **고정하는 조건은 하나다**: 주기 기본값 5초, 판정 방법 ICMP
+    (`icmp_gw=True`), 제한을 넘는 `ping_count`. 주기가 3초 미만이면
+    (조사 중 `fast_interval`) 다발 자체가 꺼지고, ARP 로 판정하는 망에서는
+    streak 이 오르지 않는다 — 그 조합들은 여기서 보지 않는다.
+
+    **흉내의 한계**: 제한 초과 여부를 `ping_seconds`, 곧 **무응답 대상 기준
+    추정**으로 계산한다(`TestARaisedPingCount._timing_run` 과 같은 방식).
+    응답이 오는 대상이 실제로 몇 발부터 제한을 넘는지는 여기서도 재지 않았다.
+    이 테스트가 보이는 것은 "긴 명령은 제한을 넘고 `-c 1` 은 넘지 않는다" 는
+    **구조**이지 실측 경계가 아니다.
+    """
+
+    # 무응답 추정(`ping_seconds`)으로 제한 4.0초를 넘는 발 수. 3발까지는 든다.
+    PING_COUNT = 5
+
+    def _timing_run(self, out_text):
+        """`util.run` 의 제한 시간 동작을 흉내 낸다. ping 을 돌리지 않는다."""
+        calls = []
+
+        def fake(argv, timeout=None, stdin=""):
+            calls.append(list(argv))
+            count = int(argv[argv.index("-c") + 1])
+            if first_hop.ping_seconds(count=count) > (timeout or 0):
+                return CmdResult(list(argv), -1, "", "제한 시간 초과",
+                                 timed_out=True)
+            return CmdResult(list(argv), 0, out_text, "")
+
+        fake.calls = calls
+        return fake
+
+    def _drive(self, out_text, cycles=6, burst=None, attributions=()):
+        """`cycles` 주기를 돌리고 주기마다 무엇이 있었는지 돌려준다.
+
+        `burst` 가 None 이면 엔진이 정한다(되먹임 그대로). 값을 주면 그 값으로
+        **고정**한다 — 되먹임을 끈 대조군을 만들 때 쓴다.
+
+        `attributions` 는 그 주기의 귀속이다. 기본값은 빈 목록이라 아래
+        시험들의 동작은 그대로고, 조사가 열리는지 보는 시험만 값을 준다.
+        """
+        fake = self._timing_run(out_text)
+        eng = Engine.__new__(Engine)
+        eng.state = {"icmp_gw": True}      # ICMP 로 판정하는 망
+        prev = None
+        seen = []
+        for i in range(cycles):
+            hint = eng._burst_hint() if burst is None else burst
+            before = len(fake.calls)
+            with mock.patch.object(first_hop, "run", fake):
+                blk = first_hop.collect({"gateway": GW, "interval": 5,
+                                         "ping_count": self.PING_COUNT,
+                                         "first_hop_burst": hint})
+            cmds = fake.calls[before:]
+            # arp 블록은 비워 둔다. ICMP 로 판정하는 망에서는 `evaluate` 도
+            # `first_hop_silent` 도 arp 를 보지 않으므로 MAC 을 넣어도 결과가
+            # 같다 — 보정이 ARP 로 되돌리는 문턱이
+            # `REVERT_AFTER_ICMP_FAILURES` = 20 이라(netmon/liveness.py:31)
+            # 이 길이(4~6주기)에서는 뒤집히지 않는다. 갈래를 ICMP 하나로
+            # 좁혀 두려고 비워 둘 뿐이다.
+            cur = Observation(ts="2026-01-01T00:00:%02dZ" % i,
+                              data={"link": blk, "arp": {}})
+            eng._remember_for_burst(cur)
+            eng.state = baseline.update_counters(eng.state, cur, [], 5.0, 5.0)
+            ctx = Context(elapsed=5.0, interval=5.0, features={},
+                          state=eng.state, attributions=list(attributions),
+                          network=network_key(cur))
+            found = quality.detect(prev, cur, ctx)
+            seen.append({
+                "burst": hint,
+                "counts": [c[c.index("-c") + 1] for c in cmds],
+                "reachable": blk["gateway_reachable"],
+                # 실행 실패는 1발 주기면 `error`(단수), 다발 합본이면
+                # `errors`(복수)로 남는다 — 키가 다르다
+                # (`merge_probes`, netmon/detect/vpn.py 도 복수를 읽는다).
+                # 다발 주기를 단수 키로만 보면 아무것도 확인하지 못한다.
+                "error": blk["results"]["gateway"].get("error"),
+                "errors": blk["results"]["gateway"].get("errors"),
+                "streak": eng.state.get("gw_fail_streak"),
+                "kinds": [f.kind for f in found],
+                "findings": found,
+            })
+            prev = cur
+        return seen
+
+    def test_a_responding_first_hop_alternates_and_never_alerts(self):
+        """응답이 오는 첫 홉: 유보와 다발 성공이 **번갈아** 나 경보가 없다.
+
+        유보 주기(streak 1) → 다발 주기가 `-c 1` 로 성공(streak 0) → 다시
+        유보… 라 `quality.FAIL_STREAK_ALERT`(3)에 닿지 않는다. 그래서 이
+        갈래에서는 `FIRST_HOP_UNREACHABLE` 이 나오지 않고, 그 판정이 여는
+        조사(netmon/investigate/triggers.py)도 열리지 않는다.
+        **되먹임이 없으면 이 단언들이 깨진다** — 바로 아래 대조 시험이
+        같은 주기를 다발 없이 돌려 그것을 보인다.
+        """
+        seen = self._drive(REPLY, cycles=6)
+        self.assertEqual([c["burst"] for c in seen], [False, True] * 3)
+        self.assertEqual([c["streak"] for c in seen], [1, 0] * 3)
+        self.assertLess(max(c["streak"] for c in seen),
+                        quality.FAIL_STREAK_ALERT)
+        self.assertEqual([k for c in seen for k in c["kinds"]], [])
+
+        held = [c for c in seen if not c["burst"]]
+        for c in held:   # 평소 주기: 설정대로 한 명령에 실어 보내다 잘린다
+            self.assertEqual(c["counts"], [str(self.PING_COUNT)])
+            self.assertEqual(c["error"], PROBE_TIMED_OUT)
+            self.assertFalse(c["reachable"])
+
+        burst = [c for c in seen if c["burst"]]
+        for c in burst:  # 다발 주기: 명령마다 1발이라 제한에 걸리지 않는다
+            self.assertEqual(c["counts"],
+                             ["1"] * max(first_hop.BURST_PROBES, self.PING_COUNT))
+            # 합본이 실패를 담는 키는 **복수**다. 단수만 보면 다발 명령이
+            # 전부 제한을 넘겨도 단언이 통과한다.
+            self.assertIsNone(c["errors"])
+            self.assertIsNone(c["error"])
+            self.assertTrue(c["reachable"])
+
+    def test_without_the_burst_feedback_the_same_cycles_do_alert(self):
+        """대조: 되먹임을 끄면 같은 설정이 **경보까지 간다**.
+
+        위 시험이 "언제나 참" 이 아님을 보이는 자리다. 다발을 끄면 주기마다
+        유보가 쌓여 streak 이 3 에 닿고 `FIRST_HOP_UNREACHABLE` 이 난다.
+        곧 위 시험이 고정하는 것은 **되먹임이 만든 차이**다.
+        """
+        seen = self._drive(REPLY, cycles=4, burst=False)
+        self.assertEqual([c["streak"] for c in seen], [1, 2, 3, 4])
+        self.assertIn("FIRST_HOP_UNREACHABLE", seen[2]["kinds"])
+        for c in seen:
+            self.assertEqual(c["counts"], [str(self.PING_COUNT)])
+            self.assertEqual(c["error"], PROBE_TIMED_OUT)
+
+    def test_a_silent_first_hop_still_alerts_on_the_third_cycle(self):
+        """무응답인 첫 홉: 다발 주기도 무응답이라 **종전대로** 3회째에 경보.
+
+        되먹임이 경보를 없애는 것이 아니다. 없어지는 것은 첫 홉이 응답하는
+        경우뿐이고, 진짜 무응답이면 streak 이 계속 오른다.
+
+        2주기부터는 `PROBE_TIMED_OUT` 이 붙지 않는다 — 다발 주기의 명령은
+        1발이라 제한에 걸리지 않기 때문이다. 곧 **VPN 쪽 유보는 그 앞의
+        평소 주기에만** 붙는다.
+
+        그 단언은 **복수 키로** 해야 한다. 다발 합본은 실패를 `errors`
+        (복수)에 담고 `error`(단수)는 아예 만들지 않으므로(`merge_probes`),
+        단수만 보면 다발 명령이 전부 제한을 넘겨도 `None` 이라 통과한다.
+        VPN 축이 읽는 것도 복수 쪽이다(netmon/detect/vpn.py `_burst_evidence`).
+        """
+        seen = self._drive(LOST, cycles=4)
+        self.assertEqual([c["burst"] for c in seen], [False, True, True, True])
+        self.assertEqual([c["streak"] for c in seen], [1, 2, 3, 4])
+        self.assertEqual(seen[2]["kinds"], ["FIRST_HOP_UNREACHABLE"])
+        self.assertEqual(seen[0]["error"], PROBE_TIMED_OUT)
+        self.assertEqual([c["errors"] for c in seen[1:]], [None, None, None])
+        self.assertEqual([c["error"] for c in seen[1:]], [None, None, None])
+        for c in seen:
+            self.assertFalse(c["reachable"])
+
+    def test_an_explained_alert_does_not_open_an_investigation(self):
+        """경보가 나도 **귀속이 붙으면 조사는 열리지 않는다** (DEV-15).
+
+        `packets_per_command` docstring 이 "그 판정은 `kinds` 에 있다" 까지만
+        단정하게 고친 근거다. `quality.detect` 는 `FIRST_HOP_UNREACHABLE` 에
+        `ctx.quality_attribution()` 을 붙이고(netmon/detect/quality.py),
+        `triggers.is_meaningful` 은 귀속이 있고 `include_attributed` 가
+        거짓이면(기본값) 거짓을 준다(netmon/investigate/triggers.py).
+        위 시험들은 `attributions=[]` 로만 돌아 이 갈래를 가리지 못했다.
+
+        **고정하는 범위**: 귀속을 `Context` 에 **직접 넣어** 본다. 엔진의 귀속
+        계산도, 정체성 귀속이 일어난 주기의 기준선 초기화
+        (netmon/engine.py 의 `reset_for_new_network` 호출)도 거치지 않는다.
+        그래서 실제로 경보 주기와 귀속이 얼마나 겹치는지는 여기서 말하지
+        않는다 — 그쪽은 `packets_per_command` docstring 의 "조사를 여는 조건".
+        """
+        rules = triggers.merge_rules(None)
+
+        plain = [f for c in self._drive(LOST, cycles=4)
+                 for f in c["findings"] if f.kind == "FIRST_HOP_UNREACHABLE"]
+        self.assertEqual(len(plain), 1)
+        self.assertIsNone(plain[0].attribution)
+        self.assertTrue(triggers.is_meaningful(plain[0], rules))
+
+        slept = [f for c in self._drive(LOST, cycles=4, attributions=[SLEEP])
+                 for f in c["findings"] if f.kind == "FIRST_HOP_UNREACHABLE"]
+        self.assertEqual(len(slept), 1)          # 판정은 그대로 난다
+        self.assertEqual(slept[0].attribution, SLEEP)
+        self.assertFalse(triggers.is_meaningful(slept[0], rules))   # 조사는 안 열린다
+        # 설정으로 켜면 열린다 — 막는 것은 기본값이지 종류 목록이 아니다.
+        self.assertTrue(triggers.is_meaningful(
+            slept[0], triggers.merge_rules({"include_attributed": True})))
 
 
 if __name__ == "__main__":

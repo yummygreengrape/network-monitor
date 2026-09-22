@@ -145,6 +145,161 @@ def update_counters(state: Dict[str, Any], cur: Observation,
     return new
 
 
+# 링크가 없는 주기에 **이미 알린** 끊김. `{공급자: 끊긴 시각}` 이다.
+# 표시를 남기는 것은 그 주기의 판정이고(netmon/detect/vpn.py 의 without_link),
+# 지우는 것은 여기다 — 끊김의 시작·끝을 아는 것이 이 파일이기 때문이다.
+# **없어도 동작한다** — 없거나 모양이 깨졌으면 종전처럼 판정한다.
+VPN_REPORTED_KEY = "vpn_down_reported"
+
+
+def update_vpn_down(state: Dict[str, Any], cur: Observation,
+                    judged: bool = True) -> Dict[str, Any]:
+    """공급자별로 "언제부터 끊겨 있는가" 를 갱신한다.
+
+    **판정할 수 없는 주기에서도 불러야 한다.** 링크가 없는 주기는 engine 이
+    조기 반환해 `update_baselines` 가 돌지 않았고, 그래서 끊겨 있던 7분 25초가
+    `vpn_down_since` 에 들어가지 않아 복구 판정이 "5초 끊김" 으로 적혔다
+    (2026-09-21 05:41~05:49 맥북). VPN 상태는 링크가 없어도 수집된다 —
+    공급자에게 물어보는 값이라 주 인터페이스가 필요 없다. wireguard·tailscale
+    은 물리 링크가 없어도 connected 로 보고될 수 있다.
+
+    `judged=False` 는 그 주기에 판정이 돌지 않았다는 뜻이다. 기록을 지우는
+    것은 판정의 몫이므로, 복구가 그 주기에 보이면 지우지 않고 `vpn_down_pending`
+    으로 옮겨 다음 판정이 읽게 한다. **다음 판정이 언제 오는지는 여기서 알 수
+    없다** — 판정하지 않는 주기는 얼마든지 이어질 수 있으므로, 옮겨 둔 것은
+    판정이 실제로 도는 주기까지 그대로 남아야 한다.
+    """
+    vpn_block = cur.get("vpn")
+    if not vpn_block:
+        return state
+    new = dict(state)
+    downs = dict(state.get("vpn_down_since") or {})
+    unmeasured = dict(_unmeasured_map(state))
+    pending = dict(_pending_map(state))
+    reported = dict(reported_map(state))
+    for name, st in vpn_block.items():
+        if (st or {}).get("state") != "connected":
+            downs.setdefault(name, cur.ts)
+            # 다시 끊겼으면 알리지 못한 복구는 지나간 일이다. 남겨 두면
+            # 다음 복구 판정이 엉뚱한(더 이른) 시각을 적는다.
+            pending.pop(name, None)
+        elif judged:
+            # 복구 판정이 이미 읽고 지나간 뒤다. 다음 끊김에 이월하지 않는다.
+            downs.pop(name, None)
+            unmeasured.pop(name, None)
+            pending.pop(name, None)
+            # 이 끊김은 끝났다. 알렸다는 표시도 함께 지운다 — 다음 끊김은
+            # 다시 알려야 한다.
+            reported.pop(name, None)
+        else:
+            # **판정하지 않는 주기다.** 여기서 지우면 다음 완전 주기의 복구
+            # 판정이 시작 시각을 잃는다 — 고치기 전에는 (갱신도 안 했지만)
+            # 적어도 괄호는 남았다. 그래서 지우지 않고 옮겨만 둔다.
+            # 끊긴 채로 두지도 않는다 — 공급자가 올라온 뒤의 측정 공백까지
+            # 끊긴 시간에 얹히기 때문이다.
+            since = downs.pop(name, None)
+            if since is not None:
+                pending[name] = {"since": since,
+                                 "unmeasured": unmeasured.pop(name, 0.0)}
+            else:
+                unmeasured.pop(name, None)
+            # **알렸다는 표시는 보관분이 들고 있는 그 끊김의 것만 남긴다.**
+            # 복구를 알리는 것은 판정이 도는 주기, 즉 다음에 **오는** 완전한
+            # 관측의 주기다 — 그 전에 링크 없는 주기가 몇 개든 이어질 수 있고,
+            # 이 갈래는 그 주기마다 다시 돈다. 그래서 "옮기는 주기" 에서만
+            # 남기면 두 번째 주기에서 표시가 지워져 복구가 사라진다
+            # (커밋 034c020 의 결함, 검수 재현).
+            # 남은 표시로 그 판정이 "시작을 링크 없는 주기에 알린 끊김" 을
+            # 가린다(netmon/detect/vpn.py 의 reported_without_link).
+            #
+            # 시각이 다른 표시는 여기서 지운다. 보관분과 짝이 맞지 않는 표시는
+            # 지난 끊김의 것이고, 남겨 두면 다음 복구가 무엇의 끝인지 잘못
+            # 가린다. **이 함수가 표시를 지우는 자리는 둘뿐이다** — 판정이 도는
+            # 주기의 위 갈래(`judged`)와 여기다. 다시 끊기는 주기(맨 위 갈래)는
+            # 표시를 건드리지 않는다. 거기서 옛 표시가 사라지는 것은 같은 주기의
+            # `without_link`(netmon/detect/vpn.py)가 새 시각으로 **덮어쓸 때**
+            # 뿐이고, 덮어쓰지 않는 조합(공급자 상태가 `unknown`·빈 값,
+            # `detect.vpn` 이 꺼짐, 프로세스의 첫 주기라 직전 VPN 블록이 없음)
+            # 에서는 짝 없는 옛 표시가 그 끊김 동안 남는다. 그 표시로는 아무
+            # 판정도 나지 않는다 — 읽는 쪽 둘(`reported_without_link` 과 그것을
+            # 부르는 `already_reported`)이 지금 끊김의 시각과 일치할 것을 요구
+            # 한다(tests/test_detect_vpn.py
+            # `test_the_mark_only_covers_the_outage_it_was_made_for`). 그리고
+            # 공급자가 다시 `connected` 로 보이는 주기에 위 두 자리 중 하나가
+            # 지운다.
+            kept = _pending_since(pending, name)
+            if kept is None or reported.get(name) != kept:
+                reported.pop(name, None)
+    new["vpn_down_since"] = downs
+    new["vpn_down_unmeasured"] = unmeasured
+    if pending:
+        new["vpn_down_pending"] = pending
+    else:
+        new.pop("vpn_down_pending", None)
+    if reported:
+        new[VPN_REPORTED_KEY] = reported
+    else:
+        new.pop(VPN_REPORTED_KEY, None)
+    return new
+
+
+def note_unmeasured(state: Dict[str, Any], seconds: float) -> Dict[str, Any]:
+    """방금 지나간 측정 공백을, 그동안 끊겨 있던 공급자의 미관측 시간에 더한다.
+
+    **판정보다 먼저 불러야 한다.** 이 주기에 복구 판정이 나면 그 증거가 직전
+    공백까지 포함해야 하기 때문이다. 이미 끊겨 있던 공급자에만 더한다 —
+    이번 주기에 처음 끊긴 것이라면 그 공백은 끊기기 **전**의 시간이다.
+    """
+    try:
+        span = float(seconds)
+    except (TypeError, ValueError):
+        return state
+    if not span > 0 or span != span or span == float("inf"):
+        return state
+    downs = state.get("vpn_down_since")
+    if not isinstance(downs, dict) or not downs:
+        return state
+    acc = dict(_unmeasured_map(state))
+    for name in downs:
+        try:
+            prev = float(acc.get(name) or 0.0)
+        except (TypeError, ValueError):
+            prev = 0.0
+        acc[name] = round(prev + span, 1)
+    new = dict(state)
+    new["vpn_down_unmeasured"] = acc
+    return new
+
+
+def _unmeasured_map(state: Dict[str, Any]) -> Dict[str, Any]:
+    """저장된 미관측 누적값. 형태가 깨져 있으면 비어 있는 것으로 본다."""
+    acc = state.get("vpn_down_unmeasured")
+    return acc if isinstance(acc, dict) else {}
+
+
+def _pending_since(pending: Dict[str, Any], name: str) -> Any:
+    """보관분이 들고 있는 끊김의 시작 시각. 없거나 모양이 깨져 있으면 None."""
+    rec = pending.get(name)
+    return rec.get("since") if isinstance(rec, dict) else None
+
+
+def _pending_map(state: Dict[str, Any]) -> Dict[str, Any]:
+    """아직 판정이 읽지 못한 끊김 기록. 형태가 깨져 있으면 비어 있는 것으로 본다."""
+    pending = state.get("vpn_down_pending")
+    return pending if isinstance(pending, dict) else {}
+
+
+def reported_map(state: Any) -> Dict[str, Any]:
+    """이미 알린 끊김 표시. 형태가 깨져 있으면 비어 있는 것으로 본다.
+
+    판정 쪽(netmon/detect/vpn.py)도 같은 눈으로 읽어야 해서 공개로 둔다.
+    """
+    if not isinstance(state, dict):
+        return {}
+    reported = state.get(VPN_REPORTED_KEY)
+    return reported if isinstance(reported, dict) else {}
+
+
 def update_baselines(state: Dict[str, Any], cur: Observation,
                      elapsed: Optional[float] = None,
                      interval: float = 5.0) -> Dict[str, Any]:
@@ -162,15 +317,7 @@ def update_baselines(state: Dict[str, Any], cur: Observation,
         new["rtt_ewma"] = round(_ewma(state.get("rtt_ewma"), float(rtt)), 3)
 
     # VPN 이 끊긴 시각. 재연결 판정이 직전 값을 읽어야 하므로 판정 뒤에 갱신한다.
-    vpn_block = cur.get("vpn")
-    if vpn_block:
-        downs = dict(state.get("vpn_down_since") or {})
-        for name, st in vpn_block.items():
-            if (st or {}).get("state") == "connected":
-                downs.pop(name, None)
-            else:
-                downs.setdefault(name, cur.ts)
-        new["vpn_down_since"] = downs
+    new = update_vpn_down(new, cur)
 
     replies = cur.get("arp", "replies_received")
     if isinstance(replies, int):

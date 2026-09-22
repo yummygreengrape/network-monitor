@@ -7,6 +7,7 @@ from __future__ import annotations
 import unittest
 
 from netmon import baseline
+from netmon import messages as msg
 from netmon.collect.arp import normalize_mac, parse_arp_table
 from netmon.detect import Context, attributions_for, network_key, run_all
 from tests.helpers import (BSSID, BSSID_ALT, GW_MAC, GW_MAC_ALT, SSID,
@@ -842,6 +843,7 @@ class TestConclusionDoesNotContradictItself(unittest.TestCase):
         inv.criteria = {"provider": "warp", "drops": drops, "reconnects": drops,
                         "still_down": False, "settled_for": pb.SETTLED_CYCLES,
                         "first_hop_alive_at_drop": [True] * drops,
+                        "first_hop_method_at_drop": ["icmp"] * drops,
                         "watch_kinds": ["VPN_DISCONNECTED", "VPN_RECONNECTED"]}
         ctx = Context(elapsed=5.0, interval=5.0, features=ON,
                       state={"icmp_gw": True}, attributions=[], network="n")
@@ -860,18 +862,31 @@ class TestConclusionDoesNotContradictItself(unittest.TestCase):
             _, found = self._settled(n)
             self.assertNotIn("되풀이", found[0].summary, found[0].summary)
 
-    def test_the_leg_description_is_shared_by_both_conclusions(self):
+    def test_the_first_hop_description_is_shared_by_both_conclusions(self):
         from netmon import messages as msg
         _, found = self._settled(2)
-        self.assertIn(msg.INV_VPN_LEG_TUNNEL, found[0].summary)
+        self.assertIn(msg.INV_VPN_LEG_FIRST_HOP_OK % msg.METHOD_ICMP,
+                      found[0].summary)
+
+    def test_neither_conclusion_points_at_a_leg(self):
+        """실측 17:02:12 의 결론은 1발 ICMP 로 "터널 쪽" 을 지목했다.
+
+        끊김 요약문(detect/vpn)이 같은 증거로 유보하게 바뀐 뒤에도 조사
+        결론만 단정하면, 한 도구가 같은 관측을 두 가지 확신으로 말한다.
+        """
+        for n in (1, 2):
+            inv, found = self._settled(n)
+            for word in ("터널", "tunnel"):
+                self.assertNotIn(word, found[0].summary, found[0].summary)
+                self.assertNotIn(word, inv.verdict or "", inv.verdict)
 
 
 class TestExplanationUsesTheSettlingWindow(unittest.TestCase):
     """VPN 상태 변화는 깨어난 다음 주기에 나타난다.
 
     실측: 공백(903초)은 16:48:58, 끊김은 16:49:03. 같은 주기만 보면 잠자기가
-    설명에서 빠지고 "첫 홉은 정상 — 터널 경로 문제" 라고 답한다. 첫 홉이
-    정상인 것은 맞지만 그것이 설명은 아니다.
+    설명에서 빠지고 첫 홉 이야기만 남는다. 첫 홉이 응답한 것은 맞지만
+    그것이 설명은 아니다.
     """
 
     def _ctx(self, settling):
@@ -897,10 +912,16 @@ class TestExplanationUsesTheSettlingWindow(unittest.TestCase):
         f = self._drop("link_restart")
         self.assertIn(msg.WHY_LINK_BACK, f.summary)
 
-    def test_without_a_settling_window_it_still_blames_the_tunnel(self):
+    def test_without_a_settling_window_it_reports_the_fact_not_a_verdict(self):
+        """설명할 창이 없으면 첫 홉이 응답했다는 **사실**까지만 적는다.
+
+        종전에는 같은 자리에서 "터널 경로 문제" 라고 고장 위치를 지목했다.
+        1발 ICMP 가 돌아온 것으로는 로컬 구간과 상대편 구간을 나눌 수 없다.
+        """
         from netmon import messages as msg
         f = self._drop(None)
-        self.assertIn(msg.WHY_TUNNEL, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_OK % msg.METHOD_ICMP, f.summary)
+        self.assertNotIn("터널 경로", f.summary)
         self.assertIsNone(f.attribution)
 
     def test_protection_loss_is_not_suppressed_by_waking(self):
@@ -952,3 +973,545 @@ class TestSettlingReasonKeepsTheRootCause(unittest.TestCase):
         self.assertIsNone(s.get("settle_reason"))
         s = baseline.update_counters(s, obs(), ["vpn_change"], 5.0, 5.0)
         self.assertEqual(s["settle_reason"], "vpn_change")
+
+
+class _VpnCycleDriver:
+    """관측 열을 engine.cycle 과 같은 순서로 돌린다. 관측은 전부 합성이다."""
+
+    def _engine(self):
+        from netmon import config as configmod, investigate
+        from netmon.engine import Engine
+        import os, shutil, tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        eng = Engine.__new__(Engine)
+        eng.cfg = configmod.load(os.path.join(d, "c.json"))
+        eng.store = None
+        eng.prev = None
+        eng.anchor = None
+        eng.link_gap = False
+        eng.prev_wall = None
+        eng.state = {"icmp_gw": True}
+        eng.investigator = investigate.Investigator({})
+        eng.needs = {}
+        return eng
+
+    def _absent(self, ts, state="disconnected"):
+        """주 인터페이스가 없는 주기. VPN 상태는 그와 무관하게 수집된다."""
+        o = obs(ts=ts, gateway=None, gw_mac=None, icmp_ok=None,
+                vpn=vpn_state(state,
+                              reason="No Network" if state != "connected" else None))
+        o.data["iface"]["primary"] = None
+        o.data["iface"]["primary_kind"] = "unknown"
+        o.data["wifi"] = {"applicable": False, "reason": "링크 없음"}
+        return o
+
+    def _full(self, ts, state):
+        return obs(ts=ts, vpn=vpn_state(state), security="WPA2", icmp_ok=True)
+
+    def _run(self, steps):
+        """(관측, 직전 주기와의 간격) 을 차례로 판정한다."""
+        from netmon.detect import is_complete
+        eng = self._engine()
+        out = []
+        for o, gap in steps:
+            found = eng.judge(o, gap)
+            if is_complete(o):
+                eng.prev = o
+            out.append(found)
+        return eng, out
+
+
+class TestVpnDownSinceSurvivesUnjudgedCycles(_VpnCycleDriver, unittest.TestCase):
+    """2026-09-21 05:41~05:49 맥북: 7분 25초 끊겨 있었는데 "5초" 로 적혔다.
+
+    공급자가 `No Network` 를 보고한 샘플이 05:41:52 부터 이어졌는데, 그 주기들은
+    주 인터페이스가 없어 engine 이 조기 반환했다. 그래서 `vpn_down_since` 를
+    갱신하는 `baseline.update_baselines` 가 돌지 않았고, 복구 판정은 마지막
+    완전 관측 시각인 "05:49:17 부터" 라고 적었다. VPN 상태는 공급자에게 묻는
+    값이라 링크가 없어도 수집된다 — 건너뛸 이유가 없었다.
+
+    **관측은 합성이다.** 재현한 것은 주기의 짜임새다: 완전 관측 → 링크 없는
+    주기 여럿(그 사이에 측정 공백) → 링크는 돌아왔지만 VPN 은 아직인 주기 →
+    재연결.
+    """
+
+    def test_the_outage_is_measured_from_the_first_unjudged_cycle(self):
+        eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._absent("2026-01-01T00:03:10Z"), 180.0),   # 잠자기
+            (self._absent("2026-01-01T00:03:15Z"), 5.0),
+            (self._full("2026-01-01T00:03:20Z", "connecting"), 5.0),
+            (self._full("2026-01-01T00:03:25Z", "connected"), 5.0),
+        ])
+        self.assertEqual([f.kind for f in out[1]][:1], ["LINK_ABSENT"])
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertIsNotNone(f)
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:05Z",
+                         "마지막 완전 관측이 아니라 실제로 끊긴 주기여야 한다")
+        self.assertEqual(f.evidence["down_seconds"], 200.0)
+        # 180초 공백에서 한 주기(5초)는 정상 간격으로 돈 것이라 빠진다.
+        self.assertEqual(f.evidence["unmeasured_seconds"], 175.0)
+        self.assertIn("3분 20초", f.summary)    # 200초
+        self.assertIn("2분 55초", f.summary)    # 175초
+
+    def test_without_a_gap_nothing_is_reported_as_unmeasured(self):
+        eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connecting"), 5.0),
+            (self._full("2026-01-01T00:00:25Z", "connected"), 5.0),
+        ])
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:05Z")
+        self.assertEqual(f.evidence["down_seconds"], 20.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+        from netmon import messages as msg
+        self.assertEqual(f.summary,
+                         msg.VPN_RECONNECTED % ("warp", msg.VPN_SINCE % "00:00:05"))
+
+    def test_the_gap_before_the_outage_is_not_charged_to_it(self):
+        """끊기기 전의 공백은 끊긴 시간이 아니다."""
+        eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:03:00Z", "connected"), 180.0),
+            (self._absent("2026-01-01T00:03:05Z"), 5.0),
+            (self._full("2026-01-01T00:03:10Z", "connecting"), 5.0),
+            (self._full("2026-01-01T00:03:15Z", "connected"), 5.0),
+        ])
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertEqual(f.evidence["down_seconds"], 10.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+
+    def test_a_new_outage_does_not_inherit_the_previous_unmeasured_count(self):
+        eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:03:05Z"), 180.0),
+            (self._full("2026-01-01T00:03:10Z", "connecting"), 5.0),
+            (self._full("2026-01-01T00:03:15Z", "connected"), 5.0),
+            (self._full("2026-01-01T00:03:20Z", "disconnected"), 5.0),
+            (self._full("2026-01-01T00:03:25Z", "connected"), 5.0),
+        ])
+        first = by_kind(out[4], "VPN_RECONNECTED")
+        self.assertEqual(first.evidence["unmeasured_seconds"], 175.0)
+        second = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertEqual(second.evidence["down_seconds"], 5.0)
+        self.assertEqual(second.evidence["unmeasured_seconds"], 0.0)
+
+
+class TestRecoverySeenWhileUnjudged(_VpnCycleDriver, unittest.TestCase):
+    """복구가 **판정하지 않는 주기**에 보이는 경우.
+
+    `is_complete` 는 IPv4 를 가진 물리 인터페이스만 본다. wireguard·tailscale
+    은 그런 인터페이스가 없어도 connected 를 보고하므로, 링크가 없는 주기에
+    공급자가 올라오는 열이 실제로 생긴다. 그 주기에는 `run_all` 이 돌지 않아
+    복구 판정이 나지 않으므로, 끊긴 기록을 거기서 지우면 다음 완전 주기의
+    복구 판정이 시작 시각을 통째로 잃는다.
+    """
+
+    def test_the_start_time_survives_a_recovery_seen_in_an_unjudged_cycle(self):
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z", "connected"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertIsNotNone(f, "복구 판정 자체는 종전처럼 나야 한다")
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:05Z",
+                         "판정하지 않는 주기가 끊긴 시각을 지우면 안 된다")
+        self.assertEqual(f.evidence["down_seconds"], 15.0)
+        from netmon import messages as msg
+        self.assertIn(msg.VPN_SINCE % "00:00:05", f.summary)
+
+    def test_a_gap_after_the_provider_came_back_is_not_charged_to_the_outage(self):
+        """공급자가 올라온 뒤의 공백은 끊긴 시간이 아니다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z", "connected"), 5.0),
+            (self._absent("2026-01-01T00:03:15Z", "connected"), 180.0),
+            (self._full("2026-01-01T00:03:20Z", "connected"), 5.0),
+        ])
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:05Z")
+        self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+
+    def test_a_second_drop_in_an_unjudged_cycle_replaces_the_kept_record(self):
+        """다시 끊겼으면 알리지 못한 복구는 지나간 일이다. 더 이른 시각을 적지 않는다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z", "connected"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:15Z")
+        self.assertEqual(f.evidence["down_seconds"], 5.0)
+
+    def test_the_kept_record_does_not_outlive_the_next_judged_cycle(self):
+        """복구가 판정에 실리지 못한 채 지나갔으면 보관분도 함께 사라진다."""
+        eng, _out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z", "connected"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+        ])
+        self.assertFalse(eng.state.get("vpn_down_pending"))
+        self.assertFalse(eng.state.get("vpn_down_since"))
+
+
+class TestOutagesWithNoLinkReachTheEvents(_VpnCycleDriver, unittest.TestCase):
+    """2026-09-21·22 맥북: 링크가 없는 동안의 끊김이 이벤트에 없었다.
+
+    그날 하루의 끊김 17구간 중, 처음부터 끝까지 주 인터페이스가 없던 4구간
+    (01:57·03:51·11:45·23:57 UTC)에는 VPN 판정이 한 건도 나지 않았다.
+    05:41 구간은 링크가 돌아온 마지막 주기에야(7분 25초 뒤) 한 건 났다.
+    engine 이 그 주기들을 조기 반환해 `run_all` 을 건너뛰기 때문이다 —
+    **이벤트만 읽으면 끊김이 실제보다 적게 보인다.**
+
+    조기 반환 자체는 그대로 둔다. 링크가 없으면 첫 홉도 리졸버도 재지 못해
+    판정할 근거가 없다. 되살리는 것은 공급자에게 물어서 아는 사실 하나다.
+
+    **관측은 합성이다.** 재현한 것은 주기의 짜임새다.
+    """
+
+    def _drops(self, out):
+        return [f for cycle in out for f in cycle if f.kind == "VPN_DISCONNECTED"]
+
+    def test_the_drop_is_reported_in_the_cycle_it_happened(self):
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+        ])
+        drops = self._drops(out)
+        self.assertEqual(len(drops), 1, "끊김이 이벤트에 남아야 한다")
+        self.assertIn(drops[0], out[1], "끊긴 주기에 나야 한다")
+        self.assertEqual(drops[0].evidence["down_since"], "2026-01-01T00:00:05Z")
+        self.assertIs(drops[0].evidence["link_absent"], True)
+        self.assertIn(msg.VPN_DISCONNECTED_NO_LINK % ("warp", "disconnected"),
+                      drops[0].summary)
+
+    def test_it_is_reported_once_not_every_cycle(self):
+        """LINK_ABSENT 는 주기마다 나지만 끊김은 한 번 일어난 일이다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._absent("2026-01-01T00:03:10Z"), 180.0),
+            (self._absent("2026-01-01T00:03:15Z"), 5.0),
+        ])
+        self.assertEqual(len(self._drops(out)), 1)
+        self.assertEqual([c.count("LINK_ABSENT") for c in map(kinds, out)],
+                         [0, 1, 1, 1, 1])
+
+    def test_nothing_else_is_revived_in_that_cycle(self):
+        """살리는 것은 끊김 하나다. 비어 있는 관측을 근거로 삼지 않는다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:03:05Z"), 180.0),
+        ])
+        self.assertEqual(kinds(out[1]), ["LINK_ABSENT", "VPN_DISCONNECTED"])
+        # 공백이 있는 주기에도 늘어나는 것은 없다 (MEASUREMENT_GAP 은 종전부터).
+        self.assertEqual(kinds(out[2]), ["LINK_ABSENT", "MEASUREMENT_GAP"])
+        drop = self._drops(out)[0]
+        self.assertNotIn("first_hop_alive", drop.evidence)
+        self.assertNotIn("attributions", drop.evidence)
+
+    def test_the_cycle_the_link_comes_back_does_not_report_it_again(self):
+        """한 번의 끊김을 두 건으로 적지 않는다.
+
+        링크가 먼저 돌아오고 공급자가 아직 올라오지 못한 주기가 이 경우다.
+        직전 **완전** 관측은 끊기기 전이라 거기서는 전환으로 보인다 —
+        실측 2026-09-22 01:12:34 가 그랬다.
+        """
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connecting"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._drops(out)), 1)
+        self.assertIn(self._drops(out)[0], out[1])
+        # 보호 상실은 그 주기에 처음 판정할 수 있는 별개 사건이라 그대로 난다.
+        self.assertIsNotNone(by_kind(out[3], "VPN_PROTECTION_LOST"))
+        # 복구 판정도 종전 그대로다 (AC-7·AC-8).
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:05Z")
+        self.assertEqual(f.evidence["down_seconds"], 15.0)
+
+    def test_the_unmeasured_time_is_still_carried_to_the_recovery(self):
+        """AC-8 이 요구한 병기가 이 경로에서도 성립한다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:03:05Z"), 180.0),
+            (self._full("2026-01-01T00:03:10Z", "connecting"), 5.0),
+            (self._full("2026-01-01T00:03:15Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._drops(out)), 1)
+        f = by_kind(out[-1], "VPN_RECONNECTED")
+        self.assertEqual(f.evidence["down_seconds"], 190.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 175.0)
+
+    def test_an_outage_that_started_with_the_link_up_is_not_doubled(self):
+        """완전 주기가 이미 알린 끊김을, 뒤따르는 링크 없는 주기가 또 알리지 않는다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        drops = self._drops(out)
+        self.assertEqual(len(drops), 1)
+        self.assertIn(drops[0], out[1], "평소 주기의 판정 그대로여야 한다")
+        self.assertNotIn("link_absent", drops[0].evidence)
+
+    def test_the_next_outage_is_reported_again(self):
+        """표시는 그 끊김에만 쓴다. 다음 끊김까지 덮으면 안 된다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._full("2026-01-01T00:00:10Z", "connected"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        drops = self._drops(out)
+        self.assertEqual(len(drops), 2)
+        self.assertEqual([f.evidence["down_since"] for f in drops],
+                         ["2026-01-01T00:00:05Z", "2026-01-01T00:00:15Z"])
+
+    def test_the_mark_does_not_outlive_the_outage(self):
+        eng, _out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._full("2026-01-01T00:00:10Z", "connected"), 5.0),
+        ])
+        self.assertFalse(eng.state.get("vpn_down_reported"))
+        self.assertFalse(eng.state.get("vpn_down_since"))
+
+    def test_the_first_cycle_of_a_process_claims_nothing(self):
+        """재시작했더니 이미 끊겨 있는 것은 "방금 끊겼다" 가 아니다."""
+        _eng, out = self._run([
+            (self._absent("2026-01-01T00:00:05Z"), 0.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+        ])
+        self.assertEqual(self._drops(out), [])
+
+    def test_the_feature_switch_still_turns_it_off(self):
+        eng = self._engine()
+        eng.cfg.set_feature("detect.vpn", False)
+        eng.judge(self._full("2026-01-01T00:00:00Z", "connected"), 0.0)
+        out = eng.judge(self._absent("2026-01-01T00:00:05Z"), 5.0)
+        self.assertEqual(kinds(out), ["LINK_ABSENT"])
+
+
+class TestOutagesWithNoLinkGetAnEnd(_VpnCycleDriver, unittest.TestCase):
+    """링크가 없던 끊김에 끝이 없었다 (AC-8, AC-16).
+
+    시작은 링크가 없는 주기에 남게 됐지만(위 클래스), 복구는 여전히 나지
+    않았다. `detect` 가 직전 **완전** 관측과 견주는데 그런 끊김은
+    `was == now == connected` 라 전환이 보이지 않기 때문이다 — 2026-09-21
+    하루치 재생에서 끊김 17 건에 복구 13 건이었다. 게다가 그 끊김의
+    기록(`vpn_down_since`·`vpn_down_pending`·`vpn_down_reported`)은 링크가
+    돌아온 주기 끝의 `baseline.update_vpn_down(judged=True)` 이 지우므로,
+    알리지 않으면 **총 끊긴 시간과 미관측 시간이 어디에도 남지 않는다**.
+
+    **관측은 합성이다.** 재현한 것은 주기의 짜임새다.
+    """
+
+    def _of(self, out, kind):
+        return [f for cycle in out for f in cycle if f.kind == kind]
+
+    def test_the_outage_gets_an_end_in_the_cycle_the_link_comes_back(self):
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._of(out, "VPN_DISCONNECTED")), 1)
+        backs = self._of(out, "VPN_RECONNECTED")
+        self.assertEqual(len(backs), 1, "끊김에 끝이 있어야 한다")
+        self.assertIn(backs[0], out[3], "링크가 돌아온 주기에 나야 한다")
+        self.assertEqual(backs[0].evidence["down_since"], "2026-01-01T00:00:05Z")
+        self.assertEqual(backs[0].evidence["down_seconds"], 10.0)
+        self.assertIs(backs[0].evidence["link_absent"], True)
+
+    def test_the_total_and_the_unmeasured_time_reach_the_record(self):
+        """AC-8. 병기가 이 경로에서만 빠지던 것이 이 항목의 시작이다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:03:05Z"), 180.0),
+            (self._full("2026-01-01T00:03:10Z", "connected"), 5.0),
+        ])
+        f = self._of(out, "VPN_RECONNECTED")[0]
+        self.assertEqual(f.evidence["down_seconds"], 185.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 175.0)
+        self.assertIn(msg.VPN_SINCE_UNMEASURED % ("00:00:05", "3분 5초", "2분 55초"),
+                      f.summary)
+
+    def test_it_is_said_once_not_in_every_cycle_after(self):
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._full("2026-01-01T00:00:10Z", "connected"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._of(out, "VPN_RECONNECTED")), 1)
+
+    def test_the_record_is_cleared_in_the_same_cycle(self):
+        """지우는 것은 판정이 읽은 뒤 같은 주기의 update_vpn_down 이다.
+
+        더 늦게 지우면 다음 끊김이 옛 시작 시각을 물려받는다 — 두 번째
+        끊김의 시작이 제 시각인지 함께 본다.
+        """
+        eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._full("2026-01-01T00:00:10Z", "connected"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        for key in ("vpn_down_since", "vpn_down_pending", "vpn_down_reported",
+                    "vpn_down_unmeasured"):
+            self.assertFalse(eng.state.get(key), key)
+        self.assertEqual([f.evidence["down_since"]
+                          for f in self._of(out, "VPN_RECONNECTED")],
+                         ["2026-01-01T00:00:05Z", "2026-01-01T00:00:15Z"])
+        self.assertEqual([f.evidence["down_seconds"]
+                          for f in self._of(out, "VPN_RECONNECTED")], [5.0, 5.0])
+
+    def test_a_provider_back_up_while_the_link_was_still_absent(self):
+        """복구까지 링크 없는 주기에 일어난 끊김. 기록은 보관분으로 옮겨진다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z", state="connected"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._of(out, "VPN_DISCONNECTED")), 1)
+        backs = self._of(out, "VPN_RECONNECTED")
+        self.assertEqual(len(backs), 1)
+        self.assertEqual(backs[0].evidence["down_since"], "2026-01-01T00:00:05Z")
+
+    def test_the_mark_survives_every_unjudged_cycle_not_just_the_first(self):
+        """판정하지 않는 주기는 얼마든지 이어진다 (커밋 034c020 의 결함).
+
+        기록을 보관분(`vpn_down_pending`)으로 옮기는 주기에만 표시를 남기면,
+        링크 없는 주기가 하나만 더 이어져도 옮길 기록이 없어 표시가 지워지고
+        복구가 통째로 사라졌다 — 시작만 있고 끝이 없는 상태로 되돌아간다.
+        검수가 재현해 지적한 갈래이고, 아래 N=2·3 이 그 재현이다.
+        """
+        for n in (1, 2, 3):
+            with self.subTest(absent_connected_cycles=n):
+                steps = [(self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+                         (self._absent("2026-01-01T00:00:05Z"), 5.0)]
+                t = 10
+                for _ in range(n):
+                    steps.append((self._absent("2026-01-01T00:00:%02dZ" % t,
+                                               state="connected"), 5.0))
+                    t += 5
+                steps.append((self._full("2026-01-01T00:00:%02dZ" % t,
+                                         "connected"), 5.0))
+                eng, out = self._run(steps)
+                self.assertEqual(len(self._of(out, "VPN_DISCONNECTED")), 1)
+                backs = self._of(out, "VPN_RECONNECTED")
+                self.assertEqual(len(backs), 1, "끝이 사라지면 안 된다")
+                self.assertIn(backs[0], out[-1])
+                self.assertEqual(backs[0].evidence["down_since"],
+                                 "2026-01-01T00:00:05Z")
+                self.assertEqual(backs[0].evidence["down_seconds"], float(t - 5))
+                for key in ("vpn_down_since", "vpn_down_pending",
+                            "vpn_down_reported"):
+                    self.assertFalse(eng.state.get(key), key)
+
+    def test_a_leftover_mark_does_not_ride_into_the_next_outage(self):
+        """표시는 보관분과 시각이 같을 때만 남는다.
+
+        링크 없는 주기 안에서 끊김이 잇따르면 앞 끊김의 보관분은 새 끊김에
+        밀려 사라진다(그 끝은 남지 않는다 — 이 항목의 알려진 구멍). 뒤 끊김의
+        복구는 **자기 시작 시각**으로 나야 하고, 앞 끊김의 시각을 물려받으면
+        안 된다.
+        """
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z", state="connected"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z", state="connected"), 5.0),
+            (self._absent("2026-01-01T00:00:20Z"), 5.0),
+            (self._absent("2026-01-01T00:00:25Z", state="connected"), 5.0),
+            (self._absent("2026-01-01T00:00:30Z", state="connected"), 5.0),
+            (self._full("2026-01-01T00:00:35Z", "connected"), 5.0),
+        ])
+        self.assertEqual([f.evidence["down_since"]
+                          for f in self._of(out, "VPN_DISCONNECTED")],
+                         ["2026-01-01T00:00:05Z", "2026-01-01T00:00:20Z"])
+        backs = self._of(out, "VPN_RECONNECTED")
+        self.assertEqual(len(backs), 1)
+        self.assertEqual(backs[0].evidence["down_since"], "2026-01-01T00:00:20Z")
+        self.assertEqual(backs[0].evidence["down_seconds"], 15.0)
+
+    def test_a_mark_that_does_not_match_the_kept_record_is_dropped(self):
+        """보관분과 시각이 다른 표시는 지난 끊김의 것이라 여기서 지운다."""
+        state = {"vpn_down_pending": {"warp": {"since": "2026-01-01T00:00:20Z",
+                                               "unmeasured": 0.0}},
+                 "vpn_down_reported": {"warp": "2026-01-01T00:00:05Z"}}
+        back = baseline.update_vpn_down(
+            state, self._absent("2026-01-01T00:00:25Z", state="connected"),
+            judged=False)
+        self.assertNotIn("warp", back.get("vpn_down_reported") or {})
+        self.assertIn("warp", back["vpn_down_pending"])
+
+    def test_an_outage_that_was_never_reported_gets_no_lone_end(self):
+        """시작을 알리지 못한 끊김의 끝은 알리지 않는다.
+
+        프로세스의 첫 주기가 그렇다 — 직전 주기를 모르면 "방금 끊겼다" 를
+        알릴 수 없고(위 클래스), 그러면 이 끝도 무엇의 끝인지 말할 수 없다.
+        """
+        _eng, out = self._run([
+            (self._absent("2026-01-01T00:00:05Z"), 0.0),
+            (self._full("2026-01-01T00:00:10Z", "connected"), 5.0),
+        ])
+        self.assertEqual(self._of(out, "VPN_RECONNECTED"), [])
+
+    def test_the_pair_a_transition_does_show_is_unchanged(self):
+        """완전 주기가 본 끊김은 종전 경로 그대로다. 표시가 붙지 않는다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._of(out, "VPN_DISCONNECTED")), 1)
+        backs = self._of(out, "VPN_RECONNECTED")
+        self.assertEqual(len(backs), 1)
+        self.assertNotIn("link_absent", backs[0].evidence)
+        self.assertEqual(backs[0].evidence["prev_state"], "disconnected")
+
+    def test_the_feature_switch_turns_the_end_off_too(self):
+        from netmon.detect import is_complete
+        eng = self._engine()
+        eng.cfg.set_feature("detect.vpn", False)
+        for o, gap in ((self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+                       (self._absent("2026-01-01T00:00:05Z"), 5.0)):
+            eng.judge(o, gap)
+            if is_complete(o):
+                eng.prev = o
+        out = eng.judge(self._full("2026-01-01T00:00:10Z", "connected"), 5.0)
+        self.assertNotIn("VPN_RECONNECTED", kinds(out))

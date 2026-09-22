@@ -15,7 +15,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import messages as msg
-from ..liveness import evaluate
+from ..detect.vpn import first_hop_not_run
+from ..liveness import METHOD_MESSAGES, evaluate, method_label
 from ..model import (CONFIRMED, HIGH, INFO, INFO_SEV, LOW, MEDIUM, POSSIBLE,
                      QUALITY, SECURITY, SUSPECT, Finding, Observation, unwrap)
 from .model import ABANDONED, CONCLUDED, Investigation
@@ -278,6 +279,19 @@ class VpnDrop(Playbook):
             "drops": 1,
             "reconnects": 0,
             "first_hop_alive_at_drop": [ev.get("first_hop_alive")],
+            # **실행되지 못한 측정으로 False 가 된 끊김을 표시해 둔다.**
+            # 명령이 실행되지 못하면 `first_hop_alive` 가 False 로 나오는데
+            # (netmon/detect/vpn.first_hop_not_run), 그것은 "무응답" 이 아니라
+            # "재지 못함" 이다. 표시가 없으면 나가지도 않은 패킷이 "끊길 때
+            # 첫 홉 구간도 불안정했음" 의 근거가 된다 — 같은 끊김을 끊김
+            # 요약문은 유보하는데 조사 결론만 단정하게 된다.
+            "first_hop_not_run_at_drop": [first_hop_not_run(
+                ev.get("first_hop_method"), ev)],
+            # **무엇으로 도달성을 판정했는지도 함께 남긴다.** 끊길 때마다
+            # 첫 홉이 살아 있었다는 말은 판정 기준을 빼면 뜻이 달라진다 —
+            # ARP 로 판정하는 망에서는 같은 주기의 ICMP 가 전부 빠져 있어도
+            # True 다(netmon/liveness.py).
+            "first_hop_method_at_drop": [ev.get("first_hop_method")],
             "watch_kinds": ["VPN_DISCONNECTED", "VPN_RECONNECTED"],
             "still_down": True,
         }
@@ -295,6 +309,11 @@ class VpnDrop(Playbook):
                 crit["still_down"] = True
                 crit.setdefault("first_hop_alive_at_drop", []).append(
                     f.evidence.get("first_hop_alive"))
+                crit.setdefault("first_hop_not_run_at_drop", []).append(
+                    first_hop_not_run(f.evidence.get("first_hop_method"),
+                                      f.evidence))
+                crit.setdefault("first_hop_method_at_drop", []).append(
+                    f.evidence.get("first_hop_method"))
                 inv.note(ts, msg.INV_NOTE_DROP_AGAIN, drops=crit["drops"])
             elif f.kind == "VPN_RECONNECTED":
                 crit["reconnects"] = int(crit.get("reconnects", 0)) + 1
@@ -335,9 +354,11 @@ class VpnDrop(Playbook):
 
         if drops >= self.REPEAT_THRESHOLD:
             link_events = int(crit.get("link_events", 0))
-            alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
+            alive, _ = VpnDrop._judged(crit)
             if alive and all(alive) and not link_events:
-                verdict = msg.INV_VPN_VERDICT_TUNNEL
+                # 첫 홉이 매번 응답했다는 **사실**까지만 적는다. 구간을
+                # 지목하지 않는 이유는 _leg() 에 적었다.
+                verdict = msg.INV_VPN_VERDICT_FIRST_HOP_OK
             elif link_events:
                 verdict = msg.INV_VPN_VERDICT_LINK
             else:
@@ -350,19 +371,103 @@ class VpnDrop(Playbook):
 
     @staticmethod
     def _leg(crit) -> str:
-        """어느 구간이 문제였나.
+        """끊길 때 첫 홉이 어땠나.
 
         **횟수와 무관한 서술이다.** "되풀이" 같은 틀을 여기 섞으면 단발 결론에
         재사용할 때 "한 번 끊겼다 … 되풀이되는 끊김" 같은 자기모순이 된다.
         실제로 그렇게 났다.
+
+        **구간도 지목하지 않는다.** 첫 홉이 응답했다는 것은 이 기기와 공유기
+        사이가 살아 있었다는 뜻일 뿐, 터널 상대편 구간에 대해서는 아무것도
+        재지 않았다. 되풀이된다고 해서 같은 증거가 다른 것을 말해 주지는
+        않는다 — 한 묶음 ICMP 를 세 번 본 것이다. 같은 증거로 끊김 요약문
+        (netmon/detect/vpn._likely)은 유보하므로, 조사 결론만 단정하면 한
+        도구가 같은 관측을 두 가지 확신으로 말하게 된다.
+
+        **실행되지 못한 측정은 세지 않는다.** 나가지 않은 ping 때문에
+        `first_hop_alive` 가 False 가 된 끊김을 그대로 세면 "끊길 때 첫 홉
+        구간도 불안정했음" 이 되는데, 같은 끊김을 끊김 요약문은 유보한다.
+        무엇을 빼는지는 `_judged` 에 적었다.
         """
-        alive = [a for a in crit.get("first_hop_alive_at_drop", []) if a is not None]
+        alive, ran_known = VpnDrop._judged(crit)
         link_events = int(crit.get("link_events", 0))
         if alive and all(alive) and not link_events:
-            return msg.INV_VPN_LEG_TUNNEL
-        if link_events or (alive and not any(alive)):
+            basis = VpnDrop._method_basis(crit)
+            if basis:
+                return msg.INV_VPN_LEG_FIRST_HOP_OK % basis
+            return msg.INV_VPN_LEG_FIRST_HOP_OK_PLAIN
+        if link_events:
+            return msg.INV_VPN_LEG_LINK
+        # 첫 홉이 매번 죽어 있었다고 말하려면 **측정이 실제로 나갔어야**
+        # 한다. 표시를 짝지을 수 없는 조사(이 표시가 없던 때 열려 저장된
+        # 조사)에서는 나갔는지 모르므로 이 말을 하지 않는다.
+        if alive and not any(alive) and ran_known:
             return msg.INV_VPN_LEG_LINK
         return msg.INV_VPN_LEG_UNKNOWN
+
+    @staticmethod
+    def _judged(crit) -> Tuple[List[bool], bool]:
+        """실제로 도달성을 판정한 끊김만 모은다. (값들, 표시를 믿을 수 있는가)
+
+        빼는 것은 두 가지다.
+          - `first_hop_alive` 가 None 인 끊김 — 아무것도 판정하지 못했다.
+          - 측정이 실행되지 못한 끊김 — `first_hop_alive` 는 False 지만
+            그 False 는 "무응답" 이 아니라 "재지 못함" 이다
+            (netmon/detect/vpn.first_hop_not_run). 끊김 요약문은 이 경우
+            어느 쪽으로도 단정하지 않는다. 조사 결론도 같아야 한다.
+
+        빠진 끊김을 "응답했음" 쪽으로 세지 않는다는 점에서 None 과 같은
+        취급이다 — 실행되지 못한 측정은 판정이 아니라 공백이다.
+
+        두 번째 값은 실행 여부 표시를 끊김마다 짝지을 수 있었는지다. 이
+        표시를 남기기 전에 열려 저장된 조사에서는 짝이 없고, 그때 False 를
+        "나갔는데 무응답" 으로 읽으면 안 된다. 응답한 끊김(True)은 나갔다는
+        뜻이 값 자체에 들어 있으므로 짝이 없어도 그대로 센다.
+        """
+        alive = crit.get("first_hop_alive_at_drop", []) or []
+        flags = crit.get("first_hop_not_run_at_drop")
+        paired = isinstance(flags, list) and len(flags) == len(alive)
+        if not paired:
+            flags = [False] * len(alive)
+        return ([a for a, not_run in zip(alive, flags)
+                 if a is not None and not not_run], paired)
+
+    @staticmethod
+    def _method_basis(crit) -> str:
+        """무엇으로 첫 홉 도달성을 판정했는가.
+
+        끊김마다 다를 수 있어(보정이 ICMP 와 ARP 사이를 오간다) 본 것을 모두
+        적는다. 이름표가 없는 값(보정 중 `unknown`, 옛 기록의 None)은 적지
+        않는다 — 하나도 없으면 기준을 밝히지 않는 문구를 쓴다.
+
+        **판정한 끊김의 방법만 모은다.** 두 리스트는 같은 끊김을 같은 자리에
+        적으므로 짝지어 훑는다. `first_hop_alive` 가 None 인 끊김은 아무것도
+        판정하지 못한 주기인데(ICMP 로 보정된 망에서 게이트웨이를 못 잰
+        주기가 그렇다), 그 주기의 방법을 함께 적으면 판정한 적 없는 것을
+        판정 기준으로 내세우게 된다. 이 함수를 부르는 쪽(_leg)이 세는 것도
+        None 을 뺀 끊김들이다.
+
+        측정이 실행되지 못한 끊김도 같은 이유로 뺀다 — `_judged` 가 세지
+        않는 끊김의 방법을 기준으로 내세우면 앞뒤가 어긋난다.
+
+        길이가 어긋나면 짝을 믿을 수 없으므로(한쪽만 기록된 옛 조사, 복원된
+        상태) 기준을 적지 않는다.
+        """
+        alive = crit.get("first_hop_alive_at_drop", []) or []
+        methods = crit.get("first_hop_method_at_drop", []) or []
+        if len(alive) != len(methods):
+            return ""
+        flags = crit.get("first_hop_not_run_at_drop")
+        if not isinstance(flags, list) or len(flags) != len(alive):
+            flags = [False] * len(alive)
+        labels: List[str] = []
+        for judged, method, not_run in zip(alive, methods, flags):
+            if judged is None or not_run or method not in METHOD_MESSAGES:
+                continue
+            label = method_label(method)
+            if label not in labels:
+                labels.append(label)
+        return "·".join(labels)
 
 
 ALL: List[Playbook] = [L2Identity(), PathConfig(), VpnDrop()]

@@ -110,6 +110,37 @@ MEASUREMENT_GAP = "Measurement stopped for %.0f seconds (sleep or a halted proce
 
 # ─────────────────────────────────────────── Findings: VPN
 VPN_DISCONNECTED = "%s disconnected. Most likely explanation: %s."
+# A transition the provider reported as connecting: not down, but being
+# re-established. (Protection loss is still reported as before - traffic
+# leaves outside the tunnel either way.)
+VPN_RENEGOTIATING = "%s is renegotiating its tunnel (provider state connecting). Most likely explanation: %s."
+# A drop seen in a cycle with no primary interface. Same finding kind, but the
+# sentence says the link was absent - otherwise a drop that follows the link
+# down is filed next to a drop on a live link, and the two have different root
+# causes.
+# What the sentence claims stops at "the link was absent in the same cycle":
+# within one cycle the order of the two cannot be told, and the provider reason
+# is not always No Network (a failed handshake reads the same here). So it does
+# not say the VPN path is fine - the observation does not reach that far.
+#
+# It does not say the rest of the cycle was not measured either. Every collector
+# still runs on a link-less cycle, and the engine deliberately reads Wi-Fi on
+# exactly those cycles (wifi_fallback_dev in netmon/engine.py), which is where
+# link_active and the security mode come from. The true statement is that this
+# judgement reads nothing but the provider state.
+VPN_DISCONNECTED_NO_LINK = ("%s disconnected (provider state %s). There was no primary "
+                            "interface in the same cycle - within a single cycle the "
+                            "order of the link loss and the drop cannot be told, and this "
+                            "judgement reads nothing but the state the provider reported, "
+                            "so the cause is not narrowed.")
+# The same cycle, but the provider reported connecting: not called a drop
+# (AC-9), the same rule the full-cycle VPN_RENEGOTIATING follows.
+VPN_RENEGOTIATING_NO_LINK = ("%s is renegotiating its tunnel (provider state connecting). "
+                             "There was no primary interface in the same cycle - within a "
+                             "single cycle the order of the link loss and the "
+                             "renegotiation cannot be told, and this judgement reads "
+                             "nothing but the state the provider reported, so the cause "
+                             "is not narrowed.")
 VPN_TUNNEL_OFF = ("%s is connected but in a mode that builds no tunnel (%s). Traffic "
                   "leaves outside the tunnel, and other devices on this L2 can read it.")
 VPN_TUNNEL_OFF_SAE = ("%s is connected but in a mode that builds no tunnel (%s). WPA3-SAE "
@@ -123,16 +154,97 @@ VPN_PROTECTION_LOST = ("%s dropped, so traffic is leaving outside the tunnel. Ot
                        "on this L2 segment can see it.")
 VPN_PROTECTION_LOST_UNKNOWN = "%s dropped. Whether this network can be trusted is undetermined."
 VPN_RECONNECTED = "%s reconnected%s."
+# The recovery of an outage that passed between two complete observations.
+# See the note on the Korean catalogue: the state the provider was in while
+# it lasted never reaches this judgement, so the sentence does not name it.
+VPN_RECONNECTED_NO_LINK = ("%s reconnected%s. The cycles it was not connected in had "
+                           "no primary interface, so comparing complete observations "
+                           "alone never showed this stretch; its start was reported "
+                           "in those cycles. What state the provider was in meanwhile "
+                           "is not read by this judgement.")
 VPN_STATE_CHANGED = "%s state changed (%s → %s)."
 VPN_STATE_UNKNOWN = "%s state could not be read (%s → %s)."
 VPN_SINCE = " (down since %s)"
+VPN_SINCE_UNMEASURED = " (down since %s, %s total, about %s of it unmeasured)"
+
+# How long it was down. Bare seconds read badly for long outages ("604800 s"),
+# and rounding a sub-second span down to "0 s" hides a gap that did happen.
+DUR_DAYS = "%d d"
+DUR_HOURS = "%d h"
+DUR_MINUTES = "%d min"
+DUR_SECONDS = "%d s"
+DUR_UNDER_SECOND = "under 1 s"
+
+# Whether the first-hop evidence is one probe or a burst. In burst cycles
+# reachable/rtt_ms come from the first probe only (collect/link.merge_probes),
+# so without this sentence two losses out of three hide behind "first hop answered".
+# An ordinary cycle, not a burst. **No packet count is claimed** - the
+# observation keeps the number answered and the loss, not the number sent,
+# so a lossy cycle (which is what a drop cycle usually is) cannot say how
+# many went out. The default is one (config.ping_count), but it is settable.
+FIRST_HOP_EVIDENCE_ONE_COMMAND = "First-hop evidence is one ping command, not a concurrent burst (the number of packets sent is not recorded)."
+FIRST_HOP_EVIDENCE_BURST = "First-hop evidence is %d concurrent ICMP probes (%d answered, %.0f%% loss)."
+FIRST_HOP_EVIDENCE_BURST_PLAIN = "First-hop evidence is %d concurrent ICMP probes."
+# The burst "sent" count is the number of commands launched. If a command
+# fails or times out, no packet went out yet it still counts as sent, which
+# inflates the loss. That loss must not be read as network loss (the evidence
+# field `first_hop_errors` says what failed).
+FIRST_HOP_EVIDENCE_BURST_FAILED = "First-hop evidence is a concurrent ICMP burst - some probes failed to run, so the loss cannot be read as network loss (%d answered)."
+# When nothing answered and a probe failed to run, even the number of packets
+# that actually went out is unknown - "some" cannot be claimed (they may all
+# have failed), and the loss cannot be read as network loss.
+#
+# Not "some probes failed to run": that implies the rest did run, while the
+# same sentence says whether any packet went out is unknown. The failure list
+# collapses identical messages (collect/link.merge_probes), so all that can be
+# said is that at least one probe failed to run.
+FIRST_HOP_EVIDENCE_BURST_NOT_RUN = "First-hop evidence is a concurrent ICMP burst - nothing answered and at least one probe failed to run, so whether any packet went out is unknown."
+# An ordinary (single) cycle where the ping command itself failed to run. The
+# collector leaves a singular `error` key and records reachable as False
+# (collect/link.collect). Nothing was measured about the first hop.
+FIRST_HOP_EVIDENCE_NOT_RUN = "The first-hop ping command failed to run, so the first hop was not measured this cycle."
+# The command started but did not finish inside its limit. A **different
+# fact**: a probe that never ran sent no packet at all, while this one may
+# have sent one and lost the result. Neither can be called a measurement.
+FIRST_HOP_EVIDENCE_TIMED_OUT = "The first-hop probe did not finish inside its time limit, so no result came back - whether a packet went out is unknown."
+# The same distinction for a burst. If anything answered, at least one packet
+# went out and only the loss figure is unreadable; if nothing answered, even
+# that is unknown.
+FIRST_HOP_EVIDENCE_BURST_TIMED_OUT = "First-hop evidence is a concurrent ICMP burst - some probes did not finish inside the time limit, so the loss cannot be read as network loss (%d answered)."
+FIRST_HOP_EVIDENCE_BURST_TIMED_OUT_NONE = "First-hop evidence is a concurrent ICMP burst - nothing answered and at least one probe did not finish inside the time limit, so whether any packet went out is unknown."
+
+# The reason string from the provider. Quoted in a summary only on an exact
+# match against a fixed list - these strings carry public addresses and ports,
+# and an unwrapped string is not masked on export. The raw text stays in
+# the evidence (provider_reason).
+VPN_PROVIDER_REASON = "Provider reason: %s."
 
 # Most likely explanation for a VPN drop
 WHY_USER = "disconnected by the user"
 WHY_SLEEP = "sleep"
 WHY_MOVED = "network change"
-WHY_LINK = "first hop silent — problem between this device and the router"
-WHY_TUNNEL = "first hop healthy — tunnel path problem"
+# What reachability was judged by. Must say the same thing as METHOD_LABEL in
+# netmon/detect/quality.py. On an ARP-judged network "first hop answered" can
+# sit next to 100% ICMP loss; without naming the basis that reads as a
+# contradiction.
+METHOD_ARP = "ARP resolution"
+METHOD_ICMP = "ICMP reply"
+METHOD_LINK = "link state"
+
+WHY_LINK = "first hop silent (by %s) — problem between this device and the router"
+# Only the fact that the first hop answered, matching how quality.cause_note
+# words the same amount of evidence.
+WHY_FIRST_HOP_OK = "first hop answered (by %s) — which leg is at fault cannot be told from this observation alone"
+# Only some probes of a burst came back. reachable follows the first probe
+# (collect/link.merge_probes), so a lost first probe reads as "silent" even
+# when the rest answered - which contradicts the loss figure next to it.
+WHY_FIRST_HOP_MIXED = "first hop answered only some probes (by %s) — which leg is at fault cannot be told from this observation alone"
+# The probe never ran. reachable stays False, but that means "not measured",
+# not "silent" - a packet that never went out cannot point at a leg.
+WHY_FIRST_HOP_NOT_RUN = "the first-hop probe failed to run — which leg is at fault cannot be told from this observation alone"
+# The probe ran out of time. A packet may have gone out, but no result came
+# back, so this is still not a measurement. Not merged with "failed to run".
+WHY_FIRST_HOP_TIMED_OUT = "the first-hop probe did not finish inside its time limit — which leg is at fault cannot be told from this observation alone"
 WHY_UNKNOWN = "not enough evidence to tell"
 
 DETECTOR_ERROR = "Detector %s stopped with an exception: %s"
@@ -171,12 +283,20 @@ INV_PATH_VERDICT = "the changed settings took hold"
 # Playbook: VPN drops
 INV_VPN_WIDEN = "Drops keep repeating. Watching first-hop quality as well."
 INV_VPN_REPEATED = "%s dropped %d times. %s."
-# Which leg was at fault. Keep the "repeated" framing out of these — reusing
-# them in a single-drop conclusion produces "dropped once … repeated drops".
-INV_VPN_LEG_TUNNEL = "the first hop was healthy each time — a tunnel-side problem"
+# How the first hop behaved at each drop. Keep the "repeated" framing out of
+# these — reusing them in a single-drop conclusion produces "dropped once …
+# repeated drops". Do not name a leg either: a first hop that answers does not
+# separate the local leg from the far side of the tunnel, and the drop summary
+# (WHY_FIRST_HOP_OK) withholds that call on the same evidence.
+# The "%s" is what reachability was judged by (METHOD_*).
+INV_VPN_LEG_FIRST_HOP_OK = ("the first hop answered at every drop (judged by %s) — which leg "
+                            "is at fault cannot be told from this observation alone")
+# For investigations that recorded no judging method. Do not state what is unknown.
+INV_VPN_LEG_FIRST_HOP_OK_PLAIN = ("the first hop answered at every drop — which leg is at "
+                                  "fault cannot be told from this observation alone")
 INV_VPN_LEG_LINK = "the first hop was unstable at the same time"
 INV_VPN_LEG_UNKNOWN = "could not tell which leg"
-INV_VPN_VERDICT_TUNNEL = "repeated drops on the tunnel side"
+INV_VPN_VERDICT_FIRST_HOP_OK = "repeated drops — the first hop answered each time, leg undetermined"
 INV_VPN_VERDICT_LINK = "repeated drops alongside an unstable first hop"
 INV_VPN_VERDICT_UNKNOWN = "repeated drops — could not tell which leg"
 
@@ -269,7 +389,14 @@ WZ_VPN_Q = "  Monitor VPNs?"
 WZ_VPN_NONE = "[VPN] No VPN found, skipping."
 
 WZ_EXTERNAL_HEAD = "[Outbound checks] Compares DNS answers against a reference (hijack detection),"
+# The tunnel endpoint sentence matches the Korean catalogue, the README and the
+# consent text word for word; only the line breaks differ (AC-4, revised).
 WZ_EXTERNAL_BODY = ("  and watches TLS issuers for fixed hosts plus public IP changes.\n"
+                    "  While a VPN is not connected (down or renegotiating) it sends ICMP\n"
+                    "  to the tunnel endpoint address the provider reported — ping_count\n"
+                    "  packets, 1 by default. The decision uses the previous cycle's state,\n"
+                    "  so a probe may also go out on the first cycle after reconnecting,\n"
+                    "  and at most 12 packets go out per provider per outage.\n"
                     "  A fixed set of lookup names and this machine's source IP leave the\n"
                     "  machine. Network identifiers such as SSID, BSSID and MAC are not sent.")
 WZ_EXTERNAL_Q = "  Enable outbound checks?"
@@ -293,7 +420,7 @@ WZ_ROW_LOGDIR = "records         %s"
 WZ_ROW_RETENTION = "retention       %d days"
 WZ_ROW_LOCATION = "location        %s  (evil twin detection)"
 WZ_ROW_VPN = "VPN monitoring  %s  (%s)"
-WZ_ROW_EXTERNAL = "outbound checks %s  (DNS/TLS hijack, public IP)"
+WZ_ROW_EXTERNAL = "outbound checks %s  (DNS/TLS hijack, public IP, tunnel endpoint if not connected)"
 WZ_ROW_AGENT = "always on       %s  (start at login)"
 WZ_ROW_LINK = "command         %s  (run netmon from anywhere)"
 WZ_ON = "on"

@@ -7,13 +7,20 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from netmon import config as configmod
+from netmon import engine as enginemod
 from netmon import redact as redactmod
+from netmon import util
+from netmon.engine import Engine
 from netmon.model import ident
-from tests.helpers import GW, GW_MAC, obs
+from netmon.store import Store
+from tests.helpers import (ENDPOINT, ENDPOINT_REASON, GW, GW_MAC,
+                           endpoint_probe, obs, vpn_state)
 
 
 class TestRedaction(unittest.TestCase):
@@ -120,6 +127,308 @@ class TestCollectorWithholdsIdentity(unittest.TestCase):
         o = obs(ssid=None, bssid=None)
         self.assertIsNone(o.get("wifi", "ssid"))
         self.assertIsNone(o.get("wifi", "bssid"))
+
+
+class TestTunnelEndpointConsent(unittest.TestCase):
+    """터널 엔드포인트 측정도 기존 동의에 묶인다 (QA-14, ADV-5, AC-13)."""
+
+    FEATURE = "vpn.tunnel_probe"
+
+    def _cfg(self, d):
+        return configmod.load(os.path.join(d, "config.json"))
+
+    def test_it_is_bound_to_external_probes(self):
+        self.assertEqual(configmod.FEATURE_CONSENT[self.FEATURE], "external_probes")
+        self.assertIn(self.FEATURE, configmod.CONSENTS["external_probes"]["enables"])
+
+    def test_it_is_off_by_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d)
+            self.assertFalse(cfg.feature(self.FEATURE))
+            self.assertFalse(cfg.effective(self.FEATURE))
+
+    def test_the_feature_alone_is_inert(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d)
+            cfg.set_feature(self.FEATURE, True)
+            self.assertFalse(cfg.effective(self.FEATURE))
+            self.assertIn("동의 필요", cfg.blocked_reason(self.FEATURE))
+
+    def test_the_consent_alone_is_inert(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d)
+            cfg.grant("external_probes")
+            self.assertFalse(cfg.effective(self.FEATURE))
+            self.assertEqual(cfg.blocked_reason(self.FEATURE), "꺼져 있음")
+
+    def test_revoking_turns_it_off_too(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d)
+            cfg.grant("external_probes")
+            cfg.set_feature(self.FEATURE, True)
+            self.assertTrue(cfg.effective(self.FEATURE))
+            cfg.revoke("external_probes")
+            self.assertFalse(cfg.feature(self.FEATURE))
+            self.assertFalse(cfg.effective(self.FEATURE))
+
+    def test_an_existing_grant_is_not_asked_again_and_does_not_switch_it_on(self):
+        """이미 동의한 사람에게 다시 묻지 않고, 저절로 켜지지도 않는다 (QA-14).
+
+        새 기능 키를 모르는 판에서 저장된 설정을 그대로 읽는다.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1,
+                           "consents": {"external_probes": {
+                               "granted": True, "at": "2026-01-01T00:00:00Z",
+                               "note": "초기 설정에서 선택"}},
+                           "features": {"detect.public_ip": True}}, fh)
+            cfg = configmod.load(path)
+            self.assertTrue(cfg.consented("external_probes"))
+            self.assertTrue(cfg.effective("detect.public_ip"))
+            self.assertFalse(cfg.feature(self.FEATURE),
+                             "동의가 있어도 새 기능이 저절로 켜지면 안 된다")
+            self.assertFalse(cfg.effective(self.FEATURE))
+
+    def test_the_consent_text_says_what_goes_out(self):
+        text = configmod.CONSENTS["external_probes"]
+        self.assertIn("엔드포인트", text["why"])
+        self.assertIn("엔드포인트", text["sends_out"])
+        # 언제 보내는지도 적는다 — 평소 주기에는 나가지 않는다.
+        self.assertIn("끊", text["sends_out"])
+
+    def test_the_setup_wizard_says_it_too(self):
+        """초기 설정은 동의를 받으면 `enables` 의 기능을 함께 켠다.
+
+        그 화면에 나오는 문구는 별도 카탈로그라(`netmon/messages`), 여기서
+        같이 보지 않으면 "말하지 않고 켜는" 상태가 된다.
+
+        **문구가 무엇을 말해야 하는지는 아래
+        `TestTheFourTextsSayTheSameThing` 가 본다.** 여기서 보던
+        "끊긴" 단언은 지웠다 — `connecting` 을 "끊김" 이라 부르지 않기로 한
+        결정(AC-9)과 어긋나고, 실제 동작(`disconnected`·`connecting` 둘 다)
+        보다 좁게 적는 문구를 고정하고 있었다 (AC-4 수정분).
+        """
+        from netmon import messages
+
+        self.assertIn(self.FEATURE, configmod.CONSENTS["external_probes"]["enables"])
+        self.assertIn("터널", messages.get("WZ_EXTERNAL_BODY", "ko"))
+        self.assertIn("tunnel endpoint", messages.get("WZ_EXTERNAL_BODY", "en"))
+
+
+# 네 곳이 같은 문장으로 적어야 하는 것 (AC-4 수정분, 사용자 결정 2026-09-22).
+# 여기 있는 글자가 정본이다.
+CANON_KO = ("VPN 이 연결돼 있지 않은 동안(끊김·재협상) 공급자가 사유에 적어 준 "
+            "터널 상대편(엔드포인트) 주소로 ICMP 를 보냅니다(ping_count 만큼, 기본 1발). "
+            "보낼지는 직전 주기의 상태로 정하므로 다시 연결된 직후 첫 주기에도 나갈 수 있고, "
+            "공급자마다 한 끊김에 최대 12발까지만 보냅니다.")
+
+CANON_EN = ("While a VPN is not connected (down or renegotiating) it sends ICMP "
+            "to the tunnel endpoint address the provider reported — ping_count "
+            "packets, 1 by default. The decision uses the previous cycle's state, "
+            "so a probe may also go out on the first cycle after reconnecting, "
+            "and at most 12 packets go out per provider per outage.")
+
+
+def _flat(text):
+    """줄바꿈·들여쓰기만 다른 같은 문장을 비교할 수 있게 편다."""
+    return " ".join(text.split())
+
+
+class TestTheFourTextsSayTheSameThing(unittest.TestCase):
+    """README·동의 설명·마법사 문구가 한 문장으로 통일돼 있는가 (AC-4 수정분).
+
+    네 곳이 갈려 있었다 — README 만 코드와 맞고 나머지 셋은 "VPN 이 끊긴
+    동안" 이라 `connecting` 주기를 빠뜨렸다. 읽는 사람이 어느 것이 실제
+    동작인지 알 수 없는 상태였고, 고칠 때 한 곳만 고치면 다시 갈린다.
+
+    문장에는 네 가지가 들어 있어야 한다.
+      - 어떤 상태에 보내는가 (연결돼 있지 않은 동안 — 끊김·재협상 둘 다)
+      - 몇 발인가 (`ping_count` 만큼. "한 발" 로 단정하지 않는다)
+      - 직전 주기 기준이라 다시 연결된 직후 첫 주기에도 **나갈 수 있다**
+        (실제로 나가는지는 그 직전 주기의 사유에 주소가 있었는지에 달렸다 —
+        "나간다" 로 단정하지 않는다)
+      - 한 끊김의 상한 (12발). 세는 단위가 "구간" 이면 읽는 사람이 어느
+        구간인지 알 수 없다 — 공급자 하나의 끊김 하나다 (검수 1차 지적).
+    """
+
+    def _readme(self):
+        """저장소의 README. 설치본에는 없을 수 있으므로 없으면 건너뛴다.
+
+        `netmon.__file__` 의 두 단계 위는 저장소에서만 README 가 있는
+        자리다. 패키지만 설치한 환경에서는 그 파일이 없어 이 검사가
+        `FileNotFoundError` 로 터진다 — 없는 파일은 실패가 아니라 검사할
+        수 없는 것이다 (검수 1차 지적).
+        """
+        import netmon
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(netmon.__file__)))
+        path = os.path.join(root, "README.md")
+        if not os.path.isfile(path):
+            self.skipTest("README.md 가 없다 (저장소 밖에서 돌린 검사)")
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_readme_carries_the_sentence(self):
+        self.assertIn(CANON_KO, _flat(self._readme()))
+
+    def test_the_consent_text_carries_the_sentence(self):
+        self.assertIn(CANON_KO,
+                      _flat(configmod.CONSENTS["external_probes"]["sends_out"]))
+
+    def test_the_wizard_carries_the_sentence(self):
+        from netmon import messages
+
+        self.assertIn(CANON_KO, _flat(messages.get("WZ_EXTERNAL_BODY", "ko")))
+        self.assertIn(CANON_EN, _flat(messages.get("WZ_EXTERNAL_BODY", "en")))
+
+    def test_the_purpose_text_uses_the_same_condition(self):
+        """`why` 는 목적을 적는 자리라 문장이 다르지만 조건은 같아야 한다."""
+        self.assertIn("연결돼 있지 않은 동안(끊김·재협상)",
+                      _flat(configmod.CONSENTS["external_probes"]["why"]))
+
+    def test_no_text_calls_renegotiation_a_disconnection(self):
+        """`connecting` 을 "끊김" 이라고 적지 않는다 (AC-9).
+
+        그렇게 적으면 실제로 보내는 두 상태 중 하나가 문구에서 사라진다.
+        """
+        from netmon import messages
+
+        texts = [_flat(self._readme()),
+                 _flat(configmod.CONSENTS["external_probes"]["why"]),
+                 _flat(configmod.CONSENTS["external_probes"]["sends_out"]),
+                 _flat(messages.get("WZ_EXTERNAL_BODY", "ko")),
+                 _flat(messages.get("WZ_ROW_EXTERNAL", "ko"))]
+        for text in texts:
+            for wrong in ("VPN 이 끊긴 동안", "VPN 이 끊긴 주기", "끊겨 있는 주기에만"):
+                self.assertNotIn(wrong, text)
+
+    def test_the_summary_row_names_the_condition(self):
+        """한 줄 요약도 언제 나가는지는 밝힌다."""
+        from netmon import messages
+
+        self.assertIn("비연결 주기", messages.get("WZ_ROW_EXTERNAL", "ko"))
+        self.assertIn("not connected", messages.get("WZ_ROW_EXTERNAL", "en"))
+
+    def test_the_readme_does_not_promise_a_single_packet(self):
+        """발 수는 `ping_count` 가 정한다. 설정과 무관하게 단정하지 않는다."""
+        readme = _flat(self._readme())
+        self.assertNotIn("ICMP 한 발", readme)
+        self.assertIn("ping_count 만큼", readme)
+
+
+class TestTunnelEndpointIsWrapped(unittest.TestCase):
+    """주소는 감싸서 기록하고, 사유 원문은 그대로 둔다 (QA-6, AC-5)."""
+
+    def setUp(self):
+        self.salt = b"test-salt-not-a-real-one"
+
+    def test_the_address_becomes_a_token_when_exported(self):
+        o = endpoint_probe(obs(vpn=vpn_state("disconnected", reason=ENDPOINT_REASON)))
+        red = redactmod.redact(o.as_dict(), self.salt)
+        link = json.dumps(red["data"]["link"], ensure_ascii=False)
+        self.assertNotIn(ENDPOINT, link)
+        self.assertIn("ipv4:", link)
+
+    def test_the_provider_reason_stays_as_it_is(self):
+        """로컬 기록에는 원문을 남긴다 — 이 저장소의 공개된 설계 그대로다.
+
+        감싸지 않은 문자열은 내보낼 때도 바뀌지 않는다(redact 는 감싼 값만
+        바꾼다). 그래서 사유에 적힌 주소는 내보낸 기록에도 남는다. 이 갈래를
+        이 필드에서만 뒤집지 않기로 했으므로(AC-5), 그 사실을 못 박아 둔다.
+        """
+        o = endpoint_probe(obs(vpn=vpn_state("disconnected", reason=ENDPOINT_REASON)))
+        red = redactmod.redact(o.as_dict(), self.salt)
+        self.assertEqual(red["data"]["vpn"]["warp"]["reason"], ENDPOINT_REASON)
+
+    def test_the_evidence_field_is_redactable(self):
+        """끊김 증거에 실린 주소도 같은 방식으로 가려진다."""
+        evidence = {"tunnel_endpoint": ident("ipv4", ENDPOINT),
+                    "tunnel_endpoint_reachable": False}
+        red = redactmod.redact(evidence, self.salt)
+        self.assertNotIn(ENDPOINT, json.dumps(red))
+        self.assertEqual(red["tunnel_endpoint"]["id"], "ipv4")
+
+
+class TestACollectorFailureCarriesNoPath(unittest.TestCase):
+    """수집기가 던진 예외의 **메시지**는 관측에 실리지 않는다 (DEV-15, AC-5).
+
+    `Observation.errors` 는 `as_dict` 에 그대로 실리고(netmon/model.py),
+    `capture` 는 그 결과를 파일로 내보낸다. `--redact` 는 `ident()` 로 감싼
+    값만 바꾸므로(netmon/redact.py) 감싸지 않은 문장은 가려지지 않는다.
+    그런데 subprocess 는 실행 실패 예외에 **실행 파일 경로**를 담는다.
+
+    **문자열을 손으로 만들어 넣지 않는다** — 실제로 실행 실패를 일으켜
+    파이썬이 만든 예외를 쓴다. 손으로 만든 문자열은 실제 경로를 덮지 못한다.
+    """
+
+    #: 엔진이 한 주기에 부르는 수집기들. 하나만 터뜨리고 나머지는 비운다.
+    COLLECTORS = ("iface", "arp", "dhcp", "dns", "route", "wifi", "link")
+
+    def setUp(self):
+        self.salt = b"test-salt-not-a-real-one"
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.bad = os.path.join(self.dir, "netmon-not-a-binary")
+        with open(self.bad, "w", encoding="utf-8") as fh:
+            fh.write("실행 형식이 아니다\n")
+        os.chmod(self.bad, 0o755)
+
+    def _explode(self, *_args, **_kwargs):
+        """실행 실패를 실제로 일으킨다. `util.run` 이 잡지 않는 갈래다."""
+        util.run([self.bad])
+        raise AssertionError("실행이 실패해야 한다")
+
+    def _engine(self):
+        cfg = configmod.load(os.path.join(self.dir, "no-config.json"))
+        return Engine(cfg, Store(self.dir))
+
+    def _observe(self, victim):
+        eng = self._engine()
+        with mock.patch.multiple(
+                enginemod,
+                **{name: mock.Mock(collect=(self._explode if name == victim
+                                            else (lambda ctx: {})))
+                   for name in self.COLLECTORS}):
+            return eng.observe()
+
+    def test_the_exception_really_carries_the_path(self):
+        """이 시험의 재료가 실재함을 먼저 못 박는다.
+
+        여기가 깨지면 아래 시험은 아무것도 가리지 않는 빈 시험이 된다.
+        """
+        with self.assertRaises(OSError) as caught:
+            util.run([self.bad])
+        self.assertIn(self.bad, str(caught.exception))
+
+    def test_the_message_never_reaches_the_observation(self):
+        o = self._observe("iface")
+        self.assertEqual(o.errors, {"iface": "OSError"})
+        for text in (json.dumps(o.as_dict(), ensure_ascii=False),
+                     json.dumps(redactmod.redact(o.as_dict(), self.salt),
+                                ensure_ascii=False)):
+            self.assertNotIn(self.bad, text)
+            self.assertNotIn(self.dir, text)
+            self.assertNotIn("Exec format error", text)
+
+    def test_the_vpn_query_is_the_same(self):
+        """공급자 조회 갈래도 같다 — 그쪽도 외부 명령을 쓴다."""
+        eng = self._engine()
+        eng.cfg.set_feature("vpn.enabled", True)
+        with mock.patch.multiple(
+                enginemod,
+                **{name: mock.Mock(collect=(lambda ctx: {}))
+                   for name in self.COLLECTORS}), \
+             mock.patch.object(enginemod.vpn, "resolve",
+                               return_value=["warp"]), \
+             mock.patch.object(enginemod.vpn, "collect", self._explode):
+            o = eng.observe()
+        self.assertEqual(o.errors, {"vpn": "OSError"})
+        text = json.dumps(redactmod.redact(o.as_dict(), self.salt),
+                          ensure_ascii=False)
+        self.assertNotIn(self.bad, text)
+        self.assertNotIn(self.dir, text)
 
 
 if __name__ == "__main__":

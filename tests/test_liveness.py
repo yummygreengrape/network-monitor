@@ -9,7 +9,7 @@ from __future__ import annotations
 import unittest
 
 from netmon import baseline
-from netmon.liveness import (ARP, CALIBRATION_CYCLES, ICMP,
+from netmon.liveness import (ARP, CALIBRATION_CYCLES, ICMP, LINK, UNKNOWN,
                              REVERT_AFTER_ICMP_FAILURES, evaluate)
 from tests.helpers import GW_MAC, obs
 
@@ -100,6 +100,27 @@ class TestIcmpModeCanBeRevoked(unittest.TestCase):
         state = self._run(state, 1, icmp_ok=True)
         self.assertEqual(state.get("icmp_fail_run", 0), 0)
         self.assertIs(state["icmp_gw"], True)
+
+
+class TestCalibratingDoesNotAlwaysHold(unittest.TestCase):
+    """보정 중이라고 늘 판정을 미루는 것은 아니다.
+
+    ARP 도 ICMP 도 살아 있다고 말하지 않는 입력에서, 링크 자체가 내려가
+    있으면 `(LINK, False)` 로 **판정한다.** 링크 신호가 없거나 켜져 있을
+    때만 보류한다(None). `collect/link.first_hop_silent` 는 이 갈래와 일부러
+    갈라지는데, 그 주석이 "liveness 는 판정을 보류한다" 고만 적고 있었다 —
+    갈라지는 지점을 적을 때 쓰는 근거이므로 여기서 값으로 못 박는다.
+    """
+
+    def test_a_dead_link_while_calibrating_is_a_verdict(self):
+        self.assertEqual(
+            evaluate(obs(icmp_ok=False, gw_mac=None, link_active="FALSE"), {}),
+            (LINK, False))
+
+    def test_the_same_input_with_the_link_up_is_held(self):
+        self.assertEqual(
+            evaluate(obs(icmp_ok=False, gw_mac=None, link_active="TRUE"), {}),
+            (UNKNOWN, None))
 
 
 class TestNetworkChangeResetsCalibration(unittest.TestCase):

@@ -26,6 +26,22 @@ CONFIDENCES = (POSSIBLE, SUSPECT, CONFIRMED)
 INFO_SEV, LOW, MEDIUM, HIGH = "info", "low", "medium", "high"
 SEVERITIES = (INFO_SEV, LOW, MEDIUM, HIGH)
 
+# 탐침이 **실행되지 못했거나 끝나지 못한** 주기에 관측의 `error` 에 남기는
+# 고정 낱말. 수집기(netmon/collect/link.ping)가 쓰고 판정(netmon/detect/vpn)이
+# 읽으므로 한 곳에 둔다 — 양쪽에 문자열을 따로 적으면 한쪽만 고쳐도 테스트가
+# 전부 통과한 채 판정이 조용히 갈래를 놓친다.
+#
+# 둘은 뜻이 다르다. 뭉개면 "재지 못했다" 와 "결과를 못 받았다" 가 같은 말이 된다.
+#   PROBE_NOT_RUN    명령을 실행하지 못했다 — 패킷이 한 발도 나가지 않았다
+#   PROBE_TIMED_OUT  제한 시간 안에 끝나지 못했다 — 나갔을 수도 있으나 결과가 없다
+# 어느 쪽도 "쟀다" 가 아니다.
+#
+# 값은 **대상과 무관한 고정 낱말**이다. 터널 엔드포인트의 실패 문구에는 대상
+# 주소가 섞이면 안 되는데(netmon/collect/link._error_note), 이 값들에는 주소가
+# 들어갈 자리가 없다.
+PROBE_NOT_RUN = "not-run"
+PROBE_TIMED_OUT = "timed-out"
+
 
 def ident(kind: str, value: Any) -> Dict[str, Any]:
     """식별자 값을 종류와 함께 감싼다."""

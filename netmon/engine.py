@@ -9,10 +9,12 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import baseline, investigate, messages, vpn
+from . import baseline, investigate, liveness, messages, vpn
 from .collect import arp, dhcp, dns, iface, link, route, wifi
 from .config import Config
 from .detect import quality
+# 수집기 `netmon.vpn` 과 이름이 겹쳐 별칭으로 부른다.
+from .detect import vpn as vpn_detect
 from .detect import (Context, associated_without_ipv4, attributions_for, gap_exceeded,
                      is_complete, network_key,
                      run_all)
@@ -32,8 +34,42 @@ def _external_resolver(dns_block: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _collect_error(exc: Exception) -> str:
+    """수집기가 던진 예외를 관측에 남길 문구로. **예외 종류 이름까지다.**
+
+    `str(exc)` 를 싣지 않는다. `Observation.errors` 는 그대로 직렬화되고
+    (netmon/model.py 의 `as_dict`), `capture` 는 그 결과를 파일로 내보낸다.
+    `--redact` 는 `ident()` 로 감싼 값만 바꾸므로(netmon/redact.py) 감싸지
+    않은 문장은 내보낼 때도 가려지지 않는다. 그런데 subprocess 는 실행 실패
+    예외에 **실행 파일 경로**를 담는다(CPython subprocess.py 의
+    `err_filename = orig_executable`; 실측 `[Errno 8] Exec format error:
+    '<경로>/netmon-not-a-binary'`). `util.run` 이 잡는 것은 FileNotFoundError·
+    PermissionError·TimeoutExpired 뿐이라 그런 OSError 는 여기까지 올라온다.
+
+    `ident()` 로 감싸지 않는 이유는 collect/link.py 의 `_error_note` 와 같다 —
+    여기 오는 것은 경로 하나가 아니라 **문장**이라 `ID_KINDS` 의 어느 종류에도
+    맞지 않고(`path` 종류는 있으나 경로 값에 붙이는 이름이다 — netmon/model.py),
+    문장째 감싸면 `redact` 가 전체를 토큰 하나로 바꿔 오류 내용이 사라진다.
+
+    잃는 것은 예외 메시지의 진단 정보다. 어느 갈래였는지는 종류 이름으로
+    가릴 수 있고, 흔한 실패(명령 없음·권한·제한 시간)는 `util.run` 이 이미
+    잡아 수집기가 고정 낱말로 적는다. 종류 이름은 비어 있는 법이 없으므로
+    "오류가 있었다" 는 사실 자체도 그대로 남는다.
+    """
+    return type(exc).__name__
+
+
 # 비교 기준을 디스크에 남기는 주기. 매 주기 쓰면 쓰기량이 20배가 된다.
 BASELINE_SAVE_SECONDS = 60.0
+
+# 이 끊김에 터널 엔드포인트로 몇 발 나갔는가. 상한(vpn.TUNNEL_PROBE_CAP)을
+# 세는 자리이고, 모양은 `{공급자: {"shots": 발 수, "capped": 상한에 닿았는가}}`
+# 다 — 세는 단위가 공급자 하나의 끊김 하나이기 때문이다(vpn.carry_probe_counts).
+# **없어도 동작한다** — 없거나 모양이 다르면 0 부터 센다.
+#
+# 이름은 `netmon/vpn` 것을 그대로 쓴다. 여기서 쓰고 복구 판정이 읽으므로
+# (netmon/detect/vpn.py `_endpoint_probe_record`) 한 곳에서 와야 한다.
+ENDPOINT_PROBES_KEY = vpn.ENDPOINT_PROBES_KEY
 
 # 커널 ARP 로그를 읽는 간격과 조회 창. `log show` 는 고정 1초쯤 들고 창이
 # 커지면 더 든다(1시간치 8.9초). 간격보다 창을 넉넉히 잡아 빈틈을 막는다.
@@ -42,6 +78,18 @@ ARP_LOG_WINDOW_SECONDS = 90.0
 
 
 class Engine:
+    # 첫 홉 다발 측정을 켤지 정하는 직전 주기의 관측. 클래스 기본값으로 두는
+    # 것은 replay() 가 __init__ 을 우회하기 때문이다.
+    _last_link: Optional[Dict[str, Any]] = None
+    _last_arp: Optional[Dict[str, Any]] = None
+    _last_vpn: Optional[Dict[str, Any]] = None
+    _before_vpn: Optional[Dict[str, Any]] = None
+    # **직전 주기**의 VPN 블록. 위의 `_last_vpn` 과 달리 판정 단계에서
+    # 갱신되므로, 수집을 거치지 않는 replay() 에서도 같은 값이 된다.
+    # 판정하지 않은 주기(링크 없음)도 여기에는 남는다 — 링크가 없는 동안
+    # 끊긴 순간을 볼 수 있는 유일한 비교 대상이다.
+    _prev_cycle_vpn: Optional[Dict[str, Any]] = None
+
     def __init__(self, cfg: Config, store: Store) -> None:
         self.cfg = cfg
         self.store = store
@@ -102,19 +150,36 @@ class Engine:
     # --- 수집 ---
     def observe(self) -> Observation:
         obs = Observation(ts=ts_now())
+        endpoint, endpoint_capped = self._claim_tunnel_probe()
         ctx: Dict[str, Any] = {
             "allow_location": self.cfg.effective("detect.evil_twin"),
             "allow_external": self.cfg.effective("detect.public_ip"),
             "config_home": os.path.dirname(self.cfg.path),
             "wifi_helper_interval": self.cfg.data.get("wifi_helper_interval", 15),
             "ping_count": self.cfg.data.get("ping_count", 1),
+            # 조사 중에는 주기가 좁혀진다. 다발 측정은 그 주기 안에 들어갈 때만 한다.
+            "interval": self.effective_interval(self.cfg.interval),
+            # **직전 주기**의 관측으로만 정한다. 같은 주기의 VPN 상태는 아직 없다 —
+            # link 가 vpn 보다 먼저 돌기 때문이다.
+            "first_hop_burst": self._burst_hint(),
+            # 터널 엔드포인트 측정. 동의와 기능이 함께 켜졌을 때만 참이고,
+            # 주소는 직전 주기의 VPN 관측에서 온다. 둘 중 하나라도 없으면
+            # 수집기는 대상을 만들지 않는다 (netmon/collect/link.py).
+            "allow_tunnel_probe": self.cfg.effective("vpn.tunnel_probe"),
+            "tunnel_endpoint": endpoint,
+            # 상한에 닿아 보내지 않은 주기임을 관측에 남기려고 함께 넘긴다.
+            # 주소가 없어서 재지 않은 주기와 구분되지 않으면, 나중에 기록을
+            # 읽는 쪽이 "안 보냈다" 의 이유를 알 수 없다.
+            "tunnel_probe_capped": endpoint_capped,
         }
 
         def step(module, name: str) -> None:
             try:
                 obs.data[name] = module.collect(ctx)
             except Exception as exc:
-                obs.errors[name] = "%s: %s" % (type(exc).__name__, str(exc)[:120])
+                # 예외 **메시지**는 옮기지 않는다 — 경로가 섞여 나오고, 감싸지
+                # 않은 문자열이라 `capture --redact` 에도 남는다(_collect_error).
+                obs.errors[name] = _collect_error(exc)
                 obs.data[name] = {}
 
         step(iface, "iface")
@@ -162,9 +227,117 @@ class Engine:
             try:
                 obs.data["vpn"] = vpn.collect(providers)
             except Exception as exc:
-                obs.errors["vpn"] = str(exc)[:120]
+                # 공급자 조회도 외부 명령을 쓴다. 위 `step` 과 같은 이유로
+                # 종류 이름까지만 남긴다.
+                obs.errors["vpn"] = _collect_error(exc)
 
+        self._remember_for_burst(obs)
         return obs
+
+    def _burst_hint(self) -> bool:
+        """이번 주기의 첫 홉을 다발로 잴 것인가.
+
+        판정 방법을 함께 넘긴다. ICMP 를 막아 둔 게이트웨이에서는
+        `gateway_reachable` 이 정상 상태에도 매 주기 False 라, 그것만 보면
+        아무 일도 없는데 주기마다 다발이 나간다 (netmon/collect/link.py).
+        `self.state` 는 직전 주기까지의 보정 결과다 — 이번 주기 보정은
+        판정 단계에서 일어나므로 여기서는 아직 반영돼 있지 않다.
+        """
+        return link.first_hop_anomaly(self._last_link, self._last_vpn,
+                                      self._before_vpn,
+                                      prev_arp=self._last_arp,
+                                      method=liveness.method_for(self.state))
+
+    def _claim_tunnel_probe(self) -> Tuple[Optional[str], bool]:
+        """(이번 주기에 잴 주소, 상한에 닿아 보내지 않는 주기인가).
+
+        **한 주기에 한 번만 부른다. 부르는 것이 곧 예산을 쓰는 것이다** —
+        보내기로 정하면서 그 발 수를 세기 때문에, 조회하듯 다시 부르면 같은
+        주기가 두 번 세진다. 그래서 값만 돌려주는 껍데기를 따로 두지 않는다.
+
+        주소는 **직전 주기**의 VPN 관측에서 얻는다 — 같은 주기의 값은 아직
+        없고(link 가 vpn 보다 먼저 돈다), 뒤에 직렬로 붙이면 한 주기가 약
+        1.84초 길어져 조사 중 2~3초 주기를 넘긴다 (AC-4c). 그래서 끊김이
+        시작된 첫 주기에는 주소가 없어 관측이 한 주기 늦게 시작된다.
+
+        `self._last_vpn` 은 다발 측정 판단이 쓰는 것과 같은, 직전 주기의 VPN
+        블록이다(`_remember_for_burst`). 링크가 없어 판정을 건너뛴 주기도
+        여기에는 남는다 — VPN 상태는 링크가 없어도 수집되기 때문이다.
+
+        세는 단위는 **공급자 하나의 끊김 하나**이고(`vpn.carry_probe_counts`),
+        세는 것은 주기가 아니라 **발 수**다 — 한 주기에 나가는 발 수가
+        `ping_count` 설정에 달렸기 때문이다(netmon/collect/link.py).
+
+        센 값은 `state.json` 에 둔다. 메모리에 두면 launchd 가 되살릴 때마다
+        0 이 되어(이 파일 위쪽 주석 — 의도치 않은 재시작이 잦다) 긴 끊김에서
+        상한이 사실상 없어진다.
+
+        **직전 주기가 아직 없으면(새 프로세스의 첫 주기) 아무것도 건드리지
+        않는다.** "직전 주기가 없다" 와 "끊김이 끝났다" 는 다르다. 첫 주기에
+        기록을 지우면 재시작할 때마다 상한이 새로 채워져, `state.json` 에
+        둔 까닭이 바로 그 경로에서 무너진다. 그 주기에는 어차피 주소도 없다.
+        """
+        last = self._last_vpn
+        if last is None:
+            return None, False
+        counts = vpn.carry_probe_counts(self.state.get(ENDPOINT_PROBES_KEY), last)
+        self._save_probe_counts(counts)
+        if not self.cfg.effective("vpn.tunnel_probe"):
+            # 동의도 기능도 없으면 **주소를 고르지도 않는다.** 여기서 고른 값은
+            # 수집기에 넘어가는 순간 송신 대상이 된다.
+            return None, False
+        # **주소를 먼저 고른다.** 상한을 먼저 보면, 보낼 주소가 없어서 어차피
+        # 나가지 않았을 주기까지 "상한 때문에 안 보냄" 으로 적힌다. 고르는
+        # 것만으로는 아무것도 나가지 않는다 (문자열 파싱이다).
+        target = vpn.tunnel_probe_target(last)
+        if target is None:
+            # 고르지 못한 주기는 보내지 않은 주기다. 세지 않는다.
+            return None, False
+        name, addr = target
+        sent = int(counts.get(name, {}).get("shots", 0))
+        shots = self._endpoint_shots()
+        if sent + shots > vpn.TUNNEL_PROBE_CAP:
+            # 남은 예산이 이번 주기의 발 수를 못 받는다. 이 끊김에서는 더
+            # 보내지 않는다 — 상한을 넘겨 보내느니 재지 않는 편이 낫다.
+            counts[name] = {"shots": sent, "capped": True}
+            self._save_probe_counts(counts)
+            return None, True
+        counts[name] = {"shots": sent + shots, "capped": False}
+        self._save_probe_counts(counts)
+        return addr, False
+
+    def _save_probe_counts(self, counts: Dict[str, Dict[str, Any]]) -> None:
+        """센 값을 상태에 남긴다. 셀 것이 없으면 키를 지운다.
+
+        빈 dict 를 남기지 않는 것은 `state.json` 에 뜻 없는 키를 쌓지 않기
+        위해서다. 읽는 쪽은 키가 없는 것과 빈 것을 같게 본다.
+        """
+        if counts:
+            self.state[ENDPOINT_PROBES_KEY] = counts
+        else:
+            self.state.pop(ENDPOINT_PROBES_KEY, None)
+
+    def _endpoint_shots(self) -> int:
+        """엔드포인트 한 번 측정에 나가는 ICMP 발 수.
+
+        **수집기가 쓰는 함수를 그대로 부른다.** 거기서는 대상이 하나라
+        `per = count` 이고 그 `count` 가 `link.packets_per_command(ping_count)`
+        다(netmon/collect/link.py). 여기서 따로 계산하면 — 예전에는
+        `max(1, int(...))` 이었다 — 설정이 범위 밖일 때 세는 값과 실제로 나가는
+        발 수가 어긋나고, 상한의 정확성이 그 일치에 기대고 있다.
+        """
+        return link.packets_per_command(self.cfg.data.get("ping_count", 1))
+
+    def _remember_for_burst(self, obs: Observation) -> None:
+        """다음 주기의 다발 측정 판단에 쓸, 직전 두 주기의 상태를 남긴다.
+
+        링크가 없어 판정을 건너뛰는 주기도 여기서는 센다 — 첫 홉이 응답하지
+        않은 주기가 바로 다음 주기를 다발로 재야 할 이유이기 때문이다.
+        """
+        self._before_vpn = self._last_vpn
+        self._last_vpn = obs.get("vpn")
+        self._last_link = obs.get("link")
+        self._last_arp = obs.get("arp")
 
     def _wifi_changed_hint(self, obs: Observation) -> bool:
         if self.prev is None:
@@ -176,8 +349,23 @@ class Engine:
         return False
 
     # --- 판정 ---
+    def _detect_features(self) -> Dict[str, bool]:
+        """판정기 기능 스위치. 동의까지 반영한 값이다."""
+        return {k: self.cfg.effective(k) for k in self.cfg.data.get("features", {})
+                if k.startswith("detect.")}
+
     def judge(self, obs: Observation, elapsed: float) -> List[Finding]:
         interval = float(self.cfg.interval)
+        prev_vpn, self._prev_cycle_vpn = self._prev_cycle_vpn, obs.get("vpn")
+
+        # **공백은 판정보다 먼저 귀속한다.** 이 주기에 VPN 복구 판정이 나면
+        # 그 증거가 방금 지나간 공백까지 포함해야 한다. 판정 뒤에 더하면
+        # 복구 주기 직전의 공백이 매번 빠진다.
+        if gap_exceeded(elapsed, interval):
+            # **한 주기분은 빼고 센다.** 이 도구가 약속하는 해상도가 한 주기이므로,
+            # 정상 간격으로 돈 주기는 "측정됨" 이다. 공백 전체를 더하면 공백
+            # 한 건마다 그만큼씩 미관측 시간이 부풀려진다.
+            self.state = baseline.note_unmeasured(self.state, elapsed - interval)
 
         # 주 인터페이스가 없으면 비교할 상태가 아니다. 기록만 남기고 넘어간다.
         # 기준선도 건드리지 않는다 — 링크가 없는 동안의 값은 기준이 될 수 없다.
@@ -197,6 +385,29 @@ class Engine:
                 gap = quality.measurement_gap(elapsed, interval)
                 gap.network = self.state.get("network")
                 out.append(gap)
+            # **끊긴 시각은 이 주기에도 갱신한다.** VPN 상태는 링크가 없어도
+            # 수집되는데 이 분기가 조기 반환하는 바람에 갱신되지 않았고,
+            # 7분 25초 끊겨 있던 것이 복구 판정에 "5초" 로 적혔다
+            # (2026-09-21 05:41~05:49 맥북).
+            self.state = baseline.update_vpn_down(self.state, obs, judged=False)
+            # **끊김 자체도 이 주기에 알린다.** 위 갱신만으로는 복구 판정의
+            # 시작 시각이 맞아질 뿐, 끊긴 사실은 이벤트에 남지 않았다
+            # (2026-09-21 링크 없는 끊김 4구간에 VPN 판정 0건).
+            # 되살리는 것은 이 하나다 — `run_all` 은 여전히 돌지 않고,
+            # 조사도 열지 않는다. 이 분기의 이유는 그대로다: 그 주기에
+            # **관측이 없어서가 아니라**(수집 단계는 전부 돈다) 주 인터페이스가
+            # 없는 주기의 경로·리졸버·ARP 가 "없음" 일 뿐이어서, 그대로 견주면
+            # 링크가 깜빡일 때마다 바뀐 것처럼 보이기 때문이다
+            # (netmon/detect 의 `is_complete`).
+            #
+            # 기능 스위치는 완전 주기와 **같은 눈**으로 읽는다. 설정에 없는
+            # 이름은 켜진 것으로 본다(`Context.enabled` 와 같은 기본값) —
+            # `detect.vpn` 은 config 기본값 목록에 없어서, 여기서만 다르게
+            # 읽으면 평소 주기는 판정하는데 이 주기만 조용해진다.
+            if self._detect_features().get(vpn_detect.FEATURE, True):
+                found, self.state = vpn_detect.without_link(
+                    prev_vpn, obs, self.state, self.state.get("network"))
+                out.extend(found)
             return out
 
         link_gap = self.link_gap
@@ -220,8 +431,7 @@ class Engine:
         ctx = Context(
             elapsed=elapsed,
             interval=interval,
-            features={k: self.cfg.effective(k) for k in self.cfg.data.get("features", {})
-                      if k.startswith("detect.")},
+            features=self._detect_features(),
             state=self.state,
             attributions=attributions,
             network=network_key(obs),
