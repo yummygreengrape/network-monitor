@@ -100,43 +100,45 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
     **품질 축은 그 값을 읽지 않는다** — `detect/quality.py` 에 그 키를 읽는
     코드가 없고, 독자는 netmon/detect/vpn.py 뿐이다.)
 
-    **따라오는 동작은 갈래가 둘이고, 갈리는 지점은 첫 홉이 응답하느냐다.**
-    유보된 주기의 `gateway_reachable=False` 는 **다음 주기의 다발 측정을 켠다**
-    (`first_hop_silent` → `first_hop_anomaly` → netmon/engine.py `_burst_hint`).
-    다발 주기는 명령 하나가 1발이라(`collect` 의 `per = 1 if n > 1 else count`)
-    `ping_count` 가 커도 제한 시간에 걸리지 않는다. 기본 설정이 이 갈래에
-    든다 — 다발은 주기가 `BURST_MIN_INTERVAL`(3.0초) 이상일 때만 켜지고
-    설정 기본값은 5초다(netmon/config.py). **아래 두 갈래는 글이 아니라
-    돌아가는 테스트로 고정돼 있다** — tests/test_link.py
-    `TestTheBurstFeedbackOfAHeldCycle` 이 엔진과 같은 순서로 여러 주기를
-    돌려 본다(되먹임을 끈 대조 시험까지 같이 있다).
+    **품질 축에 무엇이 따라오는지는 설정과 상태에 달렸다. 여기서는 테스트로
+    고정한 것만 단정한다.** 유보된 주기의 `gateway_reachable=False` 는 다음
+    주기의 다발 측정을 켜고(`first_hop_silent` → `first_hop_anomaly` →
+    netmon/engine.py `_burst_hint`), 다발 주기는 명령 하나가 1발이라
+    (`collect` 의 `per = 1 if n > 1 else count`) `ping_count` 가 커도 제한에
+    걸리지 않는다. **주기가 기본값(5초)이고 판정 방법이 ICMP(`icmp_gw=True`)인
+    망**에서 이 되먹임이 만드는 것은 둘이다.
 
-    - **응답이 오는 첫 홉**: 다발 주기가 성공하므로 주기가 번갈아 간다.
-      유보(streak 1) → 다발 성공(netmon/baseline.py 가 streak 을 0 으로) →
-      유보(1) → … 라 `quality.FAIL_STREAK_ALERT`(3)에 **닿지 않는다.** 이
-      갈래에서는 `FIRST_HOP_UNREACHABLE` 도, 그 판정이 여는 조사도
-      **일어나지 않는다.** 대신 **한 주기 걸러**
-      `max(BURST_PROBES, ping_count)` 발이 한꺼번에 나간다 — 송신량은 이쪽으로
-      늘어난다.
-    - **무응답인 첫 홉**: 다발 주기도 무응답이라 `gw_fail_streak` 이 매 주기
-      오르고, 3회째에 `detect/quality.py` 가 `FIRST_HOP_UNREACHABLE`
-      (quality, medium)을 내며 요약문에 `cause_note()` 의 원인 추정까지 붙인다.
-      그 판정은 `investigate/triggers.py` 의 `kinds` 목록에 있어 **조사가
-      자동으로 열린다.** 다발 주기에는 `PROBE_TIMED_OUT` 이 없으므로 VPN 쪽
-      유보는 그 앞의 평소 주기에만 붙는다.
+    - 첫 홉이 **응답하면** 유보 주기와 다발 성공 주기가 번갈아 나
+      `gw_fail_streak` 이 `quality.FAIL_STREAK_ALERT`(3)에 닿지 않는다.
+      그래서 이 조건에서는 `FIRST_HOP_UNREACHABLE` 도, 그 판정이 여는 조사도
+      나오지 않는다. 대신 **한 주기 걸러** `max(BURST_PROBES, ping_count)` 발이
+      한꺼번에 나간다 — 송신량은 이쪽으로 늘어난다.
+    - 첫 홉이 **무응답이면** 다발 주기도 무응답이라 streak 이 매 주기 올라
+      3회째에 `detect/quality.py` 가 `FIRST_HOP_UNREACHABLE`(quality, medium)을
+      내고, 그 판정은 `investigate/triggers.py` 의 `kinds` 에 있어 조사가 열린다.
 
-    **위 두 갈래는 `icmp_gw is True` 인 망에서만 그렇다.** streak 을 올리는 것은
-    `liveness.evaluate` 가 `alive False` 를 줄 때뿐이고(netmon/baseline.py),
-    `evaluate` 는 ICMP 로 판정하는 망에서만 `gateway_reachable` 을 그대로 쓴다.
-    ARP 로 판정하는 망과 보정 중에는 `arp.gateway_mac` 이 잡히면 `alive True` 라
-    streak 이 오르지 않는다(다발도 켜지지 않는다 — `first_hop_silent` 가 같은
-    방법을 본다).
+    이 둘은 글이 아니라 돌아가는 테스트가 고정한다 — tests/test_link.py
+    `TestTheBurstFeedbackOfAHeldCycle`(되먹임을 끈 대조 시험까지 있다).
 
-    그래서 다음 갈래는 앞의 둘과 **배타적**이다: ICMP 응답이 계속 없고 ARP 는
-    정상이면 `liveness.calibrate` 가 `icmp_gw=False` 로 굳혀
-    `GATEWAY_ICMP_SILENT` 를 남기고 그 망의 ICMP 기반 판정을 끈다. **우리 제한
-    시간이 만든 결과로 상대 네트워크의 성질을 단정하는 것**이고, state.json 에
-    남는다. 굳은 뒤로는 위 두 갈래가 더 일어나지 않는다.
+    **여기 적은 것이 파급의 전부가 아니다.** 이 목록은 세 번 고쳐 썼고 그때마다
+    빠진 갈래가 나왔다. 적어도 셋이 갈래를 바꾸니, 다른 조합이 궁금하면 여기에
+    기대지 말고 아래를 직접 읽을 것.
+
+    - **주기 길이**: `burst_probes`(이 파일, `interval < BURST_MIN_INTERVAL`
+      3.0초면 다발을 끈다)와 netmon/engine.py:435-438 `effective_interval`.
+      조사가 열려 주기가 좁혀지면(netmon/investigate/playbooks.py:29,73
+      `fast_interval`, 가장 짧은 것이 2초) 다발이 꺼져 위 첫째 갈래가 성립하지
+      않는다.
+    - **판정 방법**: netmon/liveness.py:73-90 `evaluate` 의 `icmp_gw` 분기.
+      ARP 로 판정하는 망과 보정 중에는 `arp.gateway_mac` 이 잡히면 `alive True`
+      라 streak 이 아예 오르지 않는다. ICMP 실패가 길게 이어지면
+      `calibrate`(:93-124, `REVERT_AFTER_ICMP_FAILURES` = 20)가 `icmp_gw=False`
+      로 굳히고 `GATEWAY_ICMP_SILENT` 를 남긴다 — **우리 제한 시간이 만든
+      결과로 상대 네트워크의 성질을 단정하는 것**이고 state.json 에 남는다.
+      굳은 뒤로는 위 두 갈래가 일어나지 않는다.
+    - **streak 을 올리는 조건**: netmon/baseline.py:81-145 `update_counters`.
+      `evaluate` 가 `alive False` 를 준 주기에만 오르고, `alive True` 한 번이면
+      0 으로 돌아간다(그래서 위 첫째 갈래가 경보에 닿지 않는다).
 
     `rtt_ewma` 는 `gateway_reachable` 이 참일 때만 갱신돼 오염되지 않고 멈춘다.
 

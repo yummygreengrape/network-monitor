@@ -1710,6 +1710,11 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
     `baseline.update_counters` → `quality.detect`. 힌트는 흉내가 아니라
     진짜 엔진 메서드다.
 
+    **고정하는 조건은 하나다**: 주기 기본값 5초, 판정 방법 ICMP
+    (`icmp_gw=True`), 제한을 넘는 `ping_count`. 주기가 3초 미만이면
+    (조사 중 `fast_interval`) 다발 자체가 꺼지고, ARP 로 판정하는 망에서는
+    streak 이 오르지 않는다 — 그 조합들은 여기서 보지 않는다.
+
     **흉내의 한계**: 제한 초과 여부를 `ping_seconds`, 곧 **무응답 대상 기준
     추정**으로 계산한다(`TestARaisedPingCount._timing_run` 과 같은 방식).
     응답이 오는 대상이 실제로 몇 발부터 제한을 넘는지는 여기서도 재지 않았다.
@@ -1754,8 +1759,12 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
                                          "ping_count": self.PING_COUNT,
                                          "first_hop_burst": hint})
             cmds = fake.calls[before:]
-            # arp 블록은 비워 둔다. MAC 이 잡히면 보정이 ICMP 판정을 뒤집어
-            # (netmon/liveness.py `calibrate`) 보려는 갈래가 아니게 된다.
+            # arp 블록은 비워 둔다. ICMP 로 판정하는 망에서는 `evaluate` 도
+            # `first_hop_silent` 도 arp 를 보지 않으므로 MAC 을 넣어도 결과가
+            # 같다 — 보정이 ARP 로 되돌리는 문턱이
+            # `REVERT_AFTER_ICMP_FAILURES` = 20 이라(netmon/liveness.py:31)
+            # 이 길이(4~6주기)에서는 뒤집히지 않는다. 갈래를 ICMP 하나로
+            # 좁혀 두려고 비워 둘 뿐이다.
             cur = Observation(ts="2026-01-01T00:00:%02dZ" % i,
                               data={"link": blk, "arp": {}})
             eng._remember_for_burst(cur)
@@ -1767,7 +1776,12 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
                 "burst": hint,
                 "counts": [c[c.index("-c") + 1] for c in cmds],
                 "reachable": blk["gateway_reachable"],
+                # 실행 실패는 1발 주기면 `error`(단수), 다발 합본이면
+                # `errors`(복수)로 남는다 — 키가 다르다
+                # (`merge_probes`, netmon/detect/vpn.py 도 복수를 읽는다).
+                # 다발 주기를 단수 키로만 보면 아무것도 확인하지 못한다.
                 "error": blk["results"]["gateway"].get("error"),
+                "errors": blk["results"]["gateway"].get("errors"),
                 "streak": eng.state.get("gw_fail_streak"),
                 "kinds": [f.kind for f in quality.detect(prev, cur, ctx)],
             })
@@ -1801,6 +1815,9 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
         for c in burst:  # 다발 주기: 명령마다 1발이라 제한에 걸리지 않는다
             self.assertEqual(c["counts"],
                              ["1"] * max(first_hop.BURST_PROBES, self.PING_COUNT))
+            # 합본이 실패를 담는 키는 **복수**다. 단수만 보면 다발 명령이
+            # 전부 제한을 넘겨도 단언이 통과한다.
+            self.assertIsNone(c["errors"])
             self.assertIsNone(c["error"])
             self.assertTrue(c["reachable"])
 
@@ -1827,12 +1844,18 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
         2주기부터는 `PROBE_TIMED_OUT` 이 붙지 않는다 — 다발 주기의 명령은
         1발이라 제한에 걸리지 않기 때문이다. 곧 **VPN 쪽 유보는 그 앞의
         평소 주기에만** 붙는다.
+
+        그 단언은 **복수 키로** 해야 한다. 다발 합본은 실패를 `errors`
+        (복수)에 담고 `error`(단수)는 아예 만들지 않으므로(`merge_probes`),
+        단수만 보면 다발 명령이 전부 제한을 넘겨도 `None` 이라 통과한다.
+        VPN 축이 읽는 것도 복수 쪽이다(netmon/detect/vpn.py `_burst_evidence`).
         """
         seen = self._drive(LOST, cycles=4)
         self.assertEqual([c["burst"] for c in seen], [False, True, True, True])
         self.assertEqual([c["streak"] for c in seen], [1, 2, 3, 4])
         self.assertEqual(seen[2]["kinds"], ["FIRST_HOP_UNREACHABLE"])
         self.assertEqual(seen[0]["error"], PROBE_TIMED_OUT)
+        self.assertEqual([c["errors"] for c in seen[1:]], [None, None, None])
         self.assertEqual([c["error"] for c in seen[1:]], [None, None, None])
         for c in seen:
             self.assertFalse(c["reachable"])
