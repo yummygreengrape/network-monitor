@@ -106,7 +106,10 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
     다발 주기는 명령 하나가 1발이라(`collect` 의 `per = 1 if n > 1 else count`)
     `ping_count` 가 커도 제한 시간에 걸리지 않는다. 기본 설정이 이 갈래에
     든다 — 다발은 주기가 `BURST_MIN_INTERVAL`(3.0초) 이상일 때만 켜지고
-    설정 기본값은 5초다(netmon/config.py).
+    설정 기본값은 5초다(netmon/config.py). **아래 두 갈래는 글이 아니라
+    돌아가는 테스트로 고정돼 있다** — tests/test_link.py
+    `TestTheBurstFeedbackOfAHeldCycle` 이 엔진과 같은 순서로 여러 주기를
+    돌려 본다(되먹임을 끈 대조 시험까지 같이 있다).
 
     - **응답이 오는 첫 홉**: 다발 주기가 성공하므로 주기가 번갈아 간다.
       유보(streak 1) → 다발 성공(netmon/baseline.py 가 streak 을 0 으로) →

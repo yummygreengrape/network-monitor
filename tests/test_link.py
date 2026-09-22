@@ -20,14 +20,16 @@ import time
 import unittest
 from unittest import mock
 
+from netmon import baseline
 from netmon import config as configmod
 from netmon import engine as enginemod
 from netmon import link, liveness
 from netmon import vpn as vpnmod
 from netmon.collect import link as first_hop
+from netmon.detect import Context, network_key, quality
 from netmon.engine import Engine
 from netmon import util
-from netmon.model import PROBE_NOT_RUN, PROBE_TIMED_OUT, ident
+from netmon.model import PROBE_NOT_RUN, PROBE_TIMED_OUT, Observation, ident
 from netmon.util import CmdResult
 from tests import helpers
 
@@ -1589,8 +1591,9 @@ class TestARaisedPingCount(unittest.TestCase):
     netmon/detect/quality.py). 다만 그 뒤가 한 갈래가 아니다 — 유보된 주기는
     다음 주기의 다발 측정을 켜고, 다발 주기는 명령 하나가 1발이라
     `ping_count` 가 커도 제한에 걸리지 않는다. 갈래별 파급은 collect/link.py
-    `packets_per_command` 의 docstring 에 적혀 있다. **이 클래스가 보는 것은
-    그중 평소 주기 하나뿐이다.**
+    `packets_per_command` 의 docstring 에 적혀 있고, 주기를 이어서 도는 쪽은
+    아래 `TestTheBurstFeedbackOfAHeldCycle` 이 고정한다. **이 클래스가 보는
+    것은 그중 평소 주기 하나뿐이다.**
 
     **이것은 버그가 아니라 고른 동작이다.** 대안이 둘이었다: (a) 설정을
     말없이 잘라 적게 재면서 그 사실을 남기지 않는다, (b) 설정대로 보내고
@@ -1688,6 +1691,151 @@ class TestARaisedPingCount(unittest.TestCase):
         got = out["results"]["gateway"]
         self.assertNotIn("error", got)
         self.assertTrue(got["reachable"])
+
+
+class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
+    """유보된 주기가 켜는 **다음 주기의 다발**까지 이어서 본다 (DEV-16).
+
+    `TestARaisedPingCount` 는 유보된 주기 **하나**만 본다. 그런데 그 주기의
+    `gateway_reachable=False` 는 다음 주기의 다발 측정을 켜고
+    (`first_hop_silent` → `first_hop_anomaly` → netmon/engine.py
+    `_burst_hint`), 다발 주기는 명령 하나가 1발이라 `ping_count` 가 커도
+    제한 시간에 걸리지 않는다. 그래서 품질 축 파급이 **갈래 둘**로 갈린다.
+    `packets_per_command` docstring 이 적은 그 두 갈래가 여기 있다.
+
+    이 주장은 기록에 두 번 틀리게 적혔다(1차 정정, 2차 검수 지적). 그래서
+    글이 아니라 **돌아가는 테스트**로 고정한다.
+
+    **엔진과 같은 순서로 돈다**: `_burst_hint` → `collect` →
+    `baseline.update_counters` → `quality.detect`. 힌트는 흉내가 아니라
+    진짜 엔진 메서드다.
+
+    **흉내의 한계**: 제한 초과 여부를 `ping_seconds`, 곧 **무응답 대상 기준
+    추정**으로 계산한다(`TestARaisedPingCount._timing_run` 과 같은 방식).
+    응답이 오는 대상이 실제로 몇 발부터 제한을 넘는지는 여기서도 재지 않았다.
+    이 테스트가 보이는 것은 "긴 명령은 제한을 넘고 `-c 1` 은 넘지 않는다" 는
+    **구조**이지 실측 경계가 아니다.
+    """
+
+    # 무응답 추정(`ping_seconds`)으로 제한 4.0초를 넘는 발 수. 3발까지는 든다.
+    PING_COUNT = 5
+
+    def _timing_run(self, out_text):
+        """`util.run` 의 제한 시간 동작을 흉내 낸다. ping 을 돌리지 않는다."""
+        calls = []
+
+        def fake(argv, timeout=None, stdin=""):
+            calls.append(list(argv))
+            count = int(argv[argv.index("-c") + 1])
+            if first_hop.ping_seconds(count=count) > (timeout or 0):
+                return CmdResult(list(argv), -1, "", "제한 시간 초과",
+                                 timed_out=True)
+            return CmdResult(list(argv), 0, out_text, "")
+
+        fake.calls = calls
+        return fake
+
+    def _drive(self, out_text, cycles=6, burst=None):
+        """`cycles` 주기를 돌리고 주기마다 무엇이 있었는지 돌려준다.
+
+        `burst` 가 None 이면 엔진이 정한다(되먹임 그대로). 값을 주면 그 값으로
+        **고정**한다 — 되먹임을 끈 대조군을 만들 때 쓴다.
+        """
+        fake = self._timing_run(out_text)
+        eng = Engine.__new__(Engine)
+        eng.state = {"icmp_gw": True}      # ICMP 로 판정하는 망
+        prev = None
+        seen = []
+        for i in range(cycles):
+            hint = eng._burst_hint() if burst is None else burst
+            before = len(fake.calls)
+            with mock.patch.object(first_hop, "run", fake):
+                blk = first_hop.collect({"gateway": GW, "interval": 5,
+                                         "ping_count": self.PING_COUNT,
+                                         "first_hop_burst": hint})
+            cmds = fake.calls[before:]
+            # arp 블록은 비워 둔다. MAC 이 잡히면 보정이 ICMP 판정을 뒤집어
+            # (netmon/liveness.py `calibrate`) 보려는 갈래가 아니게 된다.
+            cur = Observation(ts="2026-01-01T00:00:%02dZ" % i,
+                              data={"link": blk, "arp": {}})
+            eng._remember_for_burst(cur)
+            eng.state = baseline.update_counters(eng.state, cur, [], 5.0, 5.0)
+            ctx = Context(elapsed=5.0, interval=5.0, features={},
+                          state=eng.state, attributions=[],
+                          network=network_key(cur))
+            seen.append({
+                "burst": hint,
+                "counts": [c[c.index("-c") + 1] for c in cmds],
+                "reachable": blk["gateway_reachable"],
+                "error": blk["results"]["gateway"].get("error"),
+                "streak": eng.state.get("gw_fail_streak"),
+                "kinds": [f.kind for f in quality.detect(prev, cur, ctx)],
+            })
+            prev = cur
+        return seen
+
+    def test_a_responding_first_hop_alternates_and_never_alerts(self):
+        """응답이 오는 첫 홉: 유보와 다발 성공이 **번갈아** 나 경보가 없다.
+
+        유보 주기(streak 1) → 다발 주기가 `-c 1` 로 성공(streak 0) → 다시
+        유보… 라 `quality.FAIL_STREAK_ALERT`(3)에 닿지 않는다. 그래서 이
+        갈래에서는 `FIRST_HOP_UNREACHABLE` 이 나오지 않고, 그 판정이 여는
+        조사(netmon/investigate/triggers.py)도 열리지 않는다.
+        **되먹임이 없으면 이 단언들이 깨진다** — 바로 아래 대조 시험이
+        같은 주기를 다발 없이 돌려 그것을 보인다.
+        """
+        seen = self._drive(REPLY, cycles=6)
+        self.assertEqual([c["burst"] for c in seen], [False, True] * 3)
+        self.assertEqual([c["streak"] for c in seen], [1, 0] * 3)
+        self.assertLess(max(c["streak"] for c in seen),
+                        quality.FAIL_STREAK_ALERT)
+        self.assertEqual([k for c in seen for k in c["kinds"]], [])
+
+        held = [c for c in seen if not c["burst"]]
+        for c in held:   # 평소 주기: 설정대로 한 명령에 실어 보내다 잘린다
+            self.assertEqual(c["counts"], [str(self.PING_COUNT)])
+            self.assertEqual(c["error"], PROBE_TIMED_OUT)
+            self.assertFalse(c["reachable"])
+
+        burst = [c for c in seen if c["burst"]]
+        for c in burst:  # 다발 주기: 명령마다 1발이라 제한에 걸리지 않는다
+            self.assertEqual(c["counts"],
+                             ["1"] * max(first_hop.BURST_PROBES, self.PING_COUNT))
+            self.assertIsNone(c["error"])
+            self.assertTrue(c["reachable"])
+
+    def test_without_the_burst_feedback_the_same_cycles_do_alert(self):
+        """대조: 되먹임을 끄면 같은 설정이 **경보까지 간다**.
+
+        위 시험이 "언제나 참" 이 아님을 보이는 자리다. 다발을 끄면 주기마다
+        유보가 쌓여 streak 이 3 에 닿고 `FIRST_HOP_UNREACHABLE` 이 난다.
+        곧 위 시험이 고정하는 것은 **되먹임이 만든 차이**다.
+        """
+        seen = self._drive(REPLY, cycles=4, burst=False)
+        self.assertEqual([c["streak"] for c in seen], [1, 2, 3, 4])
+        self.assertIn("FIRST_HOP_UNREACHABLE", seen[2]["kinds"])
+        for c in seen:
+            self.assertEqual(c["counts"], [str(self.PING_COUNT)])
+            self.assertEqual(c["error"], PROBE_TIMED_OUT)
+
+    def test_a_silent_first_hop_still_alerts_on_the_third_cycle(self):
+        """무응답인 첫 홉: 다발 주기도 무응답이라 **종전대로** 3회째에 경보.
+
+        되먹임이 경보를 없애는 것이 아니다. 없어지는 것은 첫 홉이 응답하는
+        경우뿐이고, 진짜 무응답이면 streak 이 계속 오른다.
+
+        2주기부터는 `PROBE_TIMED_OUT` 이 붙지 않는다 — 다발 주기의 명령은
+        1발이라 제한에 걸리지 않기 때문이다. 곧 **VPN 쪽 유보는 그 앞의
+        평소 주기에만** 붙는다.
+        """
+        seen = self._drive(LOST, cycles=4)
+        self.assertEqual([c["burst"] for c in seen], [False, True, True, True])
+        self.assertEqual([c["streak"] for c in seen], [1, 2, 3, 4])
+        self.assertEqual(seen[2]["kinds"], ["FIRST_HOP_UNREACHABLE"])
+        self.assertEqual(seen[0]["error"], PROBE_TIMED_OUT)
+        self.assertEqual([c["error"] for c in seen[1:]], [None, None, None])
+        for c in seen:
+            self.assertFalse(c["reachable"])
 
 
 if __name__ == "__main__":
