@@ -221,13 +221,13 @@ class TestTunnelEndpointConsent(unittest.TestCase):
 # 여기 있는 글자가 정본이다.
 CANON_KO = ("VPN 이 연결돼 있지 않은 동안(끊김·재협상) 공급자가 사유에 적어 준 "
             "터널 상대편(엔드포인트) 주소로 ICMP 를 보냅니다(ping_count 만큼, 기본 1발). "
-            "보낼지는 직전 주기의 상태로 정하므로 다시 연결된 직후 첫 주기에도 한 번 나가고, "
+            "보낼지는 직전 주기의 상태로 정하므로 다시 연결된 직후 첫 주기에도 나갈 수 있고, "
             "공급자마다 한 끊김에 최대 12발까지만 보냅니다.")
 
 CANON_EN = ("While a VPN is not connected (down or renegotiating) it sends ICMP "
             "to the tunnel endpoint address the provider reported — ping_count "
             "packets, 1 by default. The decision uses the previous cycle's state, "
-            "so one probe also goes out on the first cycle after reconnecting, "
+            "so a probe may also go out on the first cycle after reconnecting, "
             "and at most 12 packets go out per provider per outage.")
 
 

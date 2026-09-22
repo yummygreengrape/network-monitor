@@ -395,7 +395,7 @@ WZ_EXTERNAL_BODY = ("  and watches TLS issuers for fixed hosts plus public IP ch
                     "  While a VPN is not connected (down or renegotiating) it sends ICMP\n"
                     "  to the tunnel endpoint address the provider reported — ping_count\n"
                     "  packets, 1 by default. The decision uses the previous cycle's state,\n"
-                    "  so one probe also goes out on the first cycle after reconnecting,\n"
+                    "  so a probe may also go out on the first cycle after reconnecting,\n"
                     "  and at most 12 packets go out per provider per outage.\n"
                     "  A fixed set of lookup names and this machine's source IP leave the\n"
                     "  machine. Network identifiers such as SSID, BSSID and MAC are not sent.")

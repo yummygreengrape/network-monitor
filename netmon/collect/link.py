@@ -126,7 +126,7 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
     기대지 말고 아래를 직접 읽을 것.
 
     - **주기 길이**: `burst_probes`(이 파일, `interval < BURST_MIN_INTERVAL`
-      3.0초면 다발을 끈다)와 netmon/engine.py:435-438 `effective_interval`.
+      3.0초면 다발을 끈다)와 netmon/engine.py:467-470 `effective_interval`.
       조사가 열려 주기가 좁혀지면(netmon/investigate/playbooks.py:29,73
       `fast_interval`, 가장 짧은 것이 2초) 다발이 꺼져 위 첫째 갈래가 성립하지
       않는다.
