@@ -165,7 +165,9 @@ def update_vpn_down(state: Dict[str, Any], cur: Observation,
 
     `judged=False` 는 그 주기에 판정이 돌지 않았다는 뜻이다. 기록을 지우는
     것은 판정의 몫이므로, 복구가 그 주기에 보이면 지우지 않고 `vpn_down_pending`
-    으로 옮겨 다음 판정이 읽게 한다.
+    으로 옮겨 다음 판정이 읽게 한다. **다음 판정이 언제 오는지는 여기서 알 수
+    없다** — 판정하지 않는 주기는 얼마든지 이어질 수 있으므로, 옮겨 둔 것은
+    판정이 실제로 도는 주기까지 그대로 남아야 한다.
     """
     vpn_block = cur.get("vpn")
     if not vpn_block:
@@ -199,16 +201,23 @@ def update_vpn_down(state: Dict[str, Any], cur: Observation,
             if since is not None:
                 pending[name] = {"since": since,
                                  "unmeasured": unmeasured.pop(name, 0.0)}
-                # **알렸다는 표시는 보관분과 함께 남긴다.** 이 끊김의 복구를
-                # 알리는 것은 다음 완전 주기이고, 그 판정이 이 표시로 "시작을
-                # 링크 없는 주기에 알린 끊김" 을 가린다(netmon/detect/vpn.py 의
-                # reported_without_link). 여기서 지우면 그 복구가 무엇의 끝인지
-                # 확인할 길이 없어진다.
-                # 표시가 다음 끊김을 삼키지는 않는다 — `already_reported` 는
-                # `vpn_down_since` 의 시각과 같을 때만 참인데, 그 값은 방금
-                # 보관분으로 옮겨졌다.
             else:
                 unmeasured.pop(name, None)
+            # **알렸다는 표시는 보관분이 들고 있는 그 끊김의 것만 남긴다.**
+            # 복구를 알리는 것은 판정이 도는 주기, 즉 다음에 **오는** 완전한
+            # 관측의 주기다 — 그 전에 링크 없는 주기가 몇 개든 이어질 수 있고,
+            # 이 갈래는 그 주기마다 다시 돈다. 그래서 "옮기는 주기" 에서만
+            # 남기면 두 번째 주기에서 표시가 지워져 복구가 사라진다
+            # (커밋 034c020 의 결함, 검수 재현).
+            # 남은 표시로 그 판정이 "시작을 링크 없는 주기에 알린 끊김" 을
+            # 가린다(netmon/detect/vpn.py 의 reported_without_link).
+            #
+            # 시각이 다른 표시는 여기서 지운다. 보관분과 짝이 맞지 않는 표시는
+            # 지난 끊김의 것이고, 남겨 두면 다음 복구가 무엇의 끝인지 잘못
+            # 가린다. 표시가 영원히 남지도 않는다 — 보관분이 사라지는 주기에
+            # (다시 끊기거나, 판정이 도는 주기) 같이 사라진다.
+            kept = _pending_since(pending, name)
+            if kept is None or reported.get(name) != kept:
                 reported.pop(name, None)
     new["vpn_down_since"] = downs
     new["vpn_down_unmeasured"] = unmeasured
@@ -255,6 +264,12 @@ def _unmeasured_map(state: Dict[str, Any]) -> Dict[str, Any]:
     """저장된 미관측 누적값. 형태가 깨져 있으면 비어 있는 것으로 본다."""
     acc = state.get("vpn_down_unmeasured")
     return acc if isinstance(acc, dict) else {}
+
+
+def _pending_since(pending: Dict[str, Any], name: str) -> Any:
+    """보관분이 들고 있는 끊김의 시작 시각. 없거나 모양이 깨져 있으면 None."""
+    rec = pending.get(name)
+    return rec.get("since") if isinstance(rec, dict) else None
 
 
 def _pending_map(state: Dict[str, Any]) -> Dict[str, Any]:
