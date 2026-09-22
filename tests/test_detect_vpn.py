@@ -1364,10 +1364,13 @@ class TestTunnelEndpointEvidence(unittest.TestCase):
     """끊김 판정의 증거에 실린다 (QA-6, QA-7, AC-5, AC-6).
 
     끊김 판정은 connected → 그 밖 전환에서 나고, 주소는 직전 주기 것이라
-    보통 한 주기 늦는다(AC-4c). 둘이 만나는 실측 모양은 "링크가 없어 판정을
-    건너뛴 주기가 사이에 끼어 있는" 경우다 — 그동안 판정의 비교 기준(prev)은
-    마지막 완전 관측(connected)에 머물러 있고, 엔드포인트 주소는 그 사이
-    주기의 사유에서 이미 얻어 둔다.
+    보통 한 주기 늦는다(AC-4c). **둘이 실제로 어떤 주기에 겹치는지는 재지
+    않았다** — 이 기능을 켜고 돌려 본 적이 없다. 아래 픽스처는 합성이고,
+    증거를 싣는 규칙만 고정한다. (앞서 이 자리에 "링크가 없어 판정을 건너뛴
+    주기가 사이에 끼는 경우" 라고 적혀 있었으나 그 모양은 오히려 판정이
+    억제된다 — `without_link` 가 남긴 `vpn_down_reported` 를 `already_reported`
+    가 읽는다. tests/test_from_real_logs.py 의
+    `test_the_cycle_the_link_comes_back_does_not_report_it_again` 참조.)
     """
 
     def _drop(self, **kw):
