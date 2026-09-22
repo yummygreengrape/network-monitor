@@ -637,18 +637,24 @@ def _no_link_summary(name: str, now: Any, cur_st: Dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def already_reported(state: Any, name: str) -> bool:
-    """지금 이어지고 있는 끊김을, 링크가 없던 주기에 이미 알렸는가.
+def reported_without_link(state: Any, name: str, since: Any) -> bool:
+    """`since` 에 시작한 그 끊김을, 링크가 없던 주기에 이미 알렸는가.
 
-    **끊긴 시각이 같을 때만 참이다.** 표시만 보고 판단하면 상태 파일에 남은
-    옛 표시가 다음 끊김까지 덮는다. 시각은 끊김마다 새로 찍히므로
+    **끊긴 시각이 같을 때만 참이다.** 표시가 있다는 것만 보고 판단하면 상태
+    파일에 남은 옛 표시가 다음 끊김까지 덮는다. 시각은 끊김마다 새로 찍히므로
     (baseline.update_vpn_down 의 setdefault), 같은 시각이면 같은 끊김이다.
+
+    표시를 남기는 곳은 `without_link` 하나뿐이다. 그래서 이 값이 참이면
+    "이 끊김의 시작을 링크가 없던 주기에 알렸다" 가 확인된 사실이 된다.
     """
-    since = reported_map(state).get(name)
-    if not _is_ts(since):
-        return False
+    return _is_ts(since) and reported_map(state).get(name) == since
+
+
+def already_reported(state: Any, name: str) -> bool:
+    """지금 이어지고 있는 끊김을, 링크가 없던 주기에 이미 알렸는가."""
     downs = state.get("vpn_down_since") if isinstance(state, dict) else None
-    return isinstance(downs, dict) and downs.get(name) == since
+    since = downs.get(name) if isinstance(downs, dict) else None
+    return reported_without_link(state, name, since)
 
 
 def without_link(prev_vpn: Any, cur: Observation,
@@ -731,6 +737,69 @@ def without_link(prev_vpn: Any, cur: Observation,
     return out, new
 
 
+def _recovery_between_complete_observations(name: str, cur: Observation,
+                                            ctx) -> List[Finding]:
+    """완전한 관측 사이에서 시작되고 끝난 끊김의 복구를 알린다.
+
+    `detect` 는 직전 **완전** 관측과 견준다(engine 이 판정하지 않은 주기를
+    `prev` 로 삼지 않는다 — netmon/engine.py 의 `cycle`·`replay`). 끊겨 있던
+    주기에 주 인터페이스가 없으면 그 주기는 비교 대상이 되지 않으므로, 끊김이
+    통째로 두 완전 관측 사이에 들어가면 `was == now == connected` 라 전환이
+    보이지 않는다. 이 갈래가 없을 때 2026-09-21 하루치(관측 15,260개)를
+    재생하면 `VPN_DISCONNECTED` 17 건에 `VPN_RECONNECTED` 13 건이었다 —
+    시작만 있고 끝이 없는 끊김 4 건이 그 차이다. 게다가 그 끊김의 기록은 이
+    주기가 끝날 때 `baseline.update_vpn_down` 이 지우므로, 알리지 않으면 총
+    끊긴 시간과 미관측 시간(AC-8)이 어디에도 남지 않는다.
+
+    **알리는 조건은 표시(`vpn_down_reported`)가 이 끊김을 가리키는 것**이다.
+    표시를 남기는 곳은 링크가 없던 주기의 `without_link` 하나뿐이므로, 표시가
+    있으면 그 끊김의 시작을 그 주기에 알렸다는 것이 확인된다. 기록만 보고
+    알리면 저장된 상태를 물려받은 주기처럼 링크와 무관하게 남아 있던 기록까지
+    "링크가 없던 끊김" 으로 적게 된다.
+
+    **기록을 지우는 시점은 이 항목에서 바꾸지 않는다.** 판정이 읽은 **뒤**,
+    같은 주기의 `baseline.update_baselines` → `update_vpn_down(judged=True)`
+    이 지운다. 읽기 전에 지우면 이 판정이 시작 시각을 잃고, 더 늦게 지우면
+    다음 끊김이 옛 시작 시각을 물려받는다 — 평소 복구 판정이 기대는 순서와
+    같은 자리다.
+
+    **적지 않는 것.** 끊겨 있던 동안의 공급자 상태(`disconnected` 였는지
+    `connecting` 이었는지)는 이 판정에 전달되지 않는다. 비교 대상인 직전 완전
+    관측은 끊기기 전이라 `connected` 이고, 링크가 없던 주기의 상태는 여기까지
+    오지 않는다. 그래서 `prev_state` 를 적지 않고 요약문도 상태를 말하지
+    않는다. 원인도 고르지 않는다 — 끊긴 동안의 관측을 읽지 않았다.
+
+    끊긴 시간은 `down_since` 부터 **이 주기까지**로 잰다. 공급자가 링크 없는
+    주기에 이미 올라왔던 경우(기록이 `vpn_down_pending` 으로 옮겨진 경우)에는
+    그만큼 길게 잡힌다 — DEV-2 가 만든 기존 복구 경로와 같은 셈법이다
+    (`_down_record`). 보관 표본 7일치(2026-09-16~22, 관측 85,397개)에서 공급자가
+    링크 없는 주기에 `connected` 로 바뀐 주기는 0건이었다 — 걸릴 수 있는
+    갈래이되 그 표본에서 걸린 적은 없다.
+    """
+    since, acc = _down_record(ctx.state, name)
+    if not reported_without_link(ctx.state, name, since):
+        return []
+    down_s = _elapsed_seconds(since, cur.ts)
+    unmeasured = _unmeasured_seconds(acc, down_s)
+    evidence = {"provider": name, "down_since": since,
+                "down_seconds": down_s,
+                "unmeasured_seconds": unmeasured,
+                # 끊김 판정과 같은 표시다. 이벤트를 쌍으로 읽는 쪽이 같은
+                # 키로 두 건을 이을 수 있게 둔다.
+                "link_absent": True}
+    evidence.update(_endpoint_probe_record(ctx.state, name))
+    return [Finding(
+        axis=QUALITY, kind="VPN_RECONNECTED",
+        confidence=CONFIRMED, severity=INFO_SEV,
+        summary=msg.VPN_RECONNECTED_NO_LINK % (
+            name, _down_phrase(since, down_s, unmeasured)),
+        evidence=evidence,
+        # 이 주기에는 귀속 계산이 돌았다(engine 이 attributions_for 를 부른
+        # 뒤 run_all 을 부른다). 평소 복구 판정과 같은 값을 붙인다.
+        attribution=ctx.quality_attribution(),
+    )]
+
+
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     out: List[Finding] = []
     cur_vpn = cur.get("vpn")
@@ -746,6 +815,10 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
         out.extend(_tunnel_off_findings(name, prev_st, cur_st, cur, prev, ctx))
         was, now = prev_st.get("state"), cur_st.get("state")
         if was == now:
+            # 전환은 안 보여도 끊김은 있었을 수 있다. 링크가 없던 주기에
+            # 시작해 완전한 관측이 돌아오기 전에 끝난 끊김이 여기로 온다.
+            if now == CONNECTED:
+                out.extend(_recovery_between_complete_observations(name, cur, ctx))
             continue
 
         # 상태를 알 수 없게 된 것은 끊김이 아니다. 조회 실패일 수 있다.

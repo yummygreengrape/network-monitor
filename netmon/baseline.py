@@ -199,9 +199,17 @@ def update_vpn_down(state: Dict[str, Any], cur: Observation,
             if since is not None:
                 pending[name] = {"since": since,
                                  "unmeasured": unmeasured.pop(name, 0.0)}
+                # **알렸다는 표시는 보관분과 함께 남긴다.** 이 끊김의 복구를
+                # 알리는 것은 다음 완전 주기이고, 그 판정이 이 표시로 "시작을
+                # 링크 없는 주기에 알린 끊김" 을 가린다(netmon/detect/vpn.py 의
+                # reported_without_link). 여기서 지우면 그 복구가 무엇의 끝인지
+                # 확인할 길이 없어진다.
+                # 표시가 다음 끊김을 삼키지는 않는다 — `already_reported` 는
+                # `vpn_down_since` 의 시각과 같을 때만 참인데, 그 값은 방금
+                # 보관분으로 옮겨졌다.
             else:
                 unmeasured.pop(name, None)
-            reported.pop(name, None)
+                reported.pop(name, None)
     new["vpn_down_since"] = downs
     new["vpn_down_unmeasured"] = unmeasured
     if pending:

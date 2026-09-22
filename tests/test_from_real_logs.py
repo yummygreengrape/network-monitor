@@ -1317,3 +1317,133 @@ class TestOutagesWithNoLinkReachTheEvents(_VpnCycleDriver, unittest.TestCase):
         eng.judge(self._full("2026-01-01T00:00:00Z", "connected"), 0.0)
         out = eng.judge(self._absent("2026-01-01T00:00:05Z"), 5.0)
         self.assertEqual(kinds(out), ["LINK_ABSENT"])
+
+
+class TestOutagesWithNoLinkGetAnEnd(_VpnCycleDriver, unittest.TestCase):
+    """링크가 없던 끊김에 끝이 없었다 (AC-8, AC-16).
+
+    시작은 링크가 없는 주기에 남게 됐지만(위 클래스), 복구는 여전히 나지
+    않았다. `detect` 가 직전 **완전** 관측과 견주는데 그런 끊김은
+    `was == now == connected` 라 전환이 보이지 않기 때문이다 — 2026-09-21
+    하루치 재생에서 끊김 17 건에 복구 13 건이었다. 게다가 그 끊김의
+    기록(`vpn_down_since`·`vpn_down_pending`·`vpn_down_reported`)은 링크가
+    돌아온 주기 끝의 `baseline.update_vpn_down(judged=True)` 이 지우므로,
+    알리지 않으면 **총 끊긴 시간과 미관측 시간이 어디에도 남지 않는다**.
+
+    **관측은 합성이다.** 재현한 것은 주기의 짜임새다.
+    """
+
+    def _of(self, out, kind):
+        return [f for cycle in out for f in cycle if f.kind == kind]
+
+    def test_the_outage_gets_an_end_in_the_cycle_the_link_comes_back(self):
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._of(out, "VPN_DISCONNECTED")), 1)
+        backs = self._of(out, "VPN_RECONNECTED")
+        self.assertEqual(len(backs), 1, "끊김에 끝이 있어야 한다")
+        self.assertIn(backs[0], out[3], "링크가 돌아온 주기에 나야 한다")
+        self.assertEqual(backs[0].evidence["down_since"], "2026-01-01T00:00:05Z")
+        self.assertEqual(backs[0].evidence["down_seconds"], 10.0)
+        self.assertIs(backs[0].evidence["link_absent"], True)
+
+    def test_the_total_and_the_unmeasured_time_reach_the_record(self):
+        """AC-8. 병기가 이 경로에서만 빠지던 것이 이 항목의 시작이다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:03:05Z"), 180.0),
+            (self._full("2026-01-01T00:03:10Z", "connected"), 5.0),
+        ])
+        f = self._of(out, "VPN_RECONNECTED")[0]
+        self.assertEqual(f.evidence["down_seconds"], 185.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 175.0)
+        self.assertIn(msg.VPN_SINCE_UNMEASURED % ("00:00:05", "3분 5초", "2분 55초"),
+                      f.summary)
+
+    def test_it_is_said_once_not_in_every_cycle_after(self):
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._full("2026-01-01T00:00:10Z", "connected"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._of(out, "VPN_RECONNECTED")), 1)
+
+    def test_the_record_is_cleared_in_the_same_cycle(self):
+        """지우는 것은 판정이 읽은 뒤 같은 주기의 update_vpn_down 이다.
+
+        더 늦게 지우면 다음 끊김이 옛 시작 시각을 물려받는다 — 두 번째
+        끊김의 시작이 제 시각인지 함께 본다.
+        """
+        eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._full("2026-01-01T00:00:10Z", "connected"), 5.0),
+            (self._absent("2026-01-01T00:00:15Z"), 5.0),
+            (self._full("2026-01-01T00:00:20Z", "connected"), 5.0),
+        ])
+        for key in ("vpn_down_since", "vpn_down_pending", "vpn_down_reported",
+                    "vpn_down_unmeasured"):
+            self.assertFalse(eng.state.get(key), key)
+        self.assertEqual([f.evidence["down_since"]
+                          for f in self._of(out, "VPN_RECONNECTED")],
+                         ["2026-01-01T00:00:05Z", "2026-01-01T00:00:15Z"])
+        self.assertEqual([f.evidence["down_seconds"]
+                          for f in self._of(out, "VPN_RECONNECTED")], [5.0, 5.0])
+
+    def test_a_provider_back_up_while_the_link_was_still_absent(self):
+        """복구까지 링크 없는 주기에 일어난 끊김. 기록은 보관분으로 옮겨진다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._absent("2026-01-01T00:00:05Z"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z", state="connected"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._of(out, "VPN_DISCONNECTED")), 1)
+        backs = self._of(out, "VPN_RECONNECTED")
+        self.assertEqual(len(backs), 1)
+        self.assertEqual(backs[0].evidence["down_since"], "2026-01-01T00:00:05Z")
+
+    def test_an_outage_that_was_never_reported_gets_no_lone_end(self):
+        """시작을 알리지 못한 끊김의 끝은 알리지 않는다.
+
+        프로세스의 첫 주기가 그렇다 — 직전 주기를 모르면 "방금 끊겼다" 를
+        알릴 수 없고(위 클래스), 그러면 이 끝도 무엇의 끝인지 말할 수 없다.
+        """
+        _eng, out = self._run([
+            (self._absent("2026-01-01T00:00:05Z"), 0.0),
+            (self._full("2026-01-01T00:00:10Z", "connected"), 5.0),
+        ])
+        self.assertEqual(self._of(out, "VPN_RECONNECTED"), [])
+
+    def test_the_pair_a_transition_does_show_is_unchanged(self):
+        """완전 주기가 본 끊김은 종전 경로 그대로다. 표시가 붙지 않는다."""
+        _eng, out = self._run([
+            (self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+            (self._full("2026-01-01T00:00:05Z", "disconnected"), 5.0),
+            (self._absent("2026-01-01T00:00:10Z"), 5.0),
+            (self._full("2026-01-01T00:00:15Z", "connected"), 5.0),
+        ])
+        self.assertEqual(len(self._of(out, "VPN_DISCONNECTED")), 1)
+        backs = self._of(out, "VPN_RECONNECTED")
+        self.assertEqual(len(backs), 1)
+        self.assertNotIn("link_absent", backs[0].evidence)
+        self.assertEqual(backs[0].evidence["prev_state"], "disconnected")
+
+    def test_the_feature_switch_turns_the_end_off_too(self):
+        from netmon.detect import is_complete
+        eng = self._engine()
+        eng.cfg.set_feature("detect.vpn", False)
+        for o, gap in ((self._full("2026-01-01T00:00:00Z", "connected"), 0.0),
+                       (self._absent("2026-01-01T00:00:05Z"), 5.0)):
+            eng.judge(o, gap)
+            if is_complete(o):
+                eng.prev = o
+        out = eng.judge(self._full("2026-01-01T00:00:10Z", "connected"), 5.0)
+        self.assertNotIn("VPN_RECONNECTED", kinds(out))

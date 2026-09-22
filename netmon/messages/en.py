@@ -154,6 +154,14 @@ VPN_PROTECTION_LOST = ("%s dropped, so traffic is leaving outside the tunnel. Ot
                        "on this L2 segment can see it.")
 VPN_PROTECTION_LOST_UNKNOWN = "%s dropped. Whether this network can be trusted is undetermined."
 VPN_RECONNECTED = "%s reconnected%s."
+# The recovery of an outage that passed between two complete observations.
+# See the note on the Korean catalogue: the state the provider was in while
+# it lasted never reaches this judgement, so the sentence does not name it.
+VPN_RECONNECTED_NO_LINK = ("%s reconnected%s. The cycles it was not connected in had "
+                           "no primary interface, so comparing complete observations "
+                           "alone never showed this stretch; its start was reported "
+                           "in those cycles. What state the provider was in meanwhile "
+                           "is not read by this judgement.")
 VPN_STATE_CHANGED = "%s state changed (%s → %s)."
 VPN_STATE_UNKNOWN = "%s state could not be read (%s → %s)."
 VPN_SINCE = " (down since %s)"

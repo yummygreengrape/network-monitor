@@ -1882,5 +1882,150 @@ class TestTheLinkLessSummaryDoesNotUndersellTheCycle(unittest.TestCase):
         self.assertEqual([x.kind for x in found], ["VPN_DISCONNECTED"])
 
 
+# --- 완전한 관측이 한 번도 보지 못한 끊김의 끝 (AC-8, AC-16) ---
+
+DOWN_SINCE = "2026-01-01T00:00:05Z"
+BACK_AT = "2026-01-01T00:01:05Z"
+
+
+class TestTheEndOfAnOutageCompleteObservationsNeverSaw(unittest.TestCase):
+    """링크가 없던 주기에 시작해, 완전한 관측이 돌아왔을 때는 이미 끝나 있던 끊김.
+
+    `detect` 는 직전 **완전** 관측과 견주므로 그런 끊김은 `was == now ==
+    connected` 로 보여 전환이 없다. 2026-09-21 하루치를 재생하면 끊김 17 건에
+    복구 13 건이었고, 그 끊김의 기록(`vpn_down_since`·`vpn_down_pending`·
+    `vpn_down_reported`)은 같은 주기 끝의 `baseline.update_vpn_down` 이 지워
+    총 끊긴 시간과 미관측 시간이 어디에도 남지 않았다.
+
+    **관측은 합성이다.** 재현한 것은 상태와 주기의 짜임새다.
+    """
+
+    def _state(self, since=DOWN_SINCE, mark=DOWN_SINCE, unmeasured=None,
+               pending=False):
+        state = {}
+        if pending:
+            state["vpn_down_pending"] = {"warp": {"since": since,
+                                                  "unmeasured": unmeasured or 0.0}}
+        else:
+            state["vpn_down_since"] = {"warp": since}
+            if unmeasured is not None:
+                state["vpn_down_unmeasured"] = {"warp": unmeasured}
+        if mark is not None:
+            state["vpn_down_reported"] = {"warp": mark}
+        return state
+
+    def _judge(self, state, was="connected", now="connected", ts=BACK_AT):
+        prev = obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state(was))
+        cur = obs(ts=ts, vpn=vpn_state(now))
+        ctx = Context(elapsed=5.0, interval=5.0, features=ON, state=state,
+                      attributions=[], network=network_key(cur))
+        return vpn_rules.detect(prev, cur, ctx)
+
+    def _finding(self, **kw):
+        found = self._judge(self._state(**kw))
+        self.assertEqual([f.kind for f in found], ["VPN_RECONNECTED"])
+        return found[0]
+
+    def test_the_recovery_keeps_the_kind_and_grade_it_has_elsewhere(self):
+        f = self._finding()
+        self.assertEqual((f.kind, f.axis, f.severity, f.confidence),
+                         ("VPN_RECONNECTED", "quality", "info", "confirmed"))
+
+    def test_the_summary_says_complete_observations_never_saw_it(self):
+        f = self._finding()
+        self.assertEqual(f.summary,
+                         msg.VPN_RECONNECTED_NO_LINK % ("warp",
+                                                        msg.VPN_SINCE % "00:00:05"))
+        # 평소 복구 판정의 문장과 섞이지 않는다.
+        self.assertNotIn(msg.VPN_RECONNECTED % ("warp", ""), f.summary)
+
+    def test_the_three_time_fields_are_all_there(self):
+        """AC-8 이 요구한 증거 필드. DEV-2 가 만든 것을 그대로 쓴다."""
+        f = self._finding(unmeasured=30.0)
+        self.assertEqual(set(f.evidence), {"provider", "down_since",
+                                           "down_seconds", "unmeasured_seconds",
+                                           "link_absent"})
+        self.assertEqual(f.evidence["down_since"], DOWN_SINCE)
+        self.assertEqual(f.evidence["down_seconds"], 60.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 30.0)
+        self.assertIs(f.evidence["link_absent"], True)
+
+    def test_the_total_and_the_unmeasured_time_are_written_together(self):
+        with_gap = self._finding(unmeasured=30.0)
+        self.assertIn(msg.VPN_SINCE_UNMEASURED % ("00:00:05", "1분", "30초"),
+                      with_gap.summary)
+        # 공백이 없으면 종전 형태(시작 시각)다 — 평소 복구 판정과 같은 문구다.
+        without = self._finding()
+        self.assertEqual(without.evidence["unmeasured_seconds"], 0.0)
+        self.assertIn(msg.VPN_SINCE % "00:00:05", without.summary)
+
+    def test_a_record_without_the_mark_says_nothing(self):
+        """표시가 없으면 링크 없는 주기에 알린 끊김이라고 말할 수 없다.
+
+        기록만 보고 알리면, 저장된 상태를 물려받은 주기처럼 링크와 무관하게
+        남아 있던 기록까지 "링크가 없던 끊김" 으로 적게 된다.
+        """
+        self.assertEqual(self._judge(self._state(mark=None)), [])
+
+    def test_a_mark_left_from_another_outage_says_nothing(self):
+        self.assertEqual(self._judge(self._state(mark="2026-01-01T09:00:00Z")), [])
+
+    def test_a_broken_state_does_not_raise(self):
+        """상태 파일은 손으로 고칠 수 있고 재시작을 건너뛰어 남는다.
+
+        `ctx.state` 자체가 dict 가 아닌 경우는 여기서 보지 않는다 — 같은
+        판정기의 다른 갈래(`_tunnel_off_findings`)가 이미 dict 를 전제하고,
+        엔진은 언제나 dict 를 넘긴다(netmon/engine.py 의 `Context`).
+        """
+        for state in ({}, {"vpn_down_reported": "x"},
+                      {"vpn_down_since": {"warp": 5}, "vpn_down_reported": {"warp": 5}},
+                      {"vpn_down_since": {"warp": "x"}, "vpn_down_reported": {"warp": "x"}},
+                      {"vpn_down_since": {"warp": DOWN_SINCE},
+                       "vpn_down_reported": {"warp": None}}):
+            with self.subTest(state=state):
+                self.assertEqual(self._judge(state), [])
+
+    def test_a_record_kept_for_the_next_judgement_is_read_too(self):
+        """공급자가 링크 없는 주기에 이미 올라왔으면 기록이 보관분으로 옮겨진다."""
+        f = self._finding(pending=True, unmeasured=20.0)
+        self.assertEqual(f.evidence["down_since"], DOWN_SINCE)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 20.0)
+
+    def test_the_endpoint_tally_rides_along_here_too(self):
+        state = self._state()
+        state[vpnmod.ENDPOINT_PROBES_KEY] = {"warp": {"shots": 12, "capped": True}}
+        f = self._judge(state)[0]
+        self.assertEqual((f.evidence["tunnel_endpoint_shots"],
+                          f.evidence["tunnel_endpoint_cap_reached"]), (12, True))
+
+    def test_it_does_not_name_the_state_the_provider_was_in(self):
+        """끊긴 동안의 공급자 상태는 이 판정에 전달되지 않는다 (AC-9 와 같은 기준).
+
+        비교 대상인 직전 완전 관측은 끊기기 **전**이라 `connected` 이고,
+        링크가 없던 주기의 상태는 여기까지 오지 않는다. 읽지 않은 값을 적지
+        않으므로 `prev_state` 도 없다.
+        """
+        for code in ("ko", "en"):
+            with self.subTest(lang=code):
+                text = messages.get("VPN_RECONNECTED_NO_LINK", code)
+                self.assertNotIn("disconnected", text)
+                self.assertNotIn("connecting", text)
+        self.assertNotIn("prev_state", self._finding().evidence)
+
+    def test_a_provider_that_is_still_down_gets_nothing(self):
+        self.assertEqual(self._judge(self._state(), was="disconnected",
+                                     now="disconnected"), [])
+
+    def test_the_recovery_that_a_transition_does_show_is_untouched(self):
+        """전환이 보이는 복구는 종전 그대로다. 표시가 남아 있어도 같다."""
+        found = self._judge(self._state(), was="disconnected")
+        self.assertEqual([f.kind for f in found], ["VPN_RECONNECTED"])
+        f = found[0]
+        self.assertEqual(f.summary,
+                         msg.VPN_RECONNECTED % ("warp", msg.VPN_SINCE % "00:00:05"))
+        self.assertEqual(f.evidence["prev_state"], "disconnected")
+        self.assertNotIn("link_absent", f.evidence)
+
+
 if __name__ == "__main__":
     unittest.main()
