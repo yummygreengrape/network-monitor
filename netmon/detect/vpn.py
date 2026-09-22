@@ -18,10 +18,11 @@ SLEEP / ARP_ANOMALY). 여기서는 고르지 않는다. 대신 한 번의 끊김
 from __future__ import annotations
 
 import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import messages as msg
 from .. import wifi_security
+from ..baseline import VPN_REPORTED_KEY, reported_map
 from ..liveness import ICMP, evaluate, method_label
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, PROBE_TIMED_OUT,
                      QUALITY, SECURITY, Finding, Observation)
@@ -592,6 +593,112 @@ def _down_summary(name: str, now: Any, likely: str,
     return " ".join(p for p in parts if p)
 
 
+def _no_link_summary(name: str, now: Any, cur_st: Dict[str, Any]) -> str:
+    """링크가 없는 주기의 끊김 요약문.
+
+    평소 주기의 `_down_summary` 와 다른 점은 둘이다. **"가장 유력한 설명"을
+    고르지 않는다** — 첫 홉도 리졸버도 재지 못한 주기라 고를 근거가 없고,
+    비어 있는 관측으로 고르면 "네트워크 이동" 같은 설명이 근거 없이 붙는다
+    (실측 2026-09-21 05:49:17 이 그랬다). 대신 **링크가 없었다는 관측 사실**을
+    적는다. 공급자 사유는 평소와 같은 기준으로만 인용한다(고정 목록과 정확히
+    일치할 때만 — 사유 문자열에 주소·포트가 섞여 있고 요약문은 가려지지 않는다).
+    """
+    parts = [msg.VPN_DISCONNECTED_NO_LINK % (name, now)]
+    quotable = _quotable_reason(cur_st.get("reason"))
+    if quotable:
+        parts.append(msg.VPN_PROVIDER_REASON % quotable)
+    return " ".join(parts)
+
+
+def already_reported(state: Any, name: str) -> bool:
+    """지금 이어지고 있는 끊김을, 링크가 없던 주기에 이미 알렸는가.
+
+    **끊긴 시각이 같을 때만 참이다.** 표시만 보고 판단하면 상태 파일에 남은
+    옛 표시가 다음 끊김까지 덮는다. 시각은 끊김마다 새로 찍히므로
+    (baseline.update_vpn_down 의 setdefault), 같은 시각이면 같은 끊김이다.
+    """
+    since = reported_map(state).get(name)
+    if not _is_ts(since):
+        return False
+    downs = state.get("vpn_down_since") if isinstance(state, dict) else None
+    return isinstance(downs, dict) and downs.get(name) == since
+
+
+def without_link(prev_vpn: Any, cur: Observation,
+                 state: Dict[str, Any],
+                 network: Optional[str] = None) -> Tuple[List[Finding], Dict[str, Any]]:
+    """주 인터페이스가 없는 주기에 시작된 끊김을 알린다. (판정 목록, 새 상태).
+
+    engine 은 그런 주기를 조기 반환한다 — 링크가 없으면 대부분의 관측이 비어
+    있어 판정할 근거가 없기 때문이다. 그 조기 반환 때문에 **끊김 자체가 기록에
+    남지 않았다**: 2026-09-21 하루의 끊김 17구간 중 처음부터 끝까지 링크가
+    없던 4구간(01:57·03:51·11:45·23:57 UTC)은 VPN 판정이 한 건도 나지 않았고,
+    05:41 구간은 링크가 돌아온 마지막 주기에야(7분 25초 뒤) 한 건 났다.
+    이벤트만 읽는 쪽에는 끊김이 실제보다 적게 보인다.
+
+    **여기서 되살리는 것은 "끊겼다"는 사실 하나뿐이다.** 근거로 쓰는 값은
+    공급자가 보고한 상태와 사유뿐이고(VPN 상태는 링크가 없어도 수집된다 —
+    공급자에게 묻는 값이라 주 인터페이스가 필요 없다), 첫 홉·리졸버·Wi-Fi
+    처럼 그 주기에 비어 있는 관측은 읽지도 적지도 않는다. 그래서 보호 상실
+    (`VPN_PROTECTION_LOST`)도 여기서 내지 않는다 — 그 판정은 이 네트워크의
+    암호화 방식을 읽어야 하는데, 링크가 없는 주기에는 그 값이 없다.
+
+    **비교 대상은 직전 주기의 VPN 블록**이다. 판정하지 않은 주기도 포함한다 —
+    링크가 없는 동안에도 VPN 상태는 계속 수집되므로, 끊긴 순간을 볼 수 있는
+    유일한 비교 대상이다. 직전 주기를 모르면(프로세스의 첫 주기) 아무것도
+    알리지 않는다. "모른다" 와 "방금 끊겼다" 는 다르다.
+    """
+    out: List[Finding] = []
+    cur_vpn = cur.get("vpn")
+    if (not isinstance(cur_vpn, dict) or not isinstance(prev_vpn, dict)
+            or not isinstance(state, dict)):
+        return out, state
+    reported = dict(reported_map(state))
+    marked = False
+    for name in sorted(cur_vpn):
+        cur_st = cur_vpn[name] or {}
+        now, was = cur_st.get("state"), (prev_vpn.get(name) or {}).get("state")
+        if was != CONNECTED or now == CONNECTED:
+            continue
+        # 상태를 읽지 못한 것은 끊김이 아니다. 평소 주기에서도 조회 실패는
+        # VPN_STATE_UNKNOWN 으로 갈라 두었고, 링크가 없는 주기에는 그 조회가
+        # 실패하기 더 쉽다.
+        if not now or now == "unknown":
+            continue
+        since, _acc = _down_record(state, name)
+        if not _is_ts(since):
+            # 여기까지 왔으면 이번 주기에 처음 끊긴 것이다(engine 이 먼저
+            # baseline.update_vpn_down 을 부른다). 그래도 상태 파일이 깨져
+            # 있을 수 있으므로 이번 주기의 시각으로 둔다.
+            since = cur.ts
+        user = _user_action(cur_st.get("reason"))
+        out.append(Finding(
+            axis=QUALITY, kind="VPN_DISCONNECTED",
+            confidence=CONFIRMED,
+            severity=INFO_SEV if user else MEDIUM,
+            summary=_no_link_summary(name, now, cur_st),
+            evidence={"provider": name, "provider_state": now,
+                      "provider_reason": cur_st.get("reason"),
+                      "prev_state": was,
+                      # 이 주기에 무엇을 보고 판정했는지 남긴다. 평소 주기의
+                      # 근거(첫 홉·귀속)와 **섞이지 않게** 하는 표시이기도 하다.
+                      "link_absent": True,
+                      "down_since": since},
+            # **억제 사유를 붙이지 않는다.** 이 주기에는 귀속 계산 자체가
+            # 돌지 않았으므로(engine 이 attributions_for 를 부르기 전에
+            # 반환한다), 사유를 적으면 계산하지 않은 설명을 적는 것이 된다.
+            attribution="user_action" if user else None,
+            network=network,
+        ))
+        reported[name] = since
+        marked = True
+    if not marked:
+        return out, state
+    new = dict(state)
+    new[VPN_REPORTED_KEY] = reported
+    return out, new
+
+
 def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
     out: List[Finding] = []
     cur_vpn = cur.get("vpn")
@@ -629,14 +736,23 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             evidence["provider"] = name
             likely = _likely(cur, ctx, cur_st, evidence)
 
-            out.append(Finding(
-                axis=QUALITY, kind="VPN_DISCONNECTED",
-                confidence=CONFIRMED,
-                severity=INFO_SEV if user else MEDIUM,
-                summary=_down_summary(name, now, likely, evidence),
-                evidence=evidence,
-                attribution=attribution,
-            ))
+            # **이미 알린 끊김은 다시 알리지 않는다.** 링크가 돌아왔는데
+            # 공급자는 아직 올라오지 못한 주기가 여기 걸린다 — 직전 완전
+            # 관측은 끊기기 **전**이라 여기서는 전환으로 보이지만, 그 끊김은
+            # 링크가 없던 주기에 이미 났고 이미 알렸다(without_link).
+            # 한 번의 끊김이 두 건으로 적히면, 이 작업이 없애려는 "이벤트만
+            # 읽으면 수가 틀린다" 가 반대 방향으로 생긴다.
+            # 보호 상실 판정은 그대로 낸다 — 그것은 링크가 돌아온 이 주기에
+            # 처음 판정할 수 있는(암호화 방식을 읽어야 하는) 별개 사건이다.
+            if not already_reported(ctx.state, name):
+                out.append(Finding(
+                    axis=QUALITY, kind="VPN_DISCONNECTED",
+                    confidence=CONFIRMED,
+                    severity=INFO_SEV if user else MEDIUM,
+                    summary=_down_summary(name, now, likely, evidence),
+                    evidence=evidence,
+                    attribution=attribution,
+                ))
 
             # 보호가 사라진 것은 별개 사건이다. 사용자가 직접 끊었어도
             # "지금 보호받고 있지 않다"는 사실은 남는다.

@@ -145,6 +145,13 @@ def update_counters(state: Dict[str, Any], cur: Observation,
     return new
 
 
+# 링크가 없는 주기에 **이미 알린** 끊김. `{공급자: 끊긴 시각}` 이다.
+# 표시를 남기는 것은 그 주기의 판정이고(netmon/detect/vpn.py 의 without_link),
+# 지우는 것은 여기다 — 끊김의 시작·끝을 아는 것이 이 파일이기 때문이다.
+# **없어도 동작한다** — 없거나 모양이 깨졌으면 종전처럼 판정한다.
+VPN_REPORTED_KEY = "vpn_down_reported"
+
+
 def update_vpn_down(state: Dict[str, Any], cur: Observation,
                     judged: bool = True) -> Dict[str, Any]:
     """공급자별로 "언제부터 끊겨 있는가" 를 갱신한다.
@@ -167,6 +174,7 @@ def update_vpn_down(state: Dict[str, Any], cur: Observation,
     downs = dict(state.get("vpn_down_since") or {})
     unmeasured = dict(_unmeasured_map(state))
     pending = dict(_pending_map(state))
+    reported = dict(reported_map(state))
     for name, st in vpn_block.items():
         if (st or {}).get("state") != "connected":
             downs.setdefault(name, cur.ts)
@@ -178,6 +186,9 @@ def update_vpn_down(state: Dict[str, Any], cur: Observation,
             downs.pop(name, None)
             unmeasured.pop(name, None)
             pending.pop(name, None)
+            # 이 끊김은 끝났다. 알렸다는 표시도 함께 지운다 — 다음 끊김은
+            # 다시 알려야 한다.
+            reported.pop(name, None)
         else:
             # **판정하지 않는 주기다.** 여기서 지우면 다음 완전 주기의 복구
             # 판정이 시작 시각을 잃는다 — 고치기 전에는 (갱신도 안 했지만)
@@ -190,12 +201,17 @@ def update_vpn_down(state: Dict[str, Any], cur: Observation,
                                  "unmeasured": unmeasured.pop(name, 0.0)}
             else:
                 unmeasured.pop(name, None)
+            reported.pop(name, None)
     new["vpn_down_since"] = downs
     new["vpn_down_unmeasured"] = unmeasured
     if pending:
         new["vpn_down_pending"] = pending
     else:
         new.pop("vpn_down_pending", None)
+    if reported:
+        new[VPN_REPORTED_KEY] = reported
+    else:
+        new.pop(VPN_REPORTED_KEY, None)
     return new
 
 
@@ -237,6 +253,17 @@ def _pending_map(state: Dict[str, Any]) -> Dict[str, Any]:
     """아직 판정이 읽지 못한 끊김 기록. 형태가 깨져 있으면 비어 있는 것으로 본다."""
     pending = state.get("vpn_down_pending")
     return pending if isinstance(pending, dict) else {}
+
+
+def reported_map(state: Any) -> Dict[str, Any]:
+    """이미 알린 끊김 표시. 형태가 깨져 있으면 비어 있는 것으로 본다.
+
+    판정 쪽(netmon/detect/vpn.py)도 같은 눈으로 읽어야 해서 공개로 둔다.
+    """
+    if not isinstance(state, dict):
+        return {}
+    reported = state.get(VPN_REPORTED_KEY)
+    return reported if isinstance(reported, dict) else {}
 
 
 def update_baselines(state: Dict[str, Any], cur: Observation,

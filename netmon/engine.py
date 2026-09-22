@@ -13,6 +13,8 @@ from . import baseline, investigate, liveness, messages, vpn
 from .collect import arp, dhcp, dns, iface, link, route, wifi
 from .config import Config
 from .detect import quality
+# 수집기 `netmon.vpn` 과 이름이 겹쳐 별칭으로 부른다.
+from .detect import vpn as vpn_detect
 from .detect import (Context, associated_without_ipv4, attributions_for, gap_exceeded,
                      is_complete, network_key,
                      run_all)
@@ -54,6 +56,11 @@ class Engine:
     _last_arp: Optional[Dict[str, Any]] = None
     _last_vpn: Optional[Dict[str, Any]] = None
     _before_vpn: Optional[Dict[str, Any]] = None
+    # **직전 주기**의 VPN 블록. 위의 `_last_vpn` 과 달리 판정 단계에서
+    # 갱신되므로, 수집을 거치지 않는 replay() 에서도 같은 값이 된다.
+    # 판정하지 않은 주기(링크 없음)도 여기에는 남는다 — 링크가 없는 동안
+    # 끊긴 순간을 볼 수 있는 유일한 비교 대상이다.
+    _prev_cycle_vpn: Optional[Dict[str, Any]] = None
 
     def __init__(self, cfg: Config, store: Store) -> None:
         self.cfg = cfg
@@ -312,8 +319,14 @@ class Engine:
         return False
 
     # --- 판정 ---
+    def _detect_features(self) -> Dict[str, bool]:
+        """판정기 기능 스위치. 동의까지 반영한 값이다."""
+        return {k: self.cfg.effective(k) for k in self.cfg.data.get("features", {})
+                if k.startswith("detect.")}
+
     def judge(self, obs: Observation, elapsed: float) -> List[Finding]:
         interval = float(self.cfg.interval)
+        prev_vpn, self._prev_cycle_vpn = self._prev_cycle_vpn, obs.get("vpn")
 
         # **공백은 판정보다 먼저 귀속한다.** 이 주기에 VPN 복구 판정이 나면
         # 그 증거가 방금 지나간 공백까지 포함해야 한다. 판정 뒤에 더하면
@@ -347,6 +360,21 @@ class Engine:
             # 7분 25초 끊겨 있던 것이 복구 판정에 "5초" 로 적혔다
             # (2026-09-21 05:41~05:49 맥북).
             self.state = baseline.update_vpn_down(self.state, obs, judged=False)
+            # **끊김 자체도 이 주기에 알린다.** 위 갱신만으로는 복구 판정의
+            # 시작 시각이 맞아질 뿐, 끊긴 사실은 이벤트에 남지 않았다
+            # (2026-09-21 링크 없는 끊김 4구간에 VPN 판정 0건).
+            # 되살리는 것은 이 하나다 — `run_all` 은 여전히 돌지 않고,
+            # 조사도 열지 않는다. 링크가 없는 주기의 관측은 비어 있어
+            # 판정할 근거가 없다는 이 분기의 이유는 그대로다.
+            #
+            # 기능 스위치는 완전 주기와 **같은 눈**으로 읽는다. 설정에 없는
+            # 이름은 켜진 것으로 본다(`Context.enabled` 와 같은 기본값) —
+            # `detect.vpn` 은 config 기본값 목록에 없어서, 여기서만 다르게
+            # 읽으면 평소 주기는 판정하는데 이 주기만 조용해진다.
+            if self._detect_features().get(vpn_detect.FEATURE, True):
+                found, self.state = vpn_detect.without_link(
+                    prev_vpn, obs, self.state, self.state.get("network"))
+                out.extend(found)
             return out
 
         link_gap = self.link_gap
@@ -370,8 +398,7 @@ class Engine:
         ctx = Context(
             elapsed=elapsed,
             interval=interval,
-            features={k: self.cfg.effective(k) for k in self.cfg.data.get("features", {})
-                      if k.startswith("detect.")},
+            features=self._detect_features(),
             state=self.state,
             attributions=attributions,
             network=network_key(obs),

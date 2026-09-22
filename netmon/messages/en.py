@@ -114,6 +114,15 @@ VPN_DISCONNECTED = "%s disconnected. Most likely explanation: %s."
 # re-established. (Protection loss is still reported as before - traffic
 # leaves outside the tunnel either way.)
 VPN_RENEGOTIATING = "%s is renegotiating its tunnel (provider state connecting). Most likely explanation: %s."
+# A drop seen in a cycle with no primary interface. Same finding kind, but the
+# sentence says the link was absent - otherwise a drop that follows the link
+# down is filed next to a drop on a live link, and the two have different root
+# causes. Nothing else was measured in that cycle, so nothing is narrowed.
+VPN_DISCONNECTED_NO_LINK = ("%s disconnected (provider state %s). There was no primary "
+                            "interface in the same cycle - a drop while the link was "
+                            "absent, so it is not read as a fault on the VPN path itself. "
+                            "The rest of this cycle was not measured, so nothing is "
+                            "narrowed further.")
 VPN_TUNNEL_OFF = ("%s is connected but in a mode that builds no tunnel (%s). Traffic "
                   "leaves outside the tunnel, and other devices on this L2 can read it.")
 VPN_TUNNEL_OFF_SAE = ("%s is connected but in a mode that builds no tunnel (%s). WPA3-SAE "

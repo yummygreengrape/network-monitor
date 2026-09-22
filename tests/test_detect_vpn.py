@@ -1485,5 +1485,159 @@ class TestTunnelEndpointEvidence(unittest.TestCase):
         self.assertNotIn(ENDPOINT, f.summary)
 
 
+class TestDropWhileTheLinkIsAbsent(unittest.TestCase):
+    """주 인터페이스가 없는 주기의 끊김 (AC-16).
+
+    engine 이 그 주기를 조기 반환해서 끊김이 이벤트에 남지 않았다. 되살리는
+    것은 **끊겼다는 사실 하나**이고, 문장은 링크가 없었다는 사실을 함께
+    적어 링크가 살아 있는 끊김과 섞이지 않게 한다.
+    """
+
+    def _absent(self, ts="2026-01-01T00:00:05Z", state="disconnected",
+                reason="No Network"):
+        """링크가 없는 주기의 관측. VPN 상태는 그와 무관하게 수집된다."""
+        o = obs(ts=ts, gateway=None, gw_mac=None, icmp_ok=None,
+                vpn=vpn_state(state, reason=reason))
+        o.data["iface"]["primary"] = None
+        o.data["iface"]["primary_kind"] = "unknown"
+        o.data["wifi"] = {"applicable": False, "reason": "링크 없음"}
+        return o
+
+    def _run(self, cur=None, state=None, prev="connected"):
+        return vpn_rules.without_link(
+            vpn_state(prev) if prev else prev,
+            cur if cur is not None else self._absent(),
+            {} if state is None else state)
+
+    def test_the_drop_is_reported_with_the_same_kind_and_grade(self):
+        found, _ = self._run()
+        self.assertEqual([f.kind for f in found], ["VPN_DISCONNECTED"])
+        f = found[0]
+        self.assertEqual((f.axis, f.severity, f.confidence),
+                         ("quality", "medium", "confirmed"))
+        self.assertIsNone(f.attribution)
+
+    def test_the_summary_says_the_link_was_absent(self):
+        f = self._run()[0][0]
+        self.assertEqual(
+            f.summary,
+            " ".join([msg.VPN_DISCONNECTED_NO_LINK % ("warp", "disconnected"),
+                      msg.VPN_PROVIDER_REASON % "No Network"]))
+        # 평소 주기의 문장과 섞이지 않는다.
+        self.assertNotIn(msg.VPN_DISCONNECTED % ("warp", ""), f.summary)
+
+    def test_it_does_not_pick_a_likely_cause(self):
+        """재지 못한 관측으로 원인을 고르지 않는다.
+
+        실측에서 이 자리에 "가장 유력한 설명: 네트워크 이동" 이 붙었다
+        (2026-09-21 05:49:17). 링크가 없는 주기에는 첫 홉도 리졸버도
+        재지 못하므로 고를 근거가 없다.
+        """
+        f = self._run()[0][0]
+        for word in ("가장 유력한 설명", "네트워크 이동", "첫 홉"):
+            self.assertNotIn(word, f.summary)
+
+    def test_only_the_fixed_reason_is_quoted(self):
+        """사유 문자열에는 주소·포트가 섞여 있고 요약문은 가려지지 않는다."""
+        cur = self._absent(reason=ENDPOINT_REASON)
+        f = self._run(cur)[0][0]
+        self.assertNotIn(ENDPOINT, f.summary)
+        self.assertEqual(f.summary,
+                         msg.VPN_DISCONNECTED_NO_LINK % ("warp", "disconnected"))
+        # 원문은 근거에 그대로 남는다 (AC-5 와 같은 기준).
+        self.assertEqual(f.evidence["provider_reason"], ENDPOINT_REASON)
+
+    def test_nothing_that_was_not_measured_becomes_evidence(self):
+        """비어 있는 관측을 근거로 쓰지 않는다.
+
+        이 주기에 남는 것은 공급자가 보고한 값과 "링크가 없었다" 뿐이다.
+        첫 홉·엔드포인트·귀속은 재지도 계산하지도 않았다.
+        """
+        f = self._run()[0][0]
+        self.assertEqual(set(f.evidence), {"provider", "provider_state",
+                                           "provider_reason", "prev_state",
+                                           "link_absent", "down_since"})
+        self.assertIs(f.evidence["link_absent"], True)
+        self.assertEqual(f.evidence["prev_state"], "connected")
+
+    def test_protection_loss_is_not_judged_here(self):
+        """보호 상실은 이 네트워크의 암호화 방식을 읽어야 한다 — 그 값이 없다."""
+        found, _ = self._run()
+        self.assertNotIn("VPN_PROTECTION_LOST", [f.kind for f in found])
+
+    def test_a_state_that_could_not_be_read_is_not_a_drop(self):
+        for state in ("unknown", None, ""):
+            with self.subTest(state=state):
+                cur = self._absent(state=state or "unknown")
+                cur.data["vpn"]["warp"]["state"] = state
+                self.assertEqual(self._run(cur)[0], [])
+
+    def test_a_provider_still_up_is_not_a_drop(self):
+        cur = self._absent(state="connected", reason=None)
+        self.assertEqual(self._run(cur)[0], [])
+
+    def test_nothing_is_claimed_without_a_previous_cycle(self):
+        """"모른다" 와 "방금 끊겼다" 는 다르다. 프로세스의 첫 주기가 그렇다."""
+        found, state = vpn_rules.without_link(None, self._absent(), {})
+        self.assertEqual(found, [])
+        self.assertEqual(state, {})
+
+    def test_an_outage_already_under_way_is_not_reported_again(self):
+        """직전 주기에도 끊겨 있었으면 이번 주기에 시작된 끊김이 아니다."""
+        found, state = vpn_rules.without_link(vpn_state("disconnected"),
+                                              self._absent(), {})
+        self.assertEqual(found, [])
+        self.assertEqual(state, {})
+
+    def test_the_start_time_comes_from_the_state_when_it_is_there(self):
+        found, _ = self._run(state={"vpn_down_since":
+                                    {"warp": "2026-01-01T00:00:05Z"}})
+        self.assertEqual(found[0].evidence["down_since"], "2026-01-01T00:00:05Z")
+
+    def test_a_broken_start_time_falls_back_to_this_cycle(self):
+        for downs in ({"warp": None}, {"warp": 12345}, {"warp": "x"}, "x", None):
+            with self.subTest(downs=downs):
+                found, _ = self._run(state={"vpn_down_since": downs})
+                self.assertEqual(found[0].evidence["down_since"],
+                                 "2026-01-01T00:00:05Z")
+
+    def test_user_action_keeps_the_grading_it_has_elsewhere(self):
+        cur = self._absent(reason="Manual_Disconnection")
+        f = self._run(cur)[0][0]
+        self.assertEqual((f.severity, f.attribution), ("info", "user_action"))
+
+    def test_it_marks_the_outage_as_reported(self):
+        found, state = self._run()
+        since = found[0].evidence["down_since"]
+        self.assertEqual(state["vpn_down_reported"], {"warp": since})
+        self.assertTrue(vpn_rules.already_reported(
+            dict(state, vpn_down_since={"warp": since}), "warp"))
+
+    def test_a_broken_state_does_not_raise(self):
+        """상태 파일은 손으로 고칠 수 있고 재시작을 건너뛰어 남는다."""
+        for state, reported in (("x", 0), (None, 0), (12, 0),
+                                ({"vpn_down_reported": "x"}, 1),
+                                ({"vpn_down_reported": {"warp": 5}}, 1)):
+            with self.subTest(state=state):
+                found, back = vpn_rules.without_link(
+                    vpn_state("connected"), self._absent(), state)
+                self.assertEqual(len(found), reported)
+                if not reported:
+                    # 읽을 수 없는 상태를 고쳐 쓰지 않는다. 그대로 돌려준다.
+                    self.assertIs(back, state)
+
+    def test_the_mark_only_covers_the_outage_it_was_made_for(self):
+        """상태 파일에 남은 옛 표시가 다음 끊김까지 덮으면 안 된다."""
+        state = {"vpn_down_reported": {"warp": "2026-01-01T00:00:05Z"},
+                 "vpn_down_since": {"warp": "2026-01-01T09:00:00Z"}}
+        self.assertFalse(vpn_rules.already_reported(state, "warp"))
+        for broken in ({"warp": None}, {"warp": "x"}, "x", None, {}):
+            with self.subTest(reported=broken):
+                self.assertFalse(vpn_rules.already_reported(
+                    {"vpn_down_reported": broken,
+                     "vpn_down_since": {"warp": "2026-01-01T00:00:05Z"}},
+                    "warp"))
+
+
 if __name__ == "__main__":
     unittest.main()
