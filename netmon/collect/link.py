@@ -151,7 +151,7 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
       **어떤 상황에서 실제로 겹치는지는 재지 않았다.** 확인된 것은 겹치지 않는
       쪽 하나다: 정체성 귀속 셋(`network_change`·`iface_change`·`link_restart`)이
       붙는 주기는 엔진이 `reset_for_new_network` 로 `gw_fail_streak` 을 지우고
-      (netmon/engine.py:418-421, `VOLATILE_KEYS` — netmon/baseline.py:45)
+      (netmon/engine.py:419-422, `VOLATILE_KEYS` — netmon/baseline.py:45)
       `update_counters` 가 1 부터 다시 세므로(netmon/baseline.py:142-143)
       그 주기에는 경보 조건(streak == 3)이 성립하지 않는다. 남는 것은 `sleep`
       이고, 그것이 겹치려면 경보가 나는 그 주기에 측정 공백까지 있어야 한다
