@@ -95,20 +95,47 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
 
     **유보되는 것은 첫 홉 증거를 읽는 VPN 끊김 판정뿐이다.** `error` 와
     `first_hop_errors` 를 읽는 곳은 netmon/detect/vpn.py 하나다. 같은 주기가
-    관측에는 `gateway_reachable=False`·`loss_pct=100.0` 으로도 남으므로 품질
-    축은 그 주기를 여전히 **"쟀는데 무응답"** 으로 읽는다. 따라오는 동작:
+    관측에는 `gateway_reachable=False` 로도 남으므로 품질 축은 그 주기를
+    **"쟀는데 무응답"** 으로 읽는다. (`loss_pct=100.0` 도 관측에 함께 남지만
+    **품질 축은 그 값을 읽지 않는다** — `detect/quality.py` 에 그 키를 읽는
+    코드가 없고, 독자는 netmon/detect/vpn.py 뿐이다.)
 
-    - `baseline.py` 가 `gw_fail_streak` 을 매 주기 올린다.
-    - streak 3 에서 `detect/quality.py` 가 `FIRST_HOP_UNREACHABLE`
-      (quality, medium)을 내고, 요약문에 `cause_note()` 의 원인 추정까지
-      붙인다 — 한 발도 결과를 받지 못한 주기에 대해 원인을 좁혀 적는 것이다.
-    - 그 판정은 `investigate/triggers.py` 의 `kinds` 목록에 있어 **조사가
-      자동으로 열린다.**
-    - ICMP 응답이 계속 없고 ARP 는 정상이면 `liveness.calibrate` 가
-      `icmp_gw=False` 로 굳혀 `GATEWAY_ICMP_SILENT` 를 남기고 그 망의 ICMP 기반
-      판정을 끈다. **우리 제한 시간이 만든 결과로 상대 네트워크의 성질을
-      단정하는 것**이고, state.json 에 남는다.
-    - `rtt_ewma` 는 `gateway_reachable` 이 참일 때만 갱신돼 오염되지 않고 멈춘다.
+    **따라오는 동작은 갈래가 둘이고, 갈리는 지점은 첫 홉이 응답하느냐다.**
+    유보된 주기의 `gateway_reachable=False` 는 **다음 주기의 다발 측정을 켠다**
+    (`first_hop_silent` → `first_hop_anomaly` → netmon/engine.py `_burst_hint`).
+    다발 주기는 명령 하나가 1발이라(`collect` 의 `per = 1 if n > 1 else count`)
+    `ping_count` 가 커도 제한 시간에 걸리지 않는다. 기본 설정이 이 갈래에
+    든다 — 다발은 주기가 `BURST_MIN_INTERVAL`(3.0초) 이상일 때만 켜지고
+    설정 기본값은 5초다(netmon/config.py).
+
+    - **응답이 오는 첫 홉**: 다발 주기가 성공하므로 주기가 번갈아 간다.
+      유보(streak 1) → 다발 성공(netmon/baseline.py 가 streak 을 0 으로) →
+      유보(1) → … 라 `quality.FAIL_STREAK_ALERT`(3)에 **닿지 않는다.** 이
+      갈래에서는 `FIRST_HOP_UNREACHABLE` 도, 그 판정이 여는 조사도
+      **일어나지 않는다.** 대신 **한 주기 걸러**
+      `max(BURST_PROBES, ping_count)` 발이 한꺼번에 나간다 — 송신량은 이쪽으로
+      늘어난다.
+    - **무응답인 첫 홉**: 다발 주기도 무응답이라 `gw_fail_streak` 이 매 주기
+      오르고, 3회째에 `detect/quality.py` 가 `FIRST_HOP_UNREACHABLE`
+      (quality, medium)을 내며 요약문에 `cause_note()` 의 원인 추정까지 붙인다.
+      그 판정은 `investigate/triggers.py` 의 `kinds` 목록에 있어 **조사가
+      자동으로 열린다.** 다발 주기에는 `PROBE_TIMED_OUT` 이 없으므로 VPN 쪽
+      유보는 그 앞의 평소 주기에만 붙는다.
+
+    **위 두 갈래는 `icmp_gw is True` 인 망에서만 그렇다.** streak 을 올리는 것은
+    `liveness.evaluate` 가 `alive False` 를 줄 때뿐이고(netmon/baseline.py),
+    `evaluate` 는 ICMP 로 판정하는 망에서만 `gateway_reachable` 을 그대로 쓴다.
+    ARP 로 판정하는 망과 보정 중에는 `arp.gateway_mac` 이 잡히면 `alive True` 라
+    streak 이 오르지 않는다(다발도 켜지지 않는다 — `first_hop_silent` 가 같은
+    방법을 본다).
+
+    그래서 다음 갈래는 앞의 둘과 **배타적**이다: ICMP 응답이 계속 없고 ARP 는
+    정상이면 `liveness.calibrate` 가 `icmp_gw=False` 로 굳혀
+    `GATEWAY_ICMP_SILENT` 를 남기고 그 망의 ICMP 기반 판정을 끈다. **우리 제한
+    시간이 만든 결과로 상대 네트워크의 성질을 단정하는 것**이고, state.json 에
+    남는다. 굳은 뒤로는 위 두 갈래가 더 일어나지 않는다.
+
+    `rtt_ewma` 는 `gateway_reachable` 이 참일 때만 갱신돼 오염되지 않고 멈춘다.
 
     품질 축까지 함께 유보시키는 것은 판정 동작 변경이라 여기서 하지 않았다.
 

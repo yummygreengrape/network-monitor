@@ -1585,9 +1585,12 @@ class TestARaisedPingCount(unittest.TestCase):
     `run` 도 무응답 모형을 쓴다(`_timing_run` 참고).
 
     **유보되는 것은 VPN 끊김 판정뿐이다.** 품질 축은 같은 주기를
-    `gateway_reachable=False` 로 읽어 `gw_fail_streak` 을 계속 올린다
-    (netmon/baseline.py, netmon/detect/quality.py). 그 파급은
-    collect/link.py `packets_per_command` 의 docstring 에 적혀 있다.
+    `gateway_reachable=False` 로 읽는다(netmon/baseline.py,
+    netmon/detect/quality.py). 다만 그 뒤가 한 갈래가 아니다 — 유보된 주기는
+    다음 주기의 다발 측정을 켜고, 다발 주기는 명령 하나가 1발이라
+    `ping_count` 가 커도 제한에 걸리지 않는다. 갈래별 파급은 collect/link.py
+    `packets_per_command` 의 docstring 에 적혀 있다. **이 클래스가 보는 것은
+    그중 평소 주기 하나뿐이다.**
 
     **이것은 버그가 아니라 고른 동작이다.** 대안이 둘이었다: (a) 설정을
     말없이 잘라 적게 재면서 그 사실을 남기지 않는다, (b) 설정대로 보내고
@@ -1656,20 +1659,25 @@ class TestARaisedPingCount(unittest.TestCase):
         못함" 쪽으로 간다(netmon/detect/vpn.py). 이 값이 판정에 닿는 경로는
         tests/test_detect_vpn.py 가 덮는다.
 
-        **품질 축은 유보하지 않는다.** 같은 관측의 `gateway_reachable` 이
-        거짓이므로 netmon/baseline.py 가 `gw_fail_streak` 을 올리고
-        netmon/detect/quality.py 가 3회째에 `FIRST_HOP_UNREACHABLE` 을 낸다.
-        아래 단언은 그 사실을 **그대로 고정한다** — 유보가 품질 축까지
-        가리라고 읽으면 안 된다(파급은 `packets_per_command` docstring).
+        **품질 축은 유보하지 않는다.** 같은 관측의 `gateway_reachable` 은
+        거짓 그대로다. 아래 단언이 고정하는 것은 딱 거기까지 —
+        **수집기 출력 네 값**(`error`·`gateway_reachable`·`gateway_rtt_ms`·
+        `loss_pct`)이다. netmon/baseline.py 도 netmon/detect/quality.py 도
+        여기서 한 줄도 돌지 않으므로, 그 뒤에 무엇이 나오는지는 이 테스트가
+        말하지 않는다(갈래별 파급은 `packets_per_command` docstring).
+        아래는 다발을 명시로 꺼서 **평소 주기 하나**만 본다 — 유보가 켜는
+        다음 다발 주기는 여기 들어 있지 않다.
         """
         fake = self._timing_run()
         with mock.patch.object(first_hop, "run", fake):
             out = first_hop.collect({"gateway": GW, "ping_count": 4,
                                      "first_hop_burst": False})
         self.assertEqual(out["results"]["gateway"]["error"], PROBE_TIMED_OUT)
-        # 품질 축이 읽는 두 값. 유보 표시가 이 값들을 바꾸지 않는다.
+        # 품질 축이 읽는 두 값. 유보 표시가 이 값들을 바꾸지 않는다
+        # (netmon/liveness.py `signals`, netmon/baseline.py `rtt_elevated`).
         self.assertFalse(out["gateway_reachable"])
         self.assertIsNone(out.get("gateway_rtt_ms"))
+        # 이 값은 품질 축이 읽지 않는다 — 독자는 netmon/detect/vpn.py 뿐이다.
         self.assertEqual(out["results"]["gateway"]["loss_pct"], 100.0)
 
     def test_three_still_measures(self):
