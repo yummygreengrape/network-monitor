@@ -55,6 +55,63 @@ PING_TIMEOUT_SECONDS = 4.0
 RESULT_WAIT_SECONDS = 10.0
 
 
+def _max_count(wait_ms: int = DEFAULT_WAIT_MS,
+               timeout: float = PING_TIMEOUT_SECONDS) -> int:
+    """한 `ping` 명령에 실을 수 있는 발 수의 상한. 지금 값으로 3 이다.
+
+    한 명령의 소요는 `ping_seconds()` 이고, 그것이 subprocess 제한을 넘으면
+    **응답이 오는 정상 주기도 매번 제한에 걸린다** — 결과가 통째로
+    "재지 못함" 이 되어 설정 하나로 이 도구가 눈이 먼다. 값을 여기서
+    계산하는 것은 세 상수 중 하나만 바뀌어도 함께 움직이게 하려는 것이다.
+    """
+    n = int((timeout - PING_OVERHEAD_SECONDS) / (wait_ms / 1000.0))
+    return max(DEFAULT_COUNT, n)
+
+
+MAX_COUNT = _max_count()
+
+
+def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
+    """`ping_count` 설정을 **한 명령에 실을 발 수**로 바꾼다.
+
+    범위 밖(0·음수·상한 초과)은 **자른다**. 거부하고 그 주기를 재지 않는
+    쪽은 고르지 않았다 — 잘못 적은 설정 하나가 측정을 통째로 없애는 것보다
+    범위 안으로 자르고 재는 편이 낫다. 읽을 수 없는 값은 기본값 1 이다
+    (설정 기본값과 같다 — netmon/config.py).
+
+    **하한이 없으면 재지 못한 주기가 "손실 100%" 로 적힌다.** macOS ping 은
+    `-c 0`·`-c -3` 을 거절한다: rc 64(EX_USAGE)에 stdout 이 비어 있다
+    (실측 2026-09-22, `ping -n -c 0 -W 800 127.0.0.1` → rc 64, 0바이트).
+    64 는 `NOT_RUN_RCS` 에 없으므로 `probe_failure` 가 아무 표시도 남기지
+    않고, `parse_ping("")` 이 `{replies: 0, loss_pct: 100.0, reachable: False}`
+    를 만든다 — 한 발도 나가지 않은 주기가 **잰 것처럼** 기록된다.
+
+    **부르는 곳이 둘이라 함수로 둔다.** 수집기는 이 값을 `ping -c` 에 넘기고,
+    엔진은 같은 값으로 터널 엔드포인트의 상한을 센다
+    (netmon/engine.py `_endpoint_shots`). 한쪽에서만 자르면 세는 값과 실제로
+    나가는 발 수가 어긋나, 한 끊김당 12발이라는 상한이 그만큼 틀어진다.
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_COUNT
+    return max(DEFAULT_COUNT, min(n, MAX_COUNT))
+
+
+def _burst_floor(value: Any) -> int:
+    """다발 주기에 띄울 명령 수의 하한 — 설정값을 **자르지 않고** 쓴다.
+
+    `MAX_COUNT` 는 한 명령이 제한 시간 안에 끝나게 하는 상한이다. 다발은
+    1발짜리 명령을 여러 개 **동시에** 띄우므로(`collect` 의 `per`) 그 제한이
+    걸리지 않는다. 여기서까지 자르면 `ping_count` 를 올려 둔 사람이 이상
+    징후 주기에 오히려 적게 재게 된다.
+    """
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
 def ping_seconds(wait_ms: int = DEFAULT_WAIT_MS, count: int = DEFAULT_COUNT) -> float:
     """무응답 대상에게 ping 한 번이 걸리는 시간(초) 추정."""
     return PING_OVERHEAD_SECONDS + count * (wait_ms / 1000.0)
@@ -109,7 +166,7 @@ def ping(target: str, count: int = DEFAULT_COUNT, wait_ms: int = DEFAULT_WAIT_MS
         # 고정 낱말이다. `r.err` 를 옮기지 않는다 — 권한 오류 메시지에는
         # 실행 파일 경로가, 대상에 따라서는 주소가 섞여 나올 수 있고,
         # 감싸지 않은 문자열은 내보낼 때 가려지지 않는다
-        # (_error_note 가 터널 엔드포인트에 두는 제약과 같은 이유다).
+        # (`_error_note` 가 예외 메시지를 버리는 것과 같은 이유다).
         out["error"] = failure
     return out
 
@@ -153,21 +210,33 @@ TUNNEL_ENDPOINT = "tunnel_endpoint"
 TUNNEL_CAPPED = "tunnel_endpoint_capped"
 
 
-def _error_note(name: str, exc: Exception) -> str:
-    """측정이 실패했을 때 관측에 남길 문구.
+def _error_note(exc: Exception) -> str:
+    """측정이 실패했을 때 관측에 남길 문구. **대상을 가리지 않고 고정 낱말이다.**
 
-    터널 엔드포인트만 **예외 종류 이름까지만** 남긴다. 그 대상 주소는 공급자
-    사유 문자열에서 온 공인 IP 이고 명령줄에 그대로 들어가므로, 예외 메시지에
-    섞여 나올 수 있다. 감싸지 않은 문자열은 내보낼 때도 가려지지 않아
-    (netmon/redact.py 는 ident 로 감싼 값만 바꾼다) 주소가 그대로 나간다.
-    예외 종류 이름은 고정된 낱말이라 주소가 들어갈 자리가 없다.
+    예외 메시지(`str(exc)`)를 옮기지 않는다. 이유가 둘이다.
 
-    나머지 대상은 종전 그대로 메시지를 남긴다. 그 주소들은 관측 곳곳에 이미
-    감싸서 들어 있고, 여기 문구가 진단에 쓰인다.
+    1. **빈 문구가 나온다.** 이 갈래에 가장 흔히 오는 예외는
+       `fut.result(timeout=...)` 이 던지는 `TimeoutError()` 인데 인자가 없어
+       `str(exc)` 가 빈 문자열이다. 그러면 `error` 가 비어서 판정의 가드가
+       둘 다 거짓이 되고(detect/vpn 의 `_probe_evidence`·`first_hop_not_run`),
+       **재지 못한 주기가 다시 "첫 홉 무응답" 의 근거로 쓰인다.** 그 타임아웃은
+       뜻 그대로 `PROBE_TIMED_OUT` 으로 적는다 — 명령은 떴으니 패킷이 나갔을
+       수도 있고, 결과를 못 받았을 뿐이다.
+    2. **경로·주소가 섞여 나온다.** `util.run` 이 잡지 않는 OSError(예:
+       `[Errno 8] Exec format error: '/…/ping'`)가 여기까지 올라오면 그
+       문자열이 관측을 거쳐 이벤트 증거(`first_hop_errors`)에 그대로 들어간다.
+       감싸지 않은 문자열은 내보낼 때도 가려지지 않아(netmon/redact.py 는
+       ident 로 감싼 값만 바꾼다) `capture --redact` 에도 살아남는다.
+
+    잃는 것은 예외 메시지의 진단 정보다. 흔한 실패(명령 없음·권한·제한 시간)는
+    `util.run` 이 이미 잡아 `ping()` 이 고정 낱말로 적으므로, 여기 오는 것은
+    드문 갈래다. 종류 이름이면 어느 갈래인지 가릴 수 있다.
+
+    대상 이름을 받지 않는다 — 터널 엔드포인트만 가리던 때의 인자였다.
     """
-    if name == TUNNEL_ENDPOINT:
-        return type(exc).__name__
-    return str(exc)[:80]
+    if isinstance(exc, concurrent.futures.TimeoutError):
+        return PROBE_TIMED_OUT
+    return type(exc).__name__
 
 
 def vpn_states(vpn_block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -362,12 +431,16 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
         out.update(capped)
         return out
 
-    count = int(ctx.get("ping_count", DEFAULT_COUNT))
+    # 한 명령에 실을 발 수는 **검증한 값**이다. 엔진이 상한을 셀 때 쓰는
+    # 것과 같은 함수여야 세는 값과 실제 인자가 어긋나지 않는다.
+    raw_count = ctx.get("ping_count", DEFAULT_COUNT)
+    count = packets_per_command(raw_count)
     probes = burst_probes(ctx) if "gateway" in targets else 1
     if probes > 1:
         # ping_count 를 올려 둔 사람이 이상 징후 주기에 오히려 적게 보내면
-        # 놀란다. 평소보다 적게 보내지 않는다.
-        probes = max(probes, count)
+        # 놀란다. 평소보다 적게 보내지 않는다. 여기는 1발짜리 명령의 **개수**라
+        # 한 명령의 상한(MAX_COUNT)이 걸리지 않는다 (_burst_floor).
+        probes = max(probes, _burst_floor(raw_count))
 
     # 대상 하나에 여러 번 띄울 수 있으므로 작업 단위로 펼친다. 다발은 1발씩
     # 쪼개서 보낸다 — 한 명령으로 여러 발을 쏘면 패킷 간격 1초가 붙는다.
@@ -388,7 +461,7 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
                 got.setdefault(name, []).append(fut.result(timeout=RESULT_WAIT_SECONDS))
             except Exception as exc:  # 측정 실패는 관측값이지 예외가 아니다
                 got.setdefault(name, []).append({"reachable": False,
-                                                 "error": _error_note(name, exc)})
+                                                 "error": _error_note(exc)})
 
     results: Dict[str, Any] = {}
     for name, rs in got.items():

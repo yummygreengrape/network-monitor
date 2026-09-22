@@ -5,13 +5,20 @@
 """
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
+from netmon import config as configmod
 from netmon import messages
 from netmon import messages as msg
+from netmon import redact as redactmod
 from netmon import vpn as vpnmod
+from netmon.collect import link as first_hop
 from netmon.collect.link import merge_probes, parse_ping
+from netmon.engine import Engine
 from netmon.detect import Context, attributions_for, network_key, run_all
 from netmon.detect import vpn as vpn_rules
 from netmon.model import PROBE_NOT_RUN, PROBE_TIMED_OUT
@@ -1316,7 +1323,7 @@ class TestTheOutageCarriesItsEndpointTally(unittest.TestCase):
         state = {"icmp_gw": True,
                  "vpn_down_since": {"warp": "2026-01-01T00:00:00Z"}}
         if probes is not None:
-            state["vpn_endpoint_probes"] = probes
+            state[vpnmod.ENDPOINT_PROBES_KEY] = probes
         return by_kind(judge(prev, cur, state=state), "VPN_RECONNECTED")
 
     def test_a_capped_outage_says_so_with_values(self):
@@ -1664,6 +1671,215 @@ class TestDropWhileTheLinkIsAbsent(unittest.TestCase):
                     {"vpn_down_reported": broken,
                      "vpn_down_since": {"warp": "2026-01-01T00:00:05Z"}},
                     "warp"))
+
+
+class TestTheRecoveryReadsTheStateTheEngineActuallyWrote(unittest.TestCase):
+    """상태 키가 한쪽에서만 바뀌어도 잡히는가 (DEV-13 (a)).
+
+    위 `TestTheOutageCarriesItsEndpointTally` 를 포함해 커밋된 시험은 모두
+    상태를 **손으로** 주입한다. 그래서 쓰는 쪽(netmon/engine.py)과 읽는 쪽
+    (netmon/detect/vpn.py)의 이름이 갈라져도 전부 통과한 채 복구 증거의
+    `tunnel_endpoint_shots`·`tunnel_endpoint_cap_reached` 두 필드만 조용히
+    사라진다. 여기서는 **엔진이 만든 상태 dict 를 그대로** 판정에 먹이고,
+    키 이름을 이 파일 어디에도 적지 않는다.
+    """
+
+    def _engine(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cfg = configmod.load(os.path.join(d, "config.json"))
+        cfg.grant("external_probes", note="테스트")
+        cfg.set_feature("vpn.tunnel_probe", True)
+        eng = Engine.__new__(Engine)
+        eng.cfg = cfg
+        eng.state = {}
+        eng._last_vpn = vpn_state("disconnected", reason=ENDPOINT_REASON)
+        return eng
+
+    def _reconnect(self, engine_state):
+        prev = obs(ts="2026-01-01T00:07:25Z", vpn=vpn_state("disconnected"))
+        cur = obs(ts="2026-01-01T00:07:30Z", vpn=vpn_state("connected"))
+        state = dict(engine_state)
+        state.update({"icmp_gw": True,
+                      "vpn_down_since": {"warp": "2026-01-01T00:00:00Z"}})
+        return by_kind(judge(prev, cur, state=state), "VPN_RECONNECTED")
+
+    def test_the_shots_the_engine_counted_reach_the_recovery_evidence(self):
+        eng = self._engine()
+        for _ in range(2):
+            eng._claim_tunnel_probe()
+        f = self._reconnect(eng.state)
+        self.assertEqual(f.evidence["tunnel_endpoint_shots"], 2)
+        self.assertFalse(f.evidence["tunnel_endpoint_cap_reached"])
+
+    def test_a_capped_outage_written_by_the_engine_reads_back_as_capped(self):
+        eng = self._engine()
+        for _ in range(vpnmod.TUNNEL_PROBE_CAP + 1):
+            eng._claim_tunnel_probe()
+        f = self._reconnect(eng.state)
+        self.assertEqual(f.evidence["tunnel_endpoint_shots"],
+                         vpnmod.TUNNEL_PROBE_CAP)
+        self.assertTrue(f.evidence["tunnel_endpoint_cap_reached"])
+
+
+class TestACycleWeCouldNotMeasureStaysUnmeasuredInTheEvidence(unittest.TestCase):
+    """수집기의 실패 갈래가 판정까지 그대로 이어지는가 (DEV-13 (d)(e)(f)).
+
+    모양을 손으로 적지 않고 **수집기를 실제로 돌려** 만든 관측으로 본다.
+    손으로 적으면 생산자가 바뀔 때 같이 틀어진다.
+    """
+
+    def _judge(self, block):
+        prev = obs(vpn=vpn_state("connected"), security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:15Z",
+                  vpn=vpn_state("disconnected"), security="WPA2_PSK")
+        cur.data["link"] = block
+        cur.data["link"]["gateway_reachable"] = \
+            block.get("results", {}).get("gateway", {}).get("reachable")
+        return by_kind(judge(prev, cur), "VPN_DISCONNECTED")
+
+    def _timed_out_cycle(self):
+        """결과를 기다리다 만 주기 — future 가 실제로 시간을 넘긴다."""
+        def slow(argv, timeout=None, stdin=""):
+            import time
+            time.sleep(0.2)
+            from netmon.util import CmdResult
+            return CmdResult(list(argv), 0, "", "")
+
+        with mock.patch.object(first_hop, "run", slow), \
+                mock.patch.object(first_hop, "RESULT_WAIT_SECONDS", 0.01):
+            return first_hop.collect({"gateway": "192.0.2.1"})
+
+    def test_a_future_that_timed_out_still_reaches_the_guards(self):
+        """빈 오류 문구면 가드 두 곳이 모두 꺼진다 (DEV-13 (d))."""
+        f = self._judge(self._timed_out_cycle())
+        self.assertEqual(f.evidence["first_hop_errors"], [PROBE_TIMED_OUT])
+        self.assertTrue(vpn_rules.first_hop_not_run(
+            f.evidence["first_hop_method"], f.evidence))
+        self.assertIn(msg.WHY_FIRST_HOP_TIMED_OUT, f.summary)
+        self.assertNotIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE_COMMAND, f.summary)
+
+    def test_an_unmeasured_cycle_carries_no_loss_rate(self):
+        """재지 못한 주기에 `손실 100%` 가 측정값처럼 남지 않는다 (DEV-13 (f)).
+
+        `ping()` 은 실행에 실패해도 `parse_ping("")` 의 결과를 그대로 두므로
+        관측에는 `replies 0`·`loss_pct 100.0` 이 오류와 함께 실린다. 증거만
+        기계로 읽는 쪽에는 그것이 잰 값으로 보인다.
+        """
+        def missing(argv, timeout=None, stdin=""):
+            from netmon import util
+            return util.run(["netmon-no-such-command-for-tests"])
+
+        with mock.patch.object(first_hop, "run", missing):
+            block = first_hop.collect({"gateway": "192.0.2.1"})
+        # 관측에는 여전히 그 값들이 있다 — 거르는 것은 증거 쪽이다.
+        self.assertEqual(block["results"]["gateway"]["loss_pct"], 100.0)
+        f = self._judge(block)
+        self.assertEqual(f.evidence["first_hop_errors"], [PROBE_NOT_RUN])
+        self.assertNotIn("first_hop_loss_pct", f.evidence)
+        self.assertNotIn("first_hop_received", f.evidence)
+        # 판정은 종전 그대로 "재지 못함" 이다.
+        self.assertTrue(vpn_rules.first_hop_not_run(
+            f.evidence["first_hop_method"], f.evidence))
+
+    def test_a_measured_single_cycle_still_carries_both(self):
+        """가드가 넘치지 않는다 — 실제로 잰 평소 주기는 종전대로다."""
+        f = by_kind(judge(obs(vpn=vpn_state("connected"), security="WPA2_PSK"),
+                          one_command(obs(ts="2026-01-01T00:00:15Z",
+                                          vpn=vpn_state("disconnected"),
+                                          security="WPA2_PSK"),
+                                      sent=3, received=1)),
+                    "VPN_DISCONNECTED")
+        self.assertEqual(f.evidence["first_hop_received"], 1)
+        self.assertEqual(f.evidence["first_hop_loss_pct"], 66.7)
+
+    def test_no_path_from_a_raised_oserror_reaches_the_evidence(self):
+        """경로가 든 예외 메시지가 증거로 들어가지 않는다 (DEV-13 (e)).
+
+        `util.run` 은 이 OSError 를 잡지 않는다. 메시지가 `first_hop_errors`
+        로 실리면 감싸지 않은 문자열이라 `capture --redact` 에도 살아남는다.
+        """
+        # 합성 경로다 (tools/leak-check.sh 의 PATH 규칙).
+        path = "/opt/netmon-not-a-real-path/bin/ping"
+
+        def exploding(argv, timeout=None, stdin=""):
+            raise OSError(8, "Exec format error", path)
+
+        with mock.patch.object(first_hop, "run", exploding):
+            block = first_hop.collect({"gateway": "192.0.2.1"})
+        f = self._judge(block)
+        self.assertEqual(f.evidence["first_hop_errors"], ["OSError"])
+        self.assertNotIn(path, repr(f.evidence))
+        self.assertNotIn(path, f.summary)
+        # 가렸다고 넘어가지 않는다 — 감싸지 않은 문자열은 그대로 나간다.
+        redacted = redactmod.redact(dict(f.evidence), b"salt-for-tests")
+        self.assertNotIn(path, repr(redacted))
+        self.assertIn(path, repr(redactmod.redact({"error": str(
+            OSError(8, "Exec format error", path))}, b"salt-for-tests")))
+
+
+class TestTheLinkLessSummaryDoesNotUndersellTheCycle(unittest.TestCase):
+    """잰 것을 재지 않은 것처럼 적지 않는다 (DEV-13 (h)).
+
+    DEV-11 이 넣은 문구는 "다른 관측도 비어 있어" / "the rest of the cycle was
+    not measured" 였다. 링크가 없는 주기에도 수집 단계는 **전부 돌고**, 엔진은
+    그 주기에 Wi-Fi 를 **일부러 더 읽는다**(netmon/engine.py 의
+    `wifi_fallback_dev` — 주 인터페이스가 없을 때가 무선 상태를 가장 알고 싶은
+    순간이기 때문이다. `link_active`·암호화 방식이 거기서 나온다). 정확히는
+    "이 판정이 그 관측을 읽지 않는다" 다.
+    """
+
+    def _absent(self, state="disconnected"):
+        """링크가 없는 주기. **Wi-Fi 는 엔진이 더 읽어 둔 모양으로 채운다.**"""
+        o = obs(ts="2026-01-01T00:00:05Z", gateway=None, gw_mac=None,
+                icmp_ok=None, vpn=vpn_state(state, reason="No Network"))
+        o.data["iface"]["primary"] = None
+        o.data["iface"]["primary_kind"] = "unknown"
+        o.data["wifi"] = {"applicable": True, "is_primary": False,
+                          "security": "WPA2_PSK", "link_active": True,
+                          "location": "denied", "ssid": None, "bssid": None}
+        return o
+
+    def _finding(self, state="disconnected"):
+        found, _ = vpn_rules.without_link(vpn_state("connected"),
+                                          self._absent(state), {})
+        return found[0]
+
+    def test_the_cycle_really_does_carry_other_observations(self):
+        """전제를 관측으로 고정한다. 이것이 참이라 옛 문장이 틀렸다."""
+        cur = self._absent()
+        self.assertTrue(cur.data["wifi"]["applicable"])
+        self.assertEqual(cur.data["wifi"]["security"], "WPA2_PSK")
+        self.assertIs(cur.data["wifi"]["link_active"], True)
+
+    def test_neither_summary_says_the_rest_of_the_cycle_was_empty(self):
+        for state in ("disconnected", "connecting"):
+            with self.subTest(state=state):
+                summary = self._finding(state).summary
+                for word in ("비어 있", "재지 못", "측정하지"):
+                    self.assertNotIn(word, summary)
+
+    def test_both_catalogues_say_what_the_judgement_reads_instead(self):
+        for code, gone, kept in (
+                ("ko", "비어 있", "공급자가 보고한 상태"),
+                ("en", "was not measured", "nothing but the state the provider")):
+            for key in ("VPN_DISCONNECTED_NO_LINK", "VPN_RENEGOTIATING_NO_LINK"):
+                with self.subTest(lang=code, key=key):
+                    text = messages.get(key, code)
+                    self.assertNotIn(gone, text)
+                    self.assertIn(kept, text)
+
+    def test_reading_nothing_else_is_still_what_the_judgement_does(self):
+        """문구만 고치고 동작을 바꾸지 않았다 — 근거는 여전히 공급자 값뿐이다."""
+        f = self._finding()
+        self.assertEqual(set(f.evidence), {"provider", "provider_state",
+                                           "provider_reason", "prev_state",
+                                           "link_absent", "down_since"})
+        # Wi-Fi 를 읽었다면 보호 상실 판정이 났을 것이다. 나지 않는다.
+        found, _ = vpn_rules.without_link(vpn_state("connected"),
+                                          self._absent(), {})
+        self.assertEqual([x.kind for x in found], ["VPN_DISCONNECTED"])
 
 
 if __name__ == "__main__":

@@ -305,6 +305,19 @@ PROBE_STATES = (DISCONNECTED, CONNECTING)
 # 일을 막는다 (AC-4 수정분).
 TUNNEL_PROBE_CAP = 12
 
+# 그 발 수를 담는 `state.json` 의 키. 모양은 `carry_probe_counts` 가 만드는
+# `{공급자: {"shots": 발 수, "capped": 상한에 닿았는가}}` 다.
+#
+# **쓰는 쪽과 읽는 쪽이 갈라지지 않게 여기 한 곳에 둔다.** 쓰는 것은 엔진
+# (netmon/engine.py)이고 읽는 것은 복구 판정(netmon/detect/vpn.py)인데, 읽는
+# 쪽이 문자열 리터럴을 따로 적고 있었다. 그러면 이름을 바꿀 때 테스트가 전부
+# 통과한 채 복구 증거의 `tunnel_endpoint_shots`·`tunnel_endpoint_cap_reached`
+# 두 필드만 조용히 사라진다. 엔진이 detect 를 부르므로 그 반대 방향으로는
+# 상수를 둘 수 없어(순환 import) 수집기 쪽인 이 파일에 둔다.
+#
+# **없어도 동작한다** — 키가 없거나 모양이 다르면 0 부터 센다.
+ENDPOINT_PROBES_KEY = "vpn_endpoint_probes"
+
 # 사유 문자열에서 훑을 최대 길이. 긴 문자열에 시간을 쓰지 않는다.
 REASON_SCAN_LIMIT = 512
 

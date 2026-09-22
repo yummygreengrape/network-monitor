@@ -26,6 +26,7 @@ from ..baseline import VPN_REPORTED_KEY, reported_map
 from ..liveness import ICMP, evaluate, method_label
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, PROBE_TIMED_OUT,
                      QUALITY, SECURITY, Finding, Observation)
+from ..vpn import ENDPOINT_PROBES_KEY
 
 FEATURE = "detect.vpn"
 
@@ -160,11 +161,11 @@ def _probe_evidence(cur: Observation) -> Dict[str, Any]:
         # 받은 수는 다발과 **같은 키**로 적는다. 읽는 쪽이 갈래마다 다른
         # 이름을 알아야 하면 증거를 훑는 코드가 한쪽을 빠뜨린다.
         replies = gw.get("replies")
-        if isinstance(replies, int) and not isinstance(replies, bool):
-            single["first_hop_received"] = replies
+        if not isinstance(replies, int) or isinstance(replies, bool):
+            replies = None
         loss = gw.get("loss_pct")
-        if isinstance(loss, (int, float)) and not isinstance(loss, bool):
-            single["first_hop_loss_pct"] = float(loss)
+        if not isinstance(loss, (int, float)) or isinstance(loss, bool):
+            loss = None
         # 명령이 실행되지 못하면 수집기는 `{"reachable": False, "error": ...}`
         # 만 남긴다(collect/link.collect 의 예외 처리). 그 `reachable` 은
         # "무응답" 이 아니라 "재지 못함" 이다 — 근거로 옮기지 않으면 나가지도
@@ -173,6 +174,21 @@ def _probe_evidence(cur: Observation) -> Dict[str, Any]:
         err = gw.get("error")
         if err:
             single["first_hop_errors"] = [str(err)[:80]]
+            if not replies:
+                # **재지 못한 주기에는 받은 수도 손실률도 적지 않는다.**
+                # `ping()` 은 실행에 실패해도 `parse_ping("")` 의 결과를 그대로
+                # 두므로 `replies 0` 과 `loss_pct 100.0` 이 오류 키와 함께
+                # 실린다. 그 100% 는 **출력이 비었다는 뜻**이지 잰 손실률이
+                # 아닌데, 증거만 기계로 읽는 쪽에는 "손실 100%" 라는 측정값으로
+                # 보인다. 남는 실패 목록이 "재지 못했다" 를 그대로 말한다.
+                # 다발 쪽은 다르다 — 거기 `sent` 는 실제로 띄운 명령 수이고,
+                # 실패도 보낸 것으로 센다는 결정이 기록돼 있다
+                # (AC-3·ADV-4, collect/link.merge_probes).
+                return single
+        if replies is not None:
+            single["first_hop_received"] = replies
+        if loss is not None:
+            single["first_hop_loss_pct"] = float(loss)
         return single
     burst: Dict[str, Any] = {"first_hop_probe_mode": "burst",
                              "first_hop_concurrent": bool(gw.get("concurrent"))}
@@ -465,16 +481,18 @@ def _endpoint_probe_record(state: Any, name: str) -> Dict[str, Any]:
     실리지 않는다. 그러면 이벤트만 읽는 쪽에서는 "재지 않은 끊김" 과
     "12발을 다 쓰고 멈춘 끊김" 이 구분되지 않는다.
 
-    읽는 값은 엔진이 세어 둔 `state.json` 의 `vpn_endpoint_probes` 다
-    (netmon/engine.py). 그 기록은 공급자가 다시 연결된 것을 **다음 주기**에
-    보고 지워지므로, 복구를 알리는 이 주기에는 아직 남아 있다.
+    읽는 값은 엔진이 세어 둔 `state.json` 의 `ENDPOINT_PROBES_KEY` 다
+    (netmon/engine.py 가 쓰고, 이름은 netmon/vpn 이 정한다 — 리터럴을 여기
+    따로 적으면 이름을 바꿀 때 이 두 필드만 조용히 사라진다). 그 기록은
+    공급자가 다시 연결된 것을 **다음 주기**에 보고 지워지므로, 복구를 알리는
+    이 주기에는 아직 남아 있다.
 
     **기록이 없으면 아무 키도 만들지 않는다.** "0발" 과 "기록이 없다" 는
     다르다 — 기능이 꺼져 있었거나, 주소를 한 번도 못 얻었거나, 판정이 여러
     주기 늦어 기록이 이미 지워진 뒤일 수 있다. 그 셋을 "0발 나갔다" 로
     적으면 관측하지 않은 것을 관측한 것처럼 적는 것이 된다.
     """
-    counts = state.get("vpn_endpoint_probes") if isinstance(state, dict) else None
+    counts = state.get(ENDPOINT_PROBES_KEY) if isinstance(state, dict) else None
     rec = counts.get(name) if isinstance(counts, dict) else None
     shots = rec.get("shots") if isinstance(rec, dict) else None
     if not isinstance(shots, int) or isinstance(shots, bool) or shots < 0:
@@ -597,11 +615,13 @@ def _no_link_summary(name: str, now: Any, cur_st: Dict[str, Any]) -> str:
     """링크가 없는 주기의 끊김 요약문.
 
     평소 주기의 `_down_summary` 와 다른 점은 둘이다. **"가장 유력한 설명"을
-    고르지 않는다** — 첫 홉도 리졸버도 재지 못한 주기라 고를 근거가 없고,
-    비어 있는 관측으로 고르면 "네트워크 이동" 같은 설명이 근거 없이 붙는다
-    (실측 2026-09-21 05:49:17 이 그랬다). 대신 **링크가 없었다는 관측 사실**을
-    적는다. 공급자 사유는 평소와 같은 기준으로만 인용한다(고정 목록과 정확히
-    일치할 때만 — 사유 문자열에 주소·포트가 섞여 있고 요약문은 가려지지 않는다).
+    고르지 않는다** — 그 설명은 첫 홉 판정과 안정화 창을 읽어서 고르는데
+    (`_likely`), 주 인터페이스가 없는 주기에는 첫 홉 측정 대상 자체가 없어
+    고를 근거가 없고, 그대로 고르게 두면 "네트워크 이동" 같은 설명이 근거
+    없이 붙는다(실측 2026-09-21 05:49:17 이 그랬다). 대신 **링크가 없었다는
+    관측 사실**을 적는다. 공급자 사유는 평소와 같은 기준으로만 인용한다(고정
+    목록과 정확히 일치할 때만 — 사유 문자열에 주소·포트가 섞여 있고 요약문은
+    가려지지 않는다).
 
     같은 점도 하나 있다. **`connecting` 을 "연결 끊김" 이라고 적지 않는다**
     (AC-9) — 이 경로에도 `connecting` 인 주기가 들어올 수 있다. 링크가 빠지는
@@ -644,11 +664,16 @@ def without_link(prev_vpn: Any, cur: Observation,
     이벤트만 읽는 쪽에는 끊김이 실제보다 적게 보인다.
 
     **여기서 되살리는 것은 "끊겼다"는 사실 하나뿐이다.** 근거로 쓰는 값은
-    공급자가 보고한 상태와 사유뿐이고(VPN 상태는 링크가 없어도 수집된다 —
-    공급자에게 묻는 값이라 주 인터페이스가 필요 없다), 첫 홉·리졸버·Wi-Fi
-    처럼 그 주기에 비어 있는 관측은 읽지도 적지도 않는다. 그래서 보호 상실
-    (`VPN_PROTECTION_LOST`)도 여기서 내지 않는다 — 그 판정은 이 네트워크의
-    암호화 방식을 읽어야 하는데, 링크가 없는 주기에는 그 값이 없다.
+    공급자가 보고한 상태와 사유뿐이다(VPN 상태는 링크가 없어도 수집된다 —
+    공급자에게 묻는 값이라 주 인터페이스가 필요 없다). 첫 홉·리졸버·Wi-Fi 는
+    **읽지 않는다.** 그 주기에 관측이 없어서가 아니다 — 수집 단계는 전부 돌고
+    엔진은 그런 주기에 Wi-Fi 를 일부러 더 읽는다(netmon/engine.py 의
+    `wifi_fallback_dev`, `link_active`·암호화 방식이 거기서 나온다). 여기서
+    읽지 않기로 한 것이고, 요약문도 그렇게 적는다.
+    보호 상실(`VPN_PROTECTION_LOST`)을 여기서 내지 않는 것은 다른 이유다 —
+    그 판정은 이 네트워크의 암호화 방식(`wifi.security`)을 읽어야 하는데, 그
+    주기의 Wi-Fi 관측은 주 인터페이스로서 본 값이 아니고(`is_primary` False,
+    netmon/collect/wifi.py) 값이 비어 있을 수 있다.
 
     **비교 대상은 직전 주기의 VPN 블록**이다. 판정하지 않은 주기도 포함한다 —
     링크가 없는 동안에도 VPN 상태는 계속 수집되므로, 끊긴 순간을 볼 수 있는

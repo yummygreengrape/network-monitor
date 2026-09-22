@@ -41,7 +41,10 @@ BASELINE_SAVE_SECONDS = 60.0
 # 세는 자리이고, 모양은 `{공급자: {"shots": 발 수, "capped": 상한에 닿았는가}}`
 # 다 — 세는 단위가 공급자 하나의 끊김 하나이기 때문이다(vpn.carry_probe_counts).
 # **없어도 동작한다** — 없거나 모양이 다르면 0 부터 센다.
-ENDPOINT_PROBES_KEY = "vpn_endpoint_probes"
+#
+# 이름은 `netmon/vpn` 것을 그대로 쓴다. 여기서 쓰고 복구 판정이 읽으므로
+# (netmon/detect/vpn.py `_endpoint_probe_record`) 한 곳에서 와야 한다.
+ENDPOINT_PROBES_KEY = vpn.ENDPOINT_PROBES_KEY
 
 # 커널 ARP 로그를 읽는 간격과 조회 창. `log show` 는 고정 1초쯤 들고 창이
 # 커지면 더 든다(1시간치 8.9초). 간격보다 창을 넉넉히 잡아 빈틈을 막는다.
@@ -288,15 +291,13 @@ class Engine:
     def _endpoint_shots(self) -> int:
         """엔드포인트 한 번 측정에 나가는 ICMP 발 수.
 
-        수집기가 엔드포인트에 쓰는 값과 같아야 한다 — 거기서는 대상이
-        하나라 `per = count` 이고 그 `count` 가 `ping_count` 다
-        (netmon/collect/link.py). 설정이 망가져 있으면 1 로 본다.
+        **수집기가 쓰는 함수를 그대로 부른다.** 거기서는 대상이 하나라
+        `per = count` 이고 그 `count` 가 `link.packets_per_command(ping_count)`
+        다(netmon/collect/link.py). 여기서 따로 계산하면 — 예전에는
+        `max(1, int(...))` 이었다 — 설정이 범위 밖일 때 세는 값과 실제로 나가는
+        발 수가 어긋나고, 상한의 정확성이 그 일치에 기대고 있다.
         """
-        try:
-            n = int(self.cfg.data.get("ping_count", 1))
-        except (TypeError, ValueError):
-            return 1
-        return max(1, n)
+        return link.packets_per_command(self.cfg.data.get("ping_count", 1))
 
     def _remember_for_burst(self, obs: Observation) -> None:
         """다음 주기의 다발 측정 판단에 쓸, 직전 두 주기의 상태를 남긴다.

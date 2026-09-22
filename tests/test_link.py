@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import os
 import shutil
@@ -473,7 +474,10 @@ class TestBurstPartialFailure(unittest.TestCase):
         g = out["results"]["gateway"]
         self.assertEqual((g["sent"], g["received"]), (3, 1))
         self.assertEqual(g["loss_pct"], 66.7)
-        self.assertEqual(g["errors"], ["측정 실패"])
+        # 남는 것은 **예외 종류 이름**이다. 메시지를 옮기면 거기에 경로나
+        # 주소가 섞여 들어올 수 있다 (DEV-13 (e), collect/link._error_note).
+        self.assertEqual(g["errors"], ["RuntimeError"])
+        self.assertNotIn("측정 실패", repr(out))
 
     def test_loss_stays_inside_the_observed_range(self):
         for outs in ([LOST], [REPLY], [REPLY, LOST, LOST]):
@@ -695,10 +699,12 @@ class TestTunnelEndpointTarget(unittest.TestCase):
         self.assertEqual(out["first_hop_probes"], 1)
 
     def test_a_failure_records_only_the_error_kind(self):
-        """엔드포인트의 실패 문구에는 주소가 섞일 수 있다 (DEV-8 검수 지적).
+        """실패 문구에는 주소·경로가 섞일 수 있다 (DEV-8 검수 지적, DEV-13 (e)).
 
-        감싸지 않은 문자열은 내보낼 때도 가려지지 않으므로, 이 대상만
-        예외 종류 이름까지 남긴다. 다른 대상의 문구는 종전 그대로다.
+        감싸지 않은 문자열은 내보낼 때도 가려지지 않으므로 **대상을 가리지
+        않고** 예외 종류 이름까지만 남긴다. 처음에는 엔드포인트만 그랬는데,
+        게이트웨이 쪽 문구도 그대로 `first_hop_errors` 로 이벤트 증거에
+        실린다는 것이 뒤에 드러났다.
         """
         def exploding(argv, timeout=None, stdin=""):
             raise RuntimeError("ping %s failed" % argv[-1])
@@ -710,8 +716,10 @@ class TestTunnelEndpointTarget(unittest.TestCase):
         self.assertEqual(endpoint["error"], "RuntimeError")
         self.assertNotIn(ENDPOINT, endpoint["error"])
         self.assertFalse(endpoint["reachable"])
-        # 게이트웨이 쪽 문구는 종전처럼 메시지를 남긴다.
-        self.assertIn("failed", out["results"]["gateway"]["error"])
+        # 게이트웨이 쪽도 같다 — 메시지에는 대상 주소가 들어 있다.
+        self.assertEqual(out["results"]["gateway"]["error"], "RuntimeError")
+        self.assertNotIn("failed", repr(out))
+        self.assertNotIn(GW, repr(out["results"]))
 
 
 class TestTunnelEndpointRidesWithTheBurst(unittest.TestCase):
@@ -909,11 +917,45 @@ class TestTheProbeCap(unittest.TestCase):
         self.assertEqual(eng._claim_tunnel_probe(), (None, True))
         self.assertEqual(self._counts(eng)["warp"]["shots"], 12)
 
-    def test_a_ping_count_over_the_cap_sends_nothing_and_says_so(self):
-        """상한을 넘겨 보내느니 재지 않는다. 그 사실은 표시로 남는다."""
-        eng = self._engine(ping_count=13)
+    def test_a_claim_that_would_pass_the_cap_sends_nothing_and_says_so(self):
+        """상한을 넘겨 보내느니 재지 않는다. 그 사실은 표시로 남는다.
+
+        (DEV-13 (g) 전에는 `ping_count=13` 으로 이 갈래를 열었다. 이제 설정은
+        `MAX_COUNT` 로 잘려서 한 주기에 그만큼 나갈 수 없으므로, 남은 예산이
+        이번 주기의 발 수를 못 받는 실제 경로 — 끊김 중반 — 로 연다.)
+        """
+        eng = self._engine(ping_count=3,
+                           state={enginemod.ENDPOINT_PROBES_KEY:
+                                  {"warp": {"shots": 10, "capped": False}}})
         self.assertEqual(eng._claim_tunnel_probe(), (None, True))
-        self.assertEqual(self._counts(eng), {"warp": {"shots": 0, "capped": True}})
+        self.assertEqual(self._counts(eng), {"warp": {"shots": 10, "capped": True}})
+
+    def test_a_ping_count_over_the_limit_is_cut_not_obeyed(self):
+        """범위 밖 설정은 잘린다 — 세는 값과 실제 인자가 같아야 한다 (DEV-13 (b)(g)).
+
+        자르지 않으면 `ping -c 13` 한 명령이 subprocess 제한(4초)을 넘겨
+        **응답이 오는 정상 주기까지** "재지 못함" 이 된다. 엔진이 세는 값과
+        수집기가 넘기는 인자가 같은 함수에서 오는지도 여기서 본다.
+        """
+        eng = self._engine(ping_count=13)
+        self.assertEqual(eng._endpoint_shots(), first_hop.MAX_COUNT)
+        self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False))
+        self.assertEqual(self._counts(eng)["warp"]["shots"], first_hop.MAX_COUNT)
+
+        fake = FakeRun()
+        collect_with(fake, ping_count=13, allow_tunnel_probe=True,
+                     tunnel_endpoint=ENDPOINT)
+        for c in fake.calls:
+            self.assertEqual(c["argv"][3], str(first_hop.MAX_COUNT))
+
+    def test_a_ping_count_below_one_is_raised_not_passed_through(self):
+        """0·음수를 그대로 넘기면 `ping -c 0` 이 나가고 세는 값과 어긋난다."""
+        for bad in (0, -3):
+            eng = self._engine(ping_count=bad)
+            self.assertEqual(eng._endpoint_shots(), 1)
+            fake = FakeRun()
+            collect_with(fake, ping_count=bad)
+            self.assertEqual(fake.calls[0]["argv"][3], "1")
 
     def test_a_broken_ping_count_is_read_as_one(self):
         eng = self._engine(ping_count="많이")
@@ -1019,8 +1061,13 @@ class TestTheProbeCap(unittest.TestCase):
                                           reason=helpers.ENDPOINT_REASON)
         self.assertEqual(eng._claim_tunnel_probe(), (None, True))
 
-    def test_each_provider_has_its_own_budget(self):
-        """한 공급자가 예산을 다 써도 다른 공급자의 끊김은 그대로 잰다."""
+    def test_a_provider_that_replaces_another_in_the_block_has_its_own_budget(self):
+        """예산은 공급자별이다 — **블록을 바꿔 끼워** 확인한다 (DEV-13 (c)).
+
+        여기서 보는 것은 "한 공급자가 예산을 다 쓴 뒤, 블록에 다른 공급자가
+        올라오면 그쪽은 제 예산으로 잰다" 까지다. 두 공급자가 **같은 블록에
+        동시에** 비연결인 경우는 이 경로를 지나지 않는다 — 아래 테스트가 본다.
+        """
         other = "No Network via 203.0.113.9:2408"
         eng = self._engine(last_vpn=helpers.vpn_state(
             "disconnected", reason=helpers.ENDPOINT_REASON))
@@ -1033,6 +1080,28 @@ class TestTheProbeCap(unittest.TestCase):
         self.assertEqual(eng._claim_tunnel_probe(), ("203.0.113.9", False))
         self.assertEqual(self._counts(eng)["tailscale"]["shots"], 1)
         self.assertEqual(self._counts(eng)["warp"]["shots"], 12)
+
+    def test_two_providers_down_together_share_one_cycle_and_the_first_name_wins(self):
+        """같은 블록에 둘이 동시에 비연결이면 **이름 순 첫 공급자만** 잰다.
+
+        `tunnel_probe_target` 이 블록을 이름 순으로 훑어 첫 후보 하나만
+        돌려주고(netmon/vpn), 엔진은 한 주기에 한 번만 청구한다. 그래서 그가
+        상한에 닿으면 둘째는 그 끊김 내내 한 발도 못 잰다. 방향은 안전하지만
+        (적게 보낸다) 기록에는 둘째의 측정이 아예 없다 — 기록을 읽는 쪽이
+        "쟀는데 안 됐다" 로 읽지 않도록 여기에 적어 둔다.
+        """
+        block = dict(helpers.vpn_state("disconnected",
+                                       reason=helpers.ENDPOINT_REASON))
+        block.update(helpers.vpn_state("disconnected", provider="tailscale",
+                                       reason="No Network via 203.0.113.9:2408"))
+        eng = self._engine(last_vpn=block)
+        for i in range(12):
+            # tailscale < warp — 이름 순 첫 공급자다.
+            self.assertEqual(eng._claim_tunnel_probe(), ("203.0.113.9", False), i)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng),
+                         {"tailscale": {"shots": 12, "capped": True}})
+        self.assertNotIn("warp", self._counts(eng))
 
     def test_a_cycle_without_an_address_is_not_counted(self):
         """주소를 못 고른 주기는 보내지 않은 주기다."""
@@ -1291,8 +1360,8 @@ class TestAProbeThatCouldNotRunSaysSo(unittest.TestCase):
     def test_the_note_is_a_fixed_word_without_the_target(self):
         """터널 엔드포인트에도 같은 문구가 쓰인다 — 주소가 섞이면 안 된다.
 
-        `_error_note` 가 엔드포인트에 두는 제약(고정된 낱말, 주소 불포함)을
-        여기서도 지킨다. 권한 오류 메시지에는 실행 파일 경로가 들어 있다.
+        `_error_note` 가 지키는 제약(고정된 낱말, 주소·경로 불포함)을 여기서도
+        지킨다. 권한 오류 메시지에는 실행 파일 경로가 들어 있다.
         """
         with a_file_without_the_execute_bit() as path:
             out = ping_through([path], target=helpers.ENDPOINT)
@@ -1325,6 +1394,166 @@ class TestAProbeThatCouldNotRunSaysSo(unittest.TestCase):
             self.assertEqual(got["error"], PROBE_NOT_RUN)
             self.assertNotIn(path, repr(got))
         self.assertNotIn(helpers.ENDPOINT, repr(got))
+
+
+class TestTheFutureBranchNeverLeavesAnEmptyError(unittest.TestCase):
+    """결과를 기다리다 만 주기가 **빈 오류 문구**로 남지 않는가 (DEV-13 (d)).
+
+    `fut.result(timeout=...)` 이 던지는 예외는 인자가 없어 `str(exc)` 가 빈
+    문자열이다. 그것을 그대로 `error` 에 넣으면 판정의 가드 두 곳
+    (`_probe_evidence` 의 `if err:` 와 `first_hop_not_run`)이 **둘 다 거짓**이
+    되어, 재지 못한 주기가 다시 "첫 홉 무응답 — 이 기기와 공유기 사이 구간
+    문제" 의 근거로 쓰인다.
+
+    빈 문자열을 손으로 넣어 보는 것으로는 이 경로를 못 덮는다. **실제로
+    기다리다 만다** — 대기 시간을 좁히고 느린 ping 을 세워 둔다.
+    """
+
+    def test_the_exception_this_branch_catches_really_carries_no_message(self):
+        """전제를 코드로 고정한다. 이것이 참이라 위 가드가 꺼졌다."""
+        self.assertEqual(str(concurrent.futures.TimeoutError()), "")
+
+    def test_a_result_that_never_arrived_is_recorded_as_timed_out(self):
+        fake = FakeRun(delay=0.2)
+        with mock.patch.object(first_hop, "RESULT_WAIT_SECONDS", 0.01):
+            out = collect_with(fake)
+        got = out["results"]["gateway"]
+        self.assertTrue(got["error"])          # 빈 문자열이면 가드가 꺼진다
+        self.assertEqual(got["error"], PROBE_TIMED_OUT)
+        self.assertFalse(got["reachable"])
+
+    def test_the_same_branch_on_the_endpoint_too(self):
+        fake = FakeRun(delay=0.2)
+        with mock.patch.object(first_hop, "RESULT_WAIT_SECONDS", 0.01):
+            out = collect_with(fake, allow_tunnel_probe=True,
+                               tunnel_endpoint=ENDPOINT)
+        got = out["results"][first_hop.TUNNEL_ENDPOINT]
+        self.assertEqual(got["error"], PROBE_TIMED_OUT)
+        self.assertNotIn(ENDPOINT, repr(got))
+
+
+class TestTheFutureBranchCarriesNoPathOrAddress(unittest.TestCase):
+    """`util.run` 이 잡지 않는 예외의 메시지가 관측에 들어가지 않는가 (DEV-13 (e)).
+
+    `util.run` 은 FileNotFoundError·PermissionError·TimeoutExpired 만 잡는다.
+    그 밖의 OSError(예: `Exec format error`)는 `ping()` 을 뚫고 올라와 이
+    갈래에 잡히는데, 그 메시지에는 **실행 파일 경로**가 들어 있다. 감싸지
+    않은 문자열은 `redact` 가 바꾸지 않으므로(netmon/redact.py 는 ident 로
+    감싼 값만 바꾼다) 내보낼 때도 그대로 나간다.
+    """
+
+    # 합성 경로다. 실제 홈 경로를 적으면 공개 저장소에 그대로 남는다
+    # (tools/leak-check.sh 의 PATH 규칙).
+    PATH = "/opt/netmon-not-a-real-path/bin/ping"
+
+    def _oserror(self):
+        return OSError(8, "Exec format error", self.PATH)
+
+    def test_the_message_really_contains_the_path(self):
+        """전제를 코드로 고정한다. 이것이 참이라 가릴 것이 있었다."""
+        self.assertIn(self.PATH, str(self._oserror()))
+
+    def test_the_observation_keeps_only_the_kind(self):
+        def exploding(argv, timeout=None, stdin=""):
+            raise self._oserror()
+
+        with mock.patch.object(first_hop, "run", exploding):
+            out = first_hop.collect({"gateway": GW, "allow_tunnel_probe": True,
+                                     "tunnel_endpoint": ENDPOINT})
+        self.assertEqual(out["results"]["gateway"]["error"], "OSError")
+        self.assertEqual(out["results"][first_hop.TUNNEL_ENDPOINT]["error"],
+                         "OSError")
+        self.assertNotIn(self.PATH, repr(out))
+        self.assertNotIn("Exec format error", repr(out))
+
+    def test_the_burst_branch_too(self):
+        def exploding(argv, timeout=None, stdin=""):
+            raise self._oserror()
+
+        with mock.patch.object(first_hop, "run", exploding):
+            out = first_hop.collect({"gateway": GW, "first_hop_burst": True,
+                                     "interval": 5})
+        self.assertEqual(out["results"]["gateway"]["errors"], ["OSError"])
+        self.assertNotIn(self.PATH, repr(out))
+
+
+class TestThePingCountBounds(unittest.TestCase):
+    """범위 밖 `ping_count` 를 어떻게 다루는가 (DEV-13 (b)(g))."""
+
+    def test_the_upper_bound_keeps_one_command_inside_the_subprocess_limit(self):
+        """상한의 근거: 한 명령의 소요가 제한 시간을 넘으면 안 된다.
+
+        넘으면 응답이 오는 **정상 주기도** 매번 제한에 걸려 결과가 통째로
+        "재지 못함" 이 된다 — 설정 하나로 이 도구가 눈이 먼다.
+        """
+        self.assertLess(first_hop.ping_seconds(count=first_hop.MAX_COUNT),
+                        first_hop.PING_TIMEOUT_SECONDS)
+        self.assertGreater(first_hop.ping_seconds(count=first_hop.MAX_COUNT + 1),
+                           first_hop.PING_TIMEOUT_SECONDS)
+
+    def test_values_inside_the_range_are_untouched(self):
+        for n in range(1, first_hop.MAX_COUNT + 1):
+            self.assertEqual(first_hop.packets_per_command(n), n)
+        self.assertEqual(first_hop.packets_per_command(), first_hop.DEFAULT_COUNT)
+
+    def test_values_outside_the_range_are_cut_to_it(self):
+        self.assertEqual(first_hop.packets_per_command(0), 1)
+        self.assertEqual(first_hop.packets_per_command(-3), 1)
+        self.assertEqual(first_hop.packets_per_command(13), first_hop.MAX_COUNT)
+
+    def test_a_value_that_is_not_a_number_falls_back_to_the_default(self):
+        for bad in ("많이", None, [], {}, object()):
+            self.assertEqual(first_hop.packets_per_command(bad),
+                             first_hop.DEFAULT_COUNT, bad)
+
+    def test_the_argument_and_the_tally_come_from_the_same_function(self):
+        """수집기가 넘기는 `-c` 와 엔진이 세는 발 수가 같아야 한다.
+
+        어긋나면 한 끊김당 12발이라는 상한이 그만큼 틀어진다. 엔진 쪽 확인은
+        TestTheProbeCap 에 있다.
+        """
+        for raw in (0, -3, 1, 2, 13, "많이"):
+            fake = FakeRun()
+            collect_with(fake, ping_count=raw)
+            self.assertEqual(fake.calls[0]["argv"][3],
+                             str(first_hop.packets_per_command(raw)), raw)
+
+    def test_what_the_lower_bound_prevents(self):
+        """하한이 없으면 **재지 못한 주기가 "손실 100%" 로** 적힌다.
+
+        macOS ping 은 `-c 0`·`-c -3` 을 거절한다 — rc 64(EX_USAGE)에 stdout 이
+        비어 있다(실측 2026-09-22: `ping -n -c 0 -W 800 127.0.0.1` → rc 64,
+        0바이트). 64 는 `NOT_RUN_RCS` 에 없으므로 `probe_failure` 가 아무 표시도
+        남기지 않고, `parse_ping("")` 이 손실 100% 를 만든다.
+
+        여기서는 그 종료 코드를 **흉내 내어** 가드가 없을 때 무엇이 되는지
+        고정한다. ping 을 실제로 돌리지 않는다.
+        """
+        fake = FakeRun(outs=[""], rc=64)
+        with mock.patch.object(first_hop, "run", fake):
+            got = first_hop.ping(GW, count=0)
+        self.assertNotIn("error", got)          # 재지 못했다는 표시가 없다
+        self.assertEqual(got["loss_pct"], 100.0)  # 잰 것처럼 보인다
+        self.assertNotIn(64, first_hop.NOT_RUN_RCS)
+
+        # 그래서 그 인자가 애초에 나가지 못하게 막는다.
+        fake2 = FakeRun()
+        collect_with(fake2, ping_count=0)
+        self.assertEqual(fake2.calls[0]["argv"][3], "1")
+
+    def test_a_burst_is_not_cut_by_the_command_limit(self):
+        """다발은 1발짜리 명령을 여러 개 띄우므로 그 상한이 걸리지 않는다.
+
+        여기서 자르면 `ping_count` 를 올려 둔 사람이 이상 징후 주기에 오히려
+        적게 재게 된다 (AC-12).
+        """
+        fake = FakeRun()
+        out = collect_with(fake, first_hop_burst=True, interval=5, ping_count=5)
+        self.assertEqual(len(fake.calls), 5)
+        self.assertGreater(5, first_hop.MAX_COUNT)
+        self.assertEqual(out["results"]["gateway"]["sent"], 5)
+        for c in fake.calls:
+            self.assertEqual(c["argv"][3], "1")
 
 
 if __name__ == "__main__":
