@@ -34,6 +34,30 @@ def _external_resolver(dns_block: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _collect_error(exc: Exception) -> str:
+    """수집기가 던진 예외를 관측에 남길 문구로. **예외 종류 이름까지다.**
+
+    `str(exc)` 를 싣지 않는다. `Observation.errors` 는 그대로 직렬화되고
+    (netmon/model.py 의 `as_dict`), `capture` 는 그 결과를 파일로 내보낸다.
+    `--redact` 는 `ident()` 로 감싼 값만 바꾸므로(netmon/redact.py) 감싸지
+    않은 문장은 내보낼 때도 가려지지 않는다. 그런데 subprocess 는 실행 실패
+    예외에 **실행 파일 경로**를 담는다(CPython subprocess.py 의
+    `err_filename = orig_executable`; 실측 `[Errno 8] Exec format error:
+    '<경로>/netmon-not-a-binary'`). `util.run` 이 잡는 것은 FileNotFoundError·
+    PermissionError·TimeoutExpired 뿐이라 그런 OSError 는 여기까지 올라온다.
+
+    `ident()` 로 감싸지 않는 이유는 collect/link.py 의 `_error_note` 와 같다 —
+    자유 문장을 담을 `ID_KINDS` 종류가 없고, 감싸면 `redact` 가 문장 전체를
+    토큰 하나로 바꿔 오류 내용 자체가 사라진다.
+
+    잃는 것은 예외 메시지의 진단 정보다. 어느 갈래였는지는 종류 이름으로
+    가릴 수 있고, 흔한 실패(명령 없음·권한·제한 시간)는 `util.run` 이 이미
+    잡아 수집기가 고정 낱말로 적는다. 종류 이름은 비어 있는 법이 없으므로
+    "오류가 있었다" 는 사실 자체도 그대로 남는다.
+    """
+    return type(exc).__name__
+
+
 # 비교 기준을 디스크에 남기는 주기. 매 주기 쓰면 쓰기량이 20배가 된다.
 BASELINE_SAVE_SECONDS = 60.0
 
@@ -152,7 +176,9 @@ class Engine:
             try:
                 obs.data[name] = module.collect(ctx)
             except Exception as exc:
-                obs.errors[name] = "%s: %s" % (type(exc).__name__, str(exc)[:120])
+                # 예외 **메시지**는 옮기지 않는다 — 경로가 섞여 나오고, 감싸지
+                # 않은 문자열이라 `capture --redact` 에도 남는다(_collect_error).
+                obs.errors[name] = _collect_error(exc)
                 obs.data[name] = {}
 
         step(iface, "iface")
@@ -200,7 +226,9 @@ class Engine:
             try:
                 obs.data["vpn"] = vpn.collect(providers)
             except Exception as exc:
-                obs.errors["vpn"] = str(exc)[:120]
+                # 공급자 조회도 외부 명령을 쓴다. 위 `step` 과 같은 이유로
+                # 종류 이름까지만 남긴다.
+                obs.errors["vpn"] = _collect_error(exc)
 
         self._remember_for_burst(obs)
         return obs
@@ -365,8 +393,11 @@ class Engine:
             # 시작 시각이 맞아질 뿐, 끊긴 사실은 이벤트에 남지 않았다
             # (2026-09-21 링크 없는 끊김 4구간에 VPN 판정 0건).
             # 되살리는 것은 이 하나다 — `run_all` 은 여전히 돌지 않고,
-            # 조사도 열지 않는다. 링크가 없는 주기의 관측은 비어 있어
-            # 판정할 근거가 없다는 이 분기의 이유는 그대로다.
+            # 조사도 열지 않는다. 이 분기의 이유는 그대로다: 그 주기에
+            # **관측이 없어서가 아니라**(수집 단계는 전부 돈다) 주 인터페이스가
+            # 없는 주기의 경로·리졸버·ARP 가 "없음" 일 뿐이어서, 그대로 견주면
+            # 링크가 깜빡일 때마다 바뀐 것처럼 보이기 때문이다
+            # (netmon/detect 의 `is_complete`).
             #
             # 기능 스위치는 완전 주기와 **같은 눈**으로 읽는다. 설정에 없는
             # 이름은 켜진 것으로 본다(`Context.enabled` 와 같은 기본값) —

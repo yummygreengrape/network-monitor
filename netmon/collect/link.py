@@ -115,7 +115,8 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
       한꺼번에 나간다 — 송신량은 이쪽으로 늘어난다.
     - 첫 홉이 **무응답이면** 다발 주기도 무응답이라 streak 이 매 주기 올라
       3회째에 `detect/quality.py` 가 `FIRST_HOP_UNREACHABLE`(quality, medium)을
-      내고, 그 판정은 `investigate/triggers.py` 의 `kinds` 에 있어 조사가 열린다.
+      낸다. 그 판정은 `investigate/triggers.py` 의 `kinds` 에 **있다** — 조사가
+      실제로 열리는지는 귀속이 붙었는지에 또 달렸다(아래 "조사를 여는 조건").
 
     이 둘은 글이 아니라 돌아가는 테스트가 고정한다 — tests/test_link.py
     `TestTheBurstFeedbackOfAHeldCycle`(되먹임을 끈 대조 시험까지 있다).
@@ -132,13 +133,22 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
     - **판정 방법**: netmon/liveness.py:73-90 `evaluate` 의 `icmp_gw` 분기.
       ARP 로 판정하는 망과 보정 중에는 `arp.gateway_mac` 이 잡히면 `alive True`
       라 streak 이 아예 오르지 않는다. ICMP 실패가 길게 이어지면
-      `calibrate`(:93-124, `REVERT_AFTER_ICMP_FAILURES` = 20)가 `icmp_gw=False`
-      로 굳히고 `GATEWAY_ICMP_SILENT` 를 남긴다 — **우리 제한 시간이 만든
-      결과로 상대 네트워크의 성질을 단정하는 것**이고 state.json 에 남는다.
+      `calibrate`(netmon/liveness.py:93-125, `REVERT_AFTER_ICMP_FAILURES` = 20)가
+      `icmp_gw=False` 로 굳히고 `GATEWAY_ICMP_SILENT` 를 남긴다 — **우리 제한
+      시간이 만든 결과로 상대 네트워크의 성질을 단정하는 것**이고 state.json 에
+      남는다.
       굳은 뒤로는 위 두 갈래가 일어나지 않는다.
     - **streak 을 올리는 조건**: netmon/baseline.py:81-145 `update_counters`.
       `evaluate` 가 `alive False` 를 준 주기에만 오르고, `alive True` 한 번이면
       0 으로 돌아간다(그래서 위 첫째 갈래가 경보에 닿지 않는다).
+    - **조사를 여는 조건**: netmon/investigate/triggers.py:59-68 `is_meaningful`.
+      `kinds` 에 있어도 귀속(`finding.attribution`)이 붙어 있으면
+      `include_attributed` 가 거짓인 한(기본값) 열지 않는다. `quality.detect` 는
+      `FIRST_HOP_UNREACHABLE` 에 `ctx.quality_attribution()` 을 붙이므로
+      (netmon/detect/quality.py) 잠자기·인터페이스 변경·네트워크 이동·링크
+      재시작 직후처럼 첫 홉이 조용한 상황에서는 판정만 나고 조사는 열리지
+      않는다 (tests/test_link.py `TestTheBurstFeedbackOfAHeldCycle` 의
+      `test_an_explained_alert_does_not_open_an_investigation`).
 
     `rtt_ewma` 는 `gateway_reachable` 이 참일 때만 갱신돼 오염되지 않고 멈춘다.
 
@@ -391,14 +401,18 @@ def burst_probes(ctx: Dict[str, Any]) -> int:
     if not ctx.get("first_hop_burst"):
         return 1
     interval = ctx.get("interval")
+    # `OverflowError` 도 함께 잡는다. `float(10**400)`·`int(float("inf"))` 가
+    # 그것을 던지는데, JSON 은 `Infinity` 와 큰 정수를 그대로 읽으므로
+    # (`json.loads` 기본값) 손으로 고친 설정에서 올 수 있다. 잡지 않으면
+    # 수집기 주기 하나가 통째로 예외로 끝난다 — `packets_per_command` 와 같다.
     try:
         if interval is not None and float(interval) < BURST_MIN_INTERVAL:
             return 1
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         pass
     try:
         want = int(ctx.get("burst_probes") or BURST_PROBES)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         want = BURST_PROBES
     return max(1, want)
 

@@ -26,8 +26,9 @@ from netmon import engine as enginemod
 from netmon import link, liveness
 from netmon import vpn as vpnmod
 from netmon.collect import link as first_hop
-from netmon.detect import Context, network_key, quality
+from netmon.detect import SLEEP, Context, network_key, quality
 from netmon.engine import Engine
+from netmon.investigate import triggers
 from netmon import util
 from netmon.model import PROBE_NOT_RUN, PROBE_TIMED_OUT, Observation, ident
 from netmon.util import CmdResult
@@ -429,6 +430,29 @@ class TestBurstFitsTheCycle(unittest.TestCase):
         self.assertEqual(first_hop.burst_probes({"first_hop_burst": True}), 3)
         self.assertEqual(first_hop.burst_probes({"first_hop_burst": True,
                                                  "interval": "?"}), 3)
+
+    def test_unreadable_numbers_do_not_end_the_cycle(self):
+        """읽을 수 없는 수가 와도 **예외로 끝나지 않는다** (DEV-15).
+
+        `float(10**400)` 과 `int(float("inf"))` 는 `OverflowError` 를 던지는데
+        그것은 `TypeError`·`ValueError` 가 아니다. 잡지 않으면 수집기 주기
+        하나가 통째로 예외로 끝난다. JSON 은 `Infinity` 와 큰 정수를 그대로
+        읽으므로(`json.loads` 기본값) 손으로 고친 설정에서 올 수 있다.
+        `packets_per_command` 쪽은 DEV-16 이 같은 이유로 고쳤고, 여기 두
+        `except` 가 남아 있었다.
+        """
+        for interval in (10 ** 400, float("inf"), float("nan")):
+            with self.subTest(interval=interval):
+                self.assertEqual(first_hop.burst_probes(
+                    {"first_hop_burst": True, "interval": interval}), 3)
+        # 읽히는 값은 종전대로다 — 짧은 주기면 다발을 끈다.
+        self.assertEqual(first_hop.burst_probes(
+            {"first_hop_burst": True, "interval": float("-inf")}), 1)
+        for want in (float("inf"), float("nan"), "많이"):
+            with self.subTest(burst_probes=want):
+                self.assertEqual(first_hop.burst_probes(
+                    {"first_hop_burst": True, "interval": 5,
+                     "burst_probes": want}), first_hop.BURST_PROBES)
 
 
 class TestBurstPartialFailure(unittest.TestCase):
@@ -1740,11 +1764,14 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
         fake.calls = calls
         return fake
 
-    def _drive(self, out_text, cycles=6, burst=None):
+    def _drive(self, out_text, cycles=6, burst=None, attributions=()):
         """`cycles` 주기를 돌리고 주기마다 무엇이 있었는지 돌려준다.
 
         `burst` 가 None 이면 엔진이 정한다(되먹임 그대로). 값을 주면 그 값으로
         **고정**한다 — 되먹임을 끈 대조군을 만들 때 쓴다.
+
+        `attributions` 는 그 주기의 귀속이다. 기본값은 빈 목록이라 아래
+        시험들의 동작은 그대로고, 조사가 열리는지 보는 시험만 값을 준다.
         """
         fake = self._timing_run(out_text)
         eng = Engine.__new__(Engine)
@@ -1770,8 +1797,9 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
             eng._remember_for_burst(cur)
             eng.state = baseline.update_counters(eng.state, cur, [], 5.0, 5.0)
             ctx = Context(elapsed=5.0, interval=5.0, features={},
-                          state=eng.state, attributions=[],
+                          state=eng.state, attributions=list(attributions),
                           network=network_key(cur))
+            found = quality.detect(prev, cur, ctx)
             seen.append({
                 "burst": hint,
                 "counts": [c[c.index("-c") + 1] for c in cmds],
@@ -1783,7 +1811,8 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
                 "error": blk["results"]["gateway"].get("error"),
                 "errors": blk["results"]["gateway"].get("errors"),
                 "streak": eng.state.get("gw_fail_streak"),
-                "kinds": [f.kind for f in quality.detect(prev, cur, ctx)],
+                "kinds": [f.kind for f in found],
+                "findings": found,
             })
             prev = cur
         return seen
@@ -1859,6 +1888,35 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
         self.assertEqual([c["error"] for c in seen[1:]], [None, None, None])
         for c in seen:
             self.assertFalse(c["reachable"])
+
+    def test_an_explained_alert_does_not_open_an_investigation(self):
+        """경보가 나도 **귀속이 붙으면 조사는 열리지 않는다** (DEV-15).
+
+        `packets_per_command` docstring 이 "그 판정은 `kinds` 에 있다" 까지만
+        단정하게 고친 근거다. `quality.detect` 는 `FIRST_HOP_UNREACHABLE` 에
+        `ctx.quality_attribution()` 을 붙이고(netmon/detect/quality.py),
+        `triggers.is_meaningful` 은 귀속이 있고 `include_attributed` 가
+        거짓이면(기본값) 거짓을 준다(netmon/investigate/triggers.py).
+        잠자기 직후처럼 첫 홉이 조용한 전형적 상황이 그 조합이다.
+
+        위 시험들은 `attributions=[]` 로만 돌아 이 갈래를 가리지 못했다.
+        """
+        rules = triggers.merge_rules(None)
+
+        plain = [f for c in self._drive(LOST, cycles=4)
+                 for f in c["findings"] if f.kind == "FIRST_HOP_UNREACHABLE"]
+        self.assertEqual(len(plain), 1)
+        self.assertIsNone(plain[0].attribution)
+        self.assertTrue(triggers.is_meaningful(plain[0], rules))
+
+        slept = [f for c in self._drive(LOST, cycles=4, attributions=[SLEEP])
+                 for f in c["findings"] if f.kind == "FIRST_HOP_UNREACHABLE"]
+        self.assertEqual(len(slept), 1)          # 판정은 그대로 난다
+        self.assertEqual(slept[0].attribution, SLEEP)
+        self.assertFalse(triggers.is_meaningful(slept[0], rules))   # 조사는 안 열린다
+        # 설정으로 켜면 열린다 — 막는 것은 기본값이지 종류 목록이 아니다.
+        self.assertTrue(triggers.is_meaningful(
+            slept[0], triggers.merge_rules({"include_attributed": True})))
 
 
 if __name__ == "__main__":

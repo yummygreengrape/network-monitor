@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from netmon import config as configmod
+from netmon import engine as enginemod
 from netmon import redact as redactmod
+from netmon import util
+from netmon.engine import Engine
 from netmon.model import ident
+from netmon.store import Store
 from tests.helpers import (ENDPOINT, ENDPOINT_REASON, GW, GW_MAC,
                            endpoint_probe, obs, vpn_state)
 
@@ -341,6 +347,86 @@ class TestTunnelEndpointIsWrapped(unittest.TestCase):
         red = redactmod.redact(evidence, self.salt)
         self.assertNotIn(ENDPOINT, json.dumps(red))
         self.assertEqual(red["tunnel_endpoint"]["id"], "ipv4")
+
+
+class TestACollectorFailureCarriesNoPath(unittest.TestCase):
+    """수집기가 던진 예외의 **메시지**는 관측에 실리지 않는다 (DEV-15, AC-5).
+
+    `Observation.errors` 는 `as_dict` 에 그대로 실리고(netmon/model.py),
+    `capture` 는 그 결과를 파일로 내보낸다. `--redact` 는 `ident()` 로 감싼
+    값만 바꾸므로(netmon/redact.py) 감싸지 않은 문장은 가려지지 않는다.
+    그런데 subprocess 는 실행 실패 예외에 **실행 파일 경로**를 담는다.
+
+    **문자열을 손으로 만들어 넣지 않는다** — 실제로 실행 실패를 일으켜
+    파이썬이 만든 예외를 쓴다. 손으로 만든 문자열은 실제 경로를 덮지 못한다.
+    """
+
+    #: 엔진이 한 주기에 부르는 수집기들. 하나만 터뜨리고 나머지는 비운다.
+    COLLECTORS = ("iface", "arp", "dhcp", "dns", "route", "wifi", "link")
+
+    def setUp(self):
+        self.salt = b"test-salt-not-a-real-one"
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.bad = os.path.join(self.dir, "netmon-not-a-binary")
+        with open(self.bad, "w", encoding="utf-8") as fh:
+            fh.write("실행 형식이 아니다\n")
+        os.chmod(self.bad, 0o755)
+
+    def _explode(self, *_args, **_kwargs):
+        """실행 실패를 실제로 일으킨다. `util.run` 이 잡지 않는 갈래다."""
+        util.run([self.bad])
+        raise AssertionError("실행이 실패해야 한다")
+
+    def _engine(self):
+        cfg = configmod.load(os.path.join(self.dir, "no-config.json"))
+        return Engine(cfg, Store(self.dir))
+
+    def _observe(self, victim):
+        eng = self._engine()
+        with mock.patch.multiple(
+                enginemod,
+                **{name: mock.Mock(collect=(self._explode if name == victim
+                                            else (lambda ctx: {})))
+                   for name in self.COLLECTORS}):
+            return eng.observe()
+
+    def test_the_exception_really_carries_the_path(self):
+        """이 시험의 재료가 실재함을 먼저 못 박는다.
+
+        여기가 깨지면 아래 시험은 아무것도 가리지 않는 빈 시험이 된다.
+        """
+        with self.assertRaises(OSError) as caught:
+            util.run([self.bad])
+        self.assertIn(self.bad, str(caught.exception))
+
+    def test_the_message_never_reaches_the_observation(self):
+        o = self._observe("iface")
+        self.assertEqual(o.errors, {"iface": "OSError"})
+        for text in (json.dumps(o.as_dict(), ensure_ascii=False),
+                     json.dumps(redactmod.redact(o.as_dict(), self.salt),
+                                ensure_ascii=False)):
+            self.assertNotIn(self.bad, text)
+            self.assertNotIn(self.dir, text)
+            self.assertNotIn("Exec format error", text)
+
+    def test_the_vpn_query_is_the_same(self):
+        """공급자 조회 갈래도 같다 — 그쪽도 외부 명령을 쓴다."""
+        eng = self._engine()
+        eng.cfg.set_feature("vpn.enabled", True)
+        with mock.patch.multiple(
+                enginemod,
+                **{name: mock.Mock(collect=(lambda ctx: {}))
+                   for name in self.COLLECTORS}), \
+             mock.patch.object(enginemod.vpn, "resolve",
+                               return_value=["warp"]), \
+             mock.patch.object(enginemod.vpn, "collect", self._explode):
+            o = eng.observe()
+        self.assertEqual(o.errors, {"vpn": "OSError"})
+        text = json.dumps(redactmod.redact(o.as_dict(), self.salt),
+                          ensure_ascii=False)
+        self.assertNotIn(self.bad, text)
+        self.assertNotIn(self.dir, text)
 
 
 if __name__ == "__main__":

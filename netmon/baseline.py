@@ -214,8 +214,19 @@ def update_vpn_down(state: Dict[str, Any], cur: Observation,
             #
             # 시각이 다른 표시는 여기서 지운다. 보관분과 짝이 맞지 않는 표시는
             # 지난 끊김의 것이고, 남겨 두면 다음 복구가 무엇의 끝인지 잘못
-            # 가린다. 표시가 영원히 남지도 않는다 — 보관분이 사라지는 주기에
-            # (다시 끊기거나, 판정이 도는 주기) 같이 사라진다.
+            # 가린다. **이 함수가 표시를 지우는 자리는 둘뿐이다** — 판정이 도는
+            # 주기의 위 갈래(`judged`)와 여기다. 다시 끊기는 주기(맨 위 갈래)는
+            # 표시를 건드리지 않는다. 거기서 옛 표시가 사라지는 것은 같은 주기의
+            # `without_link`(netmon/detect/vpn.py)가 새 시각으로 **덮어쓸 때**
+            # 뿐이고, 덮어쓰지 않는 조합(공급자 상태가 `unknown`·빈 값,
+            # `detect.vpn` 이 꺼짐, 프로세스의 첫 주기라 직전 VPN 블록이 없음)
+            # 에서는 짝 없는 옛 표시가 그 끊김 동안 남는다. 그 표시로는 아무
+            # 판정도 나지 않는다 — 읽는 쪽 둘(`reported_without_link` 과 그것을
+            # 부르는 `already_reported`)이 지금 끊김의 시각과 일치할 것을 요구
+            # 한다(tests/test_detect_vpn.py
+            # `test_the_mark_only_covers_the_outage_it_was_made_for`). 그리고
+            # 공급자가 다시 `connected` 로 보이는 주기에 위 두 자리 중 하나가
+            # 지운다.
             kept = _pending_since(pending, name)
             if kept is None or reported.get(name) != kept:
                 reported.pop(name, None)
