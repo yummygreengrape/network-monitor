@@ -95,12 +95,19 @@ def _endpoint_evidence(cur: Observation) -> Dict[str, Any]:
     응답이 없다고 해서 "막혔다" 고 적지 않는다. 여기서 말할 수 있는 것은
     "이 주소로 보낸 ICMP 에 응답이 있었는가" 까지다 — 리졸버 ICMP 무응답을
     증거로 쓰지 않기로 한 것과 같은 이유다.
+
+    예외가 하나 있다. 한 구간의 상한에 닿아 **일부러 보내지 않은** 주기는
+    그 사실을 남긴다(`tunnel_endpoint_capped`). 그때도 도달성은 적지
+    않는다 — 보내지 않았으므로 아는 바가 없다.
     """
+    out: Dict[str, Any] = {}
+    if (cur.get("link") or {}).get("tunnel_endpoint_capped"):
+        out["tunnel_endpoint_capped"] = True
     results = cur.get("link", "results")
     got = results.get("tunnel_endpoint") if isinstance(results, dict) else None
     if not isinstance(got, dict):
-        return {}
-    out: Dict[str, Any] = {"tunnel_endpoint_reachable": bool(got.get("reachable"))}
+        return out
+    out["tunnel_endpoint_reachable"] = bool(got.get("reachable"))
     targets = cur.get("link", "targets")
     addr = targets.get("tunnel_endpoint") if isinstance(targets, dict) else None
     if addr is not None:

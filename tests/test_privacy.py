@@ -197,13 +197,106 @@ class TestTunnelEndpointConsent(unittest.TestCase):
 
         그 화면에 나오는 문구는 별도 카탈로그라(`netmon/messages`), 여기서
         같이 보지 않으면 "말하지 않고 켜는" 상태가 된다.
+
+        **문구가 무엇을 말해야 하는지는 아래
+        `TestTheFourTextsSayTheSameThing` 가 본다.** 여기서 보던
+        "끊긴" 단언은 지웠다 — `connecting` 을 "끊김" 이라 부르지 않기로 한
+        결정(AC-9)과 어긋나고, 실제 동작(`disconnected`·`connecting` 둘 다)
+        보다 좁게 적는 문구를 고정하고 있었다 (AC-4 수정분).
         """
         from netmon import messages
 
         self.assertIn(self.FEATURE, configmod.CONSENTS["external_probes"]["enables"])
         self.assertIn("터널", messages.get("WZ_EXTERNAL_BODY", "ko"))
-        self.assertIn("끊긴", messages.get("WZ_EXTERNAL_BODY", "ko"))
         self.assertIn("tunnel endpoint", messages.get("WZ_EXTERNAL_BODY", "en"))
+
+
+# 네 곳이 같은 문장으로 적어야 하는 것 (AC-4 수정분, 사용자 결정 2026-09-22).
+# 여기 있는 글자가 정본이다.
+CANON_KO = ("VPN 이 연결돼 있지 않은 동안(끊김·재협상) 공급자가 사유에 적어 준 "
+            "터널 상대편(엔드포인트) 주소로 ICMP 를 보냅니다(ping_count 만큼, 기본 1발). "
+            "보낼지는 직전 주기의 상태로 정하므로 다시 연결된 직후 첫 주기에도 한 번 나가고, "
+            "한 구간에 최대 12번까지만 보냅니다.")
+
+CANON_EN = ("While a VPN is not connected (down or renegotiating) it sends ICMP "
+            "to the tunnel endpoint address the provider reported — ping_count "
+            "packets, 1 by default. The decision uses the previous cycle's state, "
+            "so one probe also goes out on the first cycle after reconnecting, "
+            "and at most 12 go out per stretch.")
+
+
+def _flat(text):
+    """줄바꿈·들여쓰기만 다른 같은 문장을 비교할 수 있게 편다."""
+    return " ".join(text.split())
+
+
+class TestTheFourTextsSayTheSameThing(unittest.TestCase):
+    """README·동의 설명·마법사 문구가 한 문장으로 통일돼 있는가 (AC-4 수정분).
+
+    네 곳이 갈려 있었다 — README 만 코드와 맞고 나머지 셋은 "VPN 이 끊긴
+    동안" 이라 `connecting` 주기를 빠뜨렸다. 읽는 사람이 어느 것이 실제
+    동작인지 알 수 없는 상태였고, 고칠 때 한 곳만 고치면 다시 갈린다.
+
+    문장에는 네 가지가 들어 있어야 한다.
+      - 어떤 상태에 보내는가 (연결돼 있지 않은 동안 — 끊김·재협상 둘 다)
+      - 몇 발인가 (`ping_count` 만큼. "한 발" 로 단정하지 않는다)
+      - 직전 주기 기준이라 다시 연결된 직후 첫 주기에도 나간다
+      - 한 구간의 상한 (12번)
+    """
+
+    def _readme(self):
+        import netmon
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(netmon.__file__)))
+        with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_readme_carries_the_sentence(self):
+        self.assertIn(CANON_KO, _flat(self._readme()))
+
+    def test_the_consent_text_carries_the_sentence(self):
+        self.assertIn(CANON_KO,
+                      _flat(configmod.CONSENTS["external_probes"]["sends_out"]))
+
+    def test_the_wizard_carries_the_sentence(self):
+        from netmon import messages
+
+        self.assertIn(CANON_KO, _flat(messages.get("WZ_EXTERNAL_BODY", "ko")))
+        self.assertIn(CANON_EN, _flat(messages.get("WZ_EXTERNAL_BODY", "en")))
+
+    def test_the_purpose_text_uses_the_same_condition(self):
+        """`why` 는 목적을 적는 자리라 문장이 다르지만 조건은 같아야 한다."""
+        self.assertIn("연결돼 있지 않은 동안(끊김·재협상)",
+                      _flat(configmod.CONSENTS["external_probes"]["why"]))
+
+    def test_no_text_calls_renegotiation_a_disconnection(self):
+        """`connecting` 을 "끊김" 이라고 적지 않는다 (AC-9).
+
+        그렇게 적으면 실제로 보내는 두 상태 중 하나가 문구에서 사라진다.
+        """
+        from netmon import messages
+
+        texts = [_flat(self._readme()),
+                 _flat(configmod.CONSENTS["external_probes"]["why"]),
+                 _flat(configmod.CONSENTS["external_probes"]["sends_out"]),
+                 _flat(messages.get("WZ_EXTERNAL_BODY", "ko")),
+                 _flat(messages.get("WZ_ROW_EXTERNAL", "ko"))]
+        for text in texts:
+            for wrong in ("VPN 이 끊긴 동안", "VPN 이 끊긴 주기", "끊겨 있는 주기에만"):
+                self.assertNotIn(wrong, text)
+
+    def test_the_summary_row_names_the_condition(self):
+        """한 줄 요약도 언제 나가는지는 밝힌다."""
+        from netmon import messages
+
+        self.assertIn("비연결 주기", messages.get("WZ_ROW_EXTERNAL", "ko"))
+        self.assertIn("not connected", messages.get("WZ_ROW_EXTERNAL", "en"))
+
+    def test_the_readme_does_not_promise_a_single_packet(self):
+        """발 수는 `ping_count` 가 정한다. 설정과 무관하게 단정하지 않는다."""
+        readme = _flat(self._readme())
+        self.assertNotIn("ICMP 한 발", readme)
+        self.assertIn("ping_count 만큼", readme)
 
 
 class TestTunnelEndpointIsWrapped(unittest.TestCase):

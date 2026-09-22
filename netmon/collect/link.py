@@ -97,6 +97,17 @@ BURST_NOTE = "같은 순간 동시 측정 — 시간에 걸친 지터가 아님"
 # 쓰인다(netmon/detect/vpn.py).
 TUNNEL_ENDPOINT = "tunnel_endpoint"
 
+# 이 구간의 상한(netmon/vpn.TUNNEL_PROBE_CAP)에 닿아 **일부러 보내지 않은**
+# 주기라는 표시. 결과를 만들지 않는 다른 이유들(동의 없음, 주소 모름)과
+# 구분하려고 둔다.
+#
+# 기존 자리로는 적을 수 없었다. `results[TUNNEL_ENDPOINT]["error"]` 에 적으면
+# 판정이 같은 결과에서 `tunnel_endpoint_reachable: False` 도 함께 만들어
+# (netmon/detect/vpn._endpoint_evidence) **보내지도 않은 패킷의 무응답**을
+# 도달 실패로 기록한다 — 이 작업이 없애려는 결함이 그것이다. 블록의 `note`
+# 는 "측정 대상 없음" 이라는 다른 뜻으로 이미 쓰인다.
+TUNNEL_CAPPED = "tunnel_endpoint_capped"
+
 
 def _error_note(name: str, exc: Exception) -> str:
     """측정이 실패했을 때 관측에 남길 문구.
@@ -300,8 +311,12 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
     if ctx.get("allow_tunnel_probe") and endpoint and public_unicast(endpoint):
         targets[TUNNEL_ENDPOINT] = str(endpoint)
 
+    capped = {TUNNEL_CAPPED: True} if ctx.get("tunnel_probe_capped") else {}
+
     if not targets:
-        return {"targets": {}, "note": "측정 대상 없음 (게이트웨이 미확인)"}
+        out = {"targets": {}, "note": "측정 대상 없음 (게이트웨이 미확인)"}
+        out.update(capped)
+        return out
 
     count = int(ctx.get("ping_count", DEFAULT_COUNT))
     probes = burst_probes(ctx) if "gateway" in targets else 1
@@ -344,4 +359,5 @@ def collect(ctx: Dict[str, Any] = None) -> Dict[str, Any]:
     if "gateway" in targets:
         # 첫 홉 증거가 1발인지 다발인지 판정이 알아야 한다 (요약문에 드러낸다).
         out["first_hop_probes"] = probes
+    out.update(capped)
     return out

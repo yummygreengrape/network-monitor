@@ -1066,6 +1066,60 @@ class TestWhichCycleGetsAnAddress(unittest.TestCase):
                       vpn_state("disconnected", reason=None)):
             self.assertIsNone(vpnmod.tunnel_endpoint(block), block)
 
+    def test_unknown_is_not_a_trigger(self):
+        """조회가 실패했을 때의 사유는 stderr 문자열이다 (AC-4 수정분).
+
+        `warp-cli` 호출이 실패하면 `reason` 에 stderr 가 들어가고
+        (`netmon/vpn/__init__.py` 의 `status` 들), 거기 섞인 주소는 터널
+        상대편이 아니다. 끝나는 조건도 없어서 설치만 하고 꺼 둔 공급자나
+        조회가 계속 실패하는 공급자가 있으면 무한히 나간다.
+        """
+        block = vpn_state("unknown", reason=ENDPOINT_REASON)
+        self.assertIsNone(vpnmod.tunnel_endpoint(block))
+
+    def test_only_two_states_send(self):
+        """보내는 상태는 disconnected 와 connecting 둘뿐이다."""
+        self.assertEqual(vpnmod.PROBE_STATES, ("disconnected", "connecting"))
+        for state in ("disconnected", "connecting"):
+            self.assertEqual(
+                vpnmod.tunnel_endpoint(vpn_state(state, reason=ENDPOINT_REASON)),
+                ENDPOINT, state)
+        for state in ("connected", "unknown", "", None, "disconnecting"):
+            self.assertIsNone(
+                vpnmod.tunnel_endpoint(vpn_state(state, reason=ENDPOINT_REASON)),
+                state)
+
+    def test_an_unknown_provider_does_not_lend_its_address_to_another(self):
+        """조회 실패한 공급자의 문자열이 다른 공급자 때문에 딸려 나가지 않는다."""
+        block = dict(vpn_state("unknown", reason=ENDPOINT_REASON, provider="warp"))
+        block.update(vpn_state("connected", reason=None, provider="tailscale"))
+        self.assertIsNone(vpnmod.tunnel_endpoint(block))
+
+
+class TestTheProbeWindow(unittest.TestCase):
+    """상한을 세는 단위 — 연결돼 있지 않은 구간 (AC-4 수정분)."""
+
+    def test_a_not_connected_provider_keeps_the_window_open(self):
+        for state in ("disconnected", "connecting"):
+            self.assertTrue(vpnmod.probe_window_open(vpn_state(state)), state)
+
+    def test_unknown_keeps_it_open_without_sending(self):
+        """모른다는 것은 구간이 끝났다는 뜻이 아니다.
+
+        닫는 것으로 보면 조회가 간헐적으로 실패하는 동안 상한이 되살아나
+        한 구간에 12번보다 많이 나간다. 그 주기에 보내지는 않는다.
+        """
+        block = vpn_state("unknown", reason=ENDPOINT_REASON)
+        self.assertTrue(vpnmod.probe_window_open(block))
+        self.assertIsNone(vpnmod.tunnel_endpoint(block))
+
+    def test_connected_closes_it(self):
+        self.assertFalse(vpnmod.probe_window_open(vpn_state("connected")))
+
+    def test_nothing_to_look_at_closes_it(self):
+        for block in (None, {}, [], "warp", {"warp": None}):
+            self.assertFalse(vpnmod.probe_window_open(block), block)
+
 
 class TestTunnelEndpointEvidence(unittest.TestCase):
     """끊김 판정의 증거에 실린다 (QA-6, QA-7, AC-5, AC-6).
@@ -1101,6 +1155,27 @@ class TestTunnelEndpointEvidence(unittest.TestCase):
         f = self._drop(error="TimeoutError")
         self.assertEqual(f.evidence["tunnel_endpoint_error"], "TimeoutError")
         self.assertFalse(f.evidence["tunnel_endpoint_reachable"])
+
+    def test_reaching_the_cap_is_recorded_without_claiming_a_result(self):
+        """상한에 닿아 보내지 않은 주기는 그 사실만 남는다 (AC-4 수정분).
+
+        보내지 않았으므로 도달성은 적지 않는다. "재지 않은 주기" 와
+        구분되지 않으면 기록을 읽는 쪽이 안 보낸 이유를 알 수 없다.
+        """
+        prev = obs(vpn=vpn_state("connected"), security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:15Z",
+                  vpn=vpn_state("disconnected", reason=ENDPOINT_REASON),
+                  security="WPA2_PSK")
+        cur.data["link"]["tunnel_endpoint_capped"] = True
+        f = by_kind(judge(prev, cur), "VPN_DISCONNECTED")
+        self.assertTrue(f.evidence["tunnel_endpoint_capped"])
+        self.assertNotIn("tunnel_endpoint_reachable", f.evidence)
+        self.assertNotIn("tunnel_endpoint_error", f.evidence)
+        self.assertNotIn(ENDPOINT, f.summary)
+
+    def test_a_measured_cycle_is_not_marked_as_capped(self):
+        f = self._drop()
+        self.assertNotIn("tunnel_endpoint_capped", f.evidence)
 
     def test_an_unmeasured_cycle_makes_no_keys_at_all(self):
         """동의가 없거나 주소를 몰랐던 주기를 '무응답' 으로 읽히게 두지 않는다."""

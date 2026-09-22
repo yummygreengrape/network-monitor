@@ -35,6 +35,10 @@ def _external_resolver(dns_block: Dict[str, Any]) -> Optional[str]:
 # 비교 기준을 디스크에 남기는 주기. 매 주기 쓰면 쓰기량이 20배가 된다.
 BASELINE_SAVE_SECONDS = 60.0
 
+# 이 구간에 터널 엔드포인트를 몇 번 쟀는가. 상한(vpn.TUNNEL_PROBE_CAP)을
+# 세는 자리다. **없어도 동작한다** — 없으면 0 이다.
+ENDPOINT_PROBES_KEY = "vpn_endpoint_probes"
+
 # 커널 ARP 로그를 읽는 간격과 조회 창. `log show` 는 고정 1초쯤 들고 창이
 # 커지면 더 든다(1시간치 8.9초). 간격보다 창을 넉넉히 잡아 빈틈을 막는다.
 ARP_LOG_EVERY_SECONDS = 60.0
@@ -109,6 +113,7 @@ class Engine:
     # --- 수집 ---
     def observe(self) -> Observation:
         obs = Observation(ts=ts_now())
+        endpoint, endpoint_capped = self._tunnel_probe_plan()
         ctx: Dict[str, Any] = {
             "allow_location": self.cfg.effective("detect.evil_twin"),
             "allow_external": self.cfg.effective("detect.public_ip"),
@@ -124,7 +129,11 @@ class Engine:
             # 주소는 직전 주기의 VPN 관측에서 온다. 둘 중 하나라도 없으면
             # 수집기는 대상을 만들지 않는다 (netmon/collect/link.py).
             "allow_tunnel_probe": self.cfg.effective("vpn.tunnel_probe"),
-            "tunnel_endpoint": self._tunnel_endpoint(),
+            "tunnel_endpoint": endpoint,
+            # 상한에 닿아 보내지 않은 주기임을 관측에 남기려고 함께 넘긴다.
+            # 주소가 없어서 재지 않은 주기와 구분되지 않으면, 나중에 기록을
+            # 읽는 쪽이 "안 보냈다" 의 이유를 알 수 없다.
+            "tunnel_probe_capped": endpoint_capped,
         }
 
         def step(module, name: str) -> None:
@@ -214,10 +223,42 @@ class Engine:
         `self._last_vpn` 은 다발 측정 판단이 쓰는 것과 같은, 직전 주기의 VPN
         블록이다(`_remember_for_burst`). 링크가 없어 판정을 건너뛴 주기도
         여기에는 남는다 — VPN 상태는 링크가 없어도 수집되기 때문이다.
+
+        어떤 상태에 보내는지(`vpn.PROBE_STATES`)와 한 구간의 상한
+        (`vpn.TUNNEL_PROBE_CAP`)은 `_tunnel_probe_plan` 이 본다.
         """
+        return self._tunnel_probe_plan()[0]
+
+    def _tunnel_probe_plan(self) -> Tuple[Optional[str], bool]:
+        """(이번 주기에 잴 주소, 상한에 닿아 보내지 않는 주기인가).
+
+        **한 주기에 한 번만 부른다** — 보내기로 정하면서 그 사실을 세기
+        때문이다. 세는 단위는 연결돼 있지 않은 구간 하나이고
+        (`vpn.probe_window_open`), 구간이 닫히면 0 부터 다시 센다.
+
+        센 값은 `state.json` 에 둔다. 메모리에 두면 launchd 가 되살릴 때마다
+        0 이 되어(이 파일 위쪽 주석 — 의도치 않은 재시작이 잦다) 긴 끊김에서
+        상한이 사실상 없어진다. **키가 없어도 동작한다** — 없으면 0 이고,
+        숫자가 아닌 값이 들어 있어도 0 으로 본다.
+        """
+        if not vpn.probe_window_open(self._last_vpn):
+            self.state.pop(ENDPOINT_PROBES_KEY, None)
+            return None, False
         if not self.cfg.effective("vpn.tunnel_probe"):
-            return None
-        return vpn.tunnel_endpoint(self._last_vpn)
+            return None, False
+        # **주소를 먼저 고른다.** 상한을 먼저 보면, 보낼 주소가 없어서 어차피
+        # 나가지 않았을 주기까지 "상한 때문에 안 보냄" 으로 적힌다. 고르는
+        # 것만으로는 아무것도 나가지 않는다 (문자열 파싱이다).
+        addr = vpn.tunnel_endpoint(self._last_vpn)
+        if addr is None:
+            # 고르지 못한 주기는 보내지 않은 주기다. 세지 않는다.
+            return None, False
+        sent = self.state.get(ENDPOINT_PROBES_KEY)
+        sent = sent if isinstance(sent, int) and not isinstance(sent, bool) else 0
+        if sent >= vpn.TUNNEL_PROBE_CAP:
+            return None, True
+        self.state[ENDPOINT_PROBES_KEY] = sent + 1
+        return addr, False
 
     def _remember_for_burst(self, obs: Observation) -> None:
         """다음 주기의 다발 측정 판단에 쓸, 직전 두 주기의 상태를 남긴다.
