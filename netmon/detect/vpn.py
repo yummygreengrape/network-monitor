@@ -96,7 +96,7 @@ def _endpoint_evidence(cur: Observation) -> Dict[str, Any]:
     "이 주소로 보낸 ICMP 에 응답이 있었는가" 까지다 — 리졸버 ICMP 무응답을
     증거로 쓰지 않기로 한 것과 같은 이유다.
 
-    예외가 하나 있다. 한 구간의 상한에 닿아 **일부러 보내지 않은** 주기는
+    예외가 하나 있다. 한 끊김의 상한에 닿아 **일부러 보내지 않은** 주기는
     그 사실을 남긴다(`tunnel_endpoint_capped`). 그때도 도달성은 적지
     않는다 — 보내지 않았으므로 아는 바가 없다.
     """
@@ -415,6 +415,33 @@ def _down_record(state: Any, name: str):
     return since, unmeasured
 
 
+def _endpoint_probe_record(state: Any, name: str) -> Dict[str, Any]:
+    """이 끊김 동안 터널 엔드포인트로 나간 발 수와 상한에 닿았는지.
+
+    **복구 판정에만 붙인다.** 상한에 닿는 것은 끊김이 이어지는 주기에
+    일어나는데 끊김 판정은 전환 주기에만 나므로(이 파일 아래 `judge`),
+    상한에 닿았다는 사실은 그대로 두면 관측 표본에만 남고 이벤트에는
+    실리지 않는다. 그러면 이벤트만 읽는 쪽에서는 "재지 않은 끊김" 과
+    "12발을 다 쓰고 멈춘 끊김" 이 구분되지 않는다.
+
+    읽는 값은 엔진이 세어 둔 `state.json` 의 `vpn_endpoint_probes` 다
+    (netmon/engine.py). 그 기록은 공급자가 다시 연결된 것을 **다음 주기**에
+    보고 지워지므로, 복구를 알리는 이 주기에는 아직 남아 있다.
+
+    **기록이 없으면 아무 키도 만들지 않는다.** "0발" 과 "기록이 없다" 는
+    다르다 — 기능이 꺼져 있었거나, 주소를 한 번도 못 얻었거나, 판정이 여러
+    주기 늦어 기록이 이미 지워진 뒤일 수 있다. 그 셋을 "0발 나갔다" 로
+    적으면 관측하지 않은 것을 관측한 것처럼 적는 것이 된다.
+    """
+    counts = state.get("vpn_endpoint_probes") if isinstance(state, dict) else None
+    rec = counts.get(name) if isinstance(counts, dict) else None
+    shots = rec.get("shots") if isinstance(rec, dict) else None
+    if not isinstance(shots, int) or isinstance(shots, bool) or shots < 0:
+        return {}
+    return {"tunnel_endpoint_shots": shots,
+            "tunnel_endpoint_cap_reached": bool(rec.get("capped"))}
+
+
 def _is_ts(value: Any) -> bool:
     if not isinstance(value, str):
         return False
@@ -602,15 +629,17 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             since, acc = _down_record(ctx.state, name)
             down_s = _elapsed_seconds(since, cur.ts)
             unmeasured = _unmeasured_seconds(acc, down_s)
+            evidence = {"provider": name, "down_since": since,
+                        "down_seconds": down_s,
+                        "unmeasured_seconds": unmeasured,
+                        "prev_state": was}
+            evidence.update(_endpoint_probe_record(ctx.state, name))
             out.append(Finding(
                 axis=QUALITY, kind="VPN_RECONNECTED",
                 confidence=CONFIRMED, severity=INFO_SEV,
                 summary=msg.VPN_RECONNECTED % (name, _down_phrase(since, down_s,
                                                                   unmeasured)),
-                evidence={"provider": name, "down_since": since,
-                          "down_seconds": down_s,
-                          "unmeasured_seconds": unmeasured,
-                          "prev_state": was},
+                evidence=evidence,
                 attribution=ctx.quality_attribution(),
             ))
         else:

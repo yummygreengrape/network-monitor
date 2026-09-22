@@ -1097,28 +1097,125 @@ class TestWhichCycleGetsAnAddress(unittest.TestCase):
 
 
 class TestTheProbeWindow(unittest.TestCase):
-    """상한을 세는 단위 — 연결돼 있지 않은 구간 (AC-4 수정분)."""
+    """상한을 세는 단위 — **공급자 하나의 끊김 하나** (AC-4 수정분).
 
-    def test_a_not_connected_provider_keeps_the_window_open(self):
+    처음에는 "아무 공급자나 비connected 면 창이 열려 있다" 로 셌는데, 그러면
+    `MacOSNative` 처럼 담당할 서비스가 없어 늘 `unknown` 을 돌려주는 공급자가
+    창을 영영 열어 둔다(`vpn/__init__.py` 의 "직접 담당할 서비스 없음").
+    `scutil` 은 모든 맥에 있어 기본 설정에서 그 공급자가 늘 목록에 들므로,
+    상한이 "한 끊김" 이 아니라 프로세스 수명당 예산이 됐다 — 첫 12발을 쓰고
+    나면 그 뒤의 어떤 끊김에서도 한 발도 나가지 않는다 (검수 1차 지적).
+    """
+
+    def _rec(self, shots=3, capped=False):
+        return {"warp": {"shots": shots, "capped": capped}}
+
+    def test_a_not_connected_provider_keeps_its_record(self):
         for state in ("disconnected", "connecting"):
-            self.assertTrue(vpnmod.probe_window_open(vpn_state(state)), state)
+            self.assertEqual(
+                vpnmod.carry_probe_counts(self._rec(), vpn_state(state)),
+                {"warp": {"shots": 3, "capped": False}}, state)
 
-    def test_unknown_keeps_it_open_without_sending(self):
-        """모른다는 것은 구간이 끝났다는 뜻이 아니다.
+    def test_connected_drops_its_record(self):
+        self.assertEqual(
+            vpnmod.carry_probe_counts(self._rec(), vpn_state("connected")), {})
+
+    def test_unknown_keeps_a_record_but_never_makes_one(self):
+        """모른다는 것은 끊김이 끝났다는 뜻도, 시작됐다는 뜻도 아니다.
 
         닫는 것으로 보면 조회가 간헐적으로 실패하는 동안 상한이 되살아나
-        한 구간에 12번보다 많이 나간다. 그 주기에 보내지는 않는다.
+        한 끊김에 12발보다 많이 나간다. 여는 것으로 보면 늘 `unknown` 인
+        공급자가 창을 영영 열어 둔다. 그 주기에 보내지도 않는다.
         """
         block = vpn_state("unknown", reason=ENDPOINT_REASON)
-        self.assertTrue(vpnmod.probe_window_open(block))
+        self.assertEqual(vpnmod.carry_probe_counts(self._rec(), block),
+                         {"warp": {"shots": 3, "capped": False}})
+        self.assertEqual(vpnmod.carry_probe_counts({}, block), {})
         self.assertIsNone(vpnmod.tunnel_endpoint(block))
 
-    def test_connected_closes_it(self):
-        self.assertFalse(vpnmod.probe_window_open(vpn_state("connected")))
+    def test_an_always_unknown_provider_does_not_hold_another_open(self):
+        """늘 `unknown` 인 공급자가 있어도 다른 공급자의 끊김은 제때 끝난다.
 
-    def test_nothing_to_look_at_closes_it(self):
+        이것이 상한을 공급자별로 세는 까닭이다 (검수 1차 지적).
+        """
+        block = {"macos": {"provider": "macos", "state": "unknown",
+                           "reason": "직접 담당할 서비스 없음 (전용 공급자가 처리)"},
+                 "warp": {"provider": "warp", "state": "connected", "reason": None}}
+        self.assertEqual(vpnmod.carry_probe_counts(self._rec(), block), {})
+
+    def test_a_provider_missing_from_the_block_keeps_its_record(self):
+        """관측하지 못한 주기를 "연결됐다" 로 읽지 않는다."""
         for block in (None, {}, [], "warp", {"warp": None}):
-            self.assertFalse(vpnmod.probe_window_open(block), block)
+            self.assertEqual(vpnmod.carry_probe_counts(self._rec(), block),
+                             {"warp": {"shots": 3, "capped": False}}, block)
+
+    def test_the_capped_mark_is_carried(self):
+        self.assertEqual(
+            vpnmod.carry_probe_counts(self._rec(shots=12, capped=True),
+                                      vpn_state("disconnected")),
+            {"warp": {"shots": 12, "capped": True}})
+
+    def test_a_broken_record_counts_as_no_record(self):
+        """옛 판의 정수 하나를 포함해, 모양이 다르면 0 부터 센다."""
+        block = vpn_state("disconnected", reason=ENDPOINT_REASON)
+        for raw in (None, 12, "많이", True, [], {"warp": 12}, {"warp": None},
+                    {"warp": {"shots": -1}}, {"warp": {"shots": "많이"}},
+                    {"warp": {"shots": True}}, {"warp": {}}):
+            self.assertEqual(vpnmod.carry_probe_counts(raw, block), {}, raw)
+
+
+class TestTheOutageCarriesItsEndpointTally(unittest.TestCase):
+    """복구 판정의 증거에 그 끊김의 엔드포인트 측정 요약이 실린다.
+
+    상한에 닿는 것은 끊김이 **이어지는** 주기에 일어나는데, 끊김 판정은
+    connected → 그 밖 **전환 주기**에만 난다. 그래서 `tunnel_endpoint_capped`
+    는 관측 표본에만 남고 이벤트에는 실리지 않아, 이벤트만 읽는 쪽에서는
+    "12발을 다 쓰고 멈춘 끊김" 과 "한 발도 재지 않은 끊김" 이 구분되지
+    않았다 (검수 1차 지적). 새 판정 종류도 새 문구도 만들지 않고, 이미
+    `down_seconds`·`unmeasured_seconds` 를 싣고 있는 자리에 값으로 남긴다.
+    """
+
+    def _reconnect(self, probes):
+        prev = obs(ts="2026-01-01T00:07:25Z", vpn=vpn_state("disconnected"))
+        cur = obs(ts="2026-01-01T00:07:30Z", vpn=vpn_state("connected"))
+        state = {"icmp_gw": True,
+                 "vpn_down_since": {"warp": "2026-01-01T00:00:00Z"}}
+        if probes is not None:
+            state["vpn_endpoint_probes"] = probes
+        return by_kind(judge(prev, cur, state=state), "VPN_RECONNECTED")
+
+    def test_a_capped_outage_says_so_with_values(self):
+        f = self._reconnect({"warp": {"shots": 12, "capped": True}})
+        self.assertEqual(f.evidence["tunnel_endpoint_shots"], 12)
+        self.assertTrue(f.evidence["tunnel_endpoint_cap_reached"])
+        # 요약문은 그대로다 — 새 문구를 만들지 않는다.
+        self.assertEqual(f.summary, msg.VPN_RECONNECTED
+                         % ("warp", msg.VPN_SINCE % "00:00:00"))
+
+    def test_an_outage_that_stopped_early_is_not_read_as_capped(self):
+        f = self._reconnect({"warp": {"shots": 3, "capped": False}})
+        self.assertEqual(f.evidence["tunnel_endpoint_shots"], 3)
+        self.assertFalse(f.evidence["tunnel_endpoint_cap_reached"])
+
+    def test_no_record_is_not_written_as_zero(self):
+        """기록이 없는 것과 "0발 나갔다" 는 다르다.
+
+        기능이 꺼져 있었거나 주소를 한 번도 못 얻었을 수 있다. 없는 측정을
+        0 으로 적으면 관측하지 않은 것을 관측한 것처럼 적는 것이 된다.
+        """
+        for probes in (None, {}, {"tailscale": {"shots": 4}}, 12, "많이",
+                       {"warp": 12}, {"warp": {"shots": "많이"}},
+                       {"warp": {"shots": True}}):
+            f = self._reconnect(probes)
+            self.assertNotIn("tunnel_endpoint_shots", f.evidence, probes)
+            self.assertNotIn("tunnel_endpoint_cap_reached", f.evidence, probes)
+
+    def test_the_other_evidence_is_untouched(self):
+        f = self._reconnect({"warp": {"shots": 12, "capped": True}})
+        self.assertEqual(f.evidence["down_since"], "2026-01-01T00:00:00Z")
+        self.assertEqual(f.evidence["down_seconds"], 450.0)
+        self.assertEqual(f.evidence["unmeasured_seconds"], 0.0)
+        self.assertEqual(f.evidence["prev_state"], "disconnected")
 
 
 class TestTunnelEndpointEvidence(unittest.TestCase):

@@ -14,7 +14,7 @@ import re
 import time
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..util import OK, UNSUPPORTED, Capability, find_tool, first_line, have, run
 
@@ -294,9 +294,15 @@ def probe_all() -> List[Capability]:
 # 공급자가 있으면 무한히 나간다 (AC-4 수정분, 사용자 확인 2026-09-22).
 PROBE_STATES = (DISCONNECTED, CONNECTING)
 
-# 한 구간(연결돼 있지 않은 상태가 이어지는 동안)에 보낼 최대 횟수.
-# 5초 주기로 약 1분이다. 원인 판별에 필요한 것은 구간 초반이고, 67분짜리
-# 끊김에서 수백 번이 제3자에게 나가는 일을 막는다 (AC-4 수정분).
+# **한 공급자의 한 끊김**에 엔드포인트로 보낼 최대 ICMP 발 수.
+# 주기가 아니라 발 수를 센다 — 한 주기에 나가는 발 수는 `ping_count` 설정에
+# 달렸고(netmon/collect/link.py 의 `per = 1 if n > 1 else count`), 주기를 세면
+# 그 설정을 올려 둔 사람에게는 12발보다 많이 나간다 (AC-4 수정분은 "발").
+#
+# 기본값(ping_count=1)에서 12주기치이고, 실제 시간은 주기 설정에 달렸다 —
+# 기본 5초 주기면 약 1분, 조사 중 좁혀진 2~3초 주기면 24~36초다. 원인 판별에
+# 필요한 것은 끊김 초반이고, 67분짜리 끊김에서 수백 발이 제3자에게 나가는
+# 일을 막는다 (AC-4 수정분).
 TUNNEL_PROBE_CAP = 12
 
 # 사유 문자열에서 훑을 최대 길이. 긴 문자열에 시간을 쓰지 않는다.
@@ -369,25 +375,47 @@ def endpoint_from_reason(reason: Any) -> Optional[str]:
     return None
 
 
-def probe_window_open(vpn_block: Optional[Dict[str, Any]]) -> bool:
-    """엔드포인트를 재는 구간이 아직 이어지고 있는가.
+def carry_probe_counts(raw: Any,
+                       vpn_block: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """직전 주기까지의 발 수 기록을 이번 주기로 이어 준다.
 
-    상한(`TUNNEL_PROBE_CAP`)을 세는 단위가 이 구간이다. 구간이 닫히면 센
-    값을 버리고 다음 구간을 다시 0 부터 센다 (netmon/engine.py).
+    모양은 `{공급자: {"shots": 발 수, "capped": 상한에 닿았는가}}` 이고,
+    엔진이 `state.json` 의 `vpn_endpoint_probes` 에 그대로 담는다.
 
-    **`unknown` 은 구간을 닫지 않는다.** 그 상태는 "공급자에게 물어보지
-    못했다" 이지 "이어졌다" 가 아니다. 닫는 것으로 보면 조회가 간헐적으로
-    실패하는 동안 상한이 계속 되살아나 한 구간에 12번보다 많이 나간다.
-    그 주기에 보내지도 않는다 — `PROBE_STATES` 에 없기 때문이다.
+    **세는 단위는 공급자 하나의 끊김 하나다.** 창은 그 공급자의 상태로만
+    열고 닫는다.
 
-    공급자가 하나도 없거나(감시 꺼짐, 첫 주기) 전부 연결돼 있으면 닫힌다.
+    - `PROBE_STATES`(disconnected·connecting): 창이 이어진다. 기록을 그대로 둔다.
+    - `CONNECTED`: 그 공급자의 끊김이 끝났다. 기록을 버리고 다음 끊김을 0 부터 센다.
+    - `UNKNOWN`: **이미 있는 기록만 유지하고, 없는 것을 만들지 않는다.** 그 상태는
+      "공급자에게 물어보지 못했다" 이지 "끊겼다" 도 "이어졌다" 도 아니다. 닫는
+      것으로 보면 조회가 간헐적으로 실패하는 동안 상한이 계속 되살아나 한 끊김에
+      12발보다 많이 나간다. 여는 것으로 보면 `MacOSNative` 처럼 담당할 서비스가
+      없어 **늘 `unknown` 을 돌려주는 공급자**(이 파일 `status()` 의 "직접 담당할
+      서비스 없음")가 창을 영영 열어 둬, 상한이 한 끊김이 아니라 프로세스 수명당
+      예산이 된다. 여기서는 보내지 않으므로(`PROBE_STATES` 에 없다) 기록이 새로
+      생길 일도 없다.
+    - 블록에 없는 공급자(설정 변경, 수집 실패로 블록이 통째로 빈 주기): 기록을
+      유지한다. 관측하지 못한 것을 "연결됐다" 로 읽지 않는다.
+
+    값이 없거나 모양이 다르면(옛 판의 정수 하나, 문자열, None) 아무것도 이어
+    주지 않는다 — 기록이 없는 것과 같이 0 부터 센다.
     """
-    if not isinstance(vpn_block, dict):
-        return False
-    for st in vpn_block.values():
-        if isinstance(st, dict) and st.get("state") in PROBE_STATES + (UNKNOWN,):
-            return True
-    return False
+    out: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        return out
+    states = vpn_block if isinstance(vpn_block, dict) else {}
+    for name, rec in raw.items():
+        if not isinstance(name, str) or not isinstance(rec, dict):
+            continue
+        shots = rec.get("shots")
+        if not isinstance(shots, int) or isinstance(shots, bool) or shots < 0:
+            continue
+        st = states.get(name)
+        if isinstance(st, dict) and st.get("state") == CONNECTED:
+            continue
+        out[name] = {"shots": shots, "capped": bool(rec.get("capped"))}
+    return out
 
 
 def tunnel_endpoint(vpn_block: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -401,6 +429,20 @@ def tunnel_endpoint(vpn_block: Optional[Dict[str, Any]]) -> Optional[str]:
     시작된다 (AC-4c).
 
     공급자가 여럿이면 이름 순으로 첫 번째를 고른다. 대상은 한 주기에 하나다.
+
+    주소만 필요할 때 쓴다. 상한은 공급자별로 세므로 엔진은 어느 공급자에게서
+    나온 주소인지도 알아야 한다 — 그쪽은 `tunnel_probe_target` 이다.
+    """
+    target = tunnel_probe_target(vpn_block)
+    return target[1] if target else None
+
+
+def tunnel_probe_target(
+        vpn_block: Optional[Dict[str, Any]]) -> Optional[Tuple[str, str]]:
+    """(주소를 내준 공급자 이름, 엔드포인트 주소). 고르지 못하면 None.
+
+    상한(`TUNNEL_PROBE_CAP`)을 그 공급자 앞으로 달아야 하므로 이름을 함께
+    돌려준다. 고르는 규칙은 `tunnel_endpoint` 의 설명과 같다.
     """
     if not isinstance(vpn_block, dict):
         return None
@@ -410,5 +452,5 @@ def tunnel_endpoint(vpn_block: Optional[Dict[str, Any]]) -> Optional[str]:
             continue
         addr = endpoint_from_reason(st.get("reason"))
         if addr:
-            return addr
+            return str(name), addr
     return None

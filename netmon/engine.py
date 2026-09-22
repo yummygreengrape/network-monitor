@@ -35,8 +35,10 @@ def _external_resolver(dns_block: Dict[str, Any]) -> Optional[str]:
 # 비교 기준을 디스크에 남기는 주기. 매 주기 쓰면 쓰기량이 20배가 된다.
 BASELINE_SAVE_SECONDS = 60.0
 
-# 이 구간에 터널 엔드포인트를 몇 번 쟀는가. 상한(vpn.TUNNEL_PROBE_CAP)을
-# 세는 자리다. **없어도 동작한다** — 없으면 0 이다.
+# 이 끊김에 터널 엔드포인트로 몇 발 나갔는가. 상한(vpn.TUNNEL_PROBE_CAP)을
+# 세는 자리이고, 모양은 `{공급자: {"shots": 발 수, "capped": 상한에 닿았는가}}`
+# 다 — 세는 단위가 공급자 하나의 끊김 하나이기 때문이다(vpn.carry_probe_counts).
+# **없어도 동작한다** — 없거나 모양이 다르면 0 부터 센다.
 ENDPOINT_PROBES_KEY = "vpn_endpoint_probes"
 
 # 커널 ARP 로그를 읽는 간격과 조회 창. `log show` 는 고정 1초쯤 들고 창이
@@ -113,7 +115,7 @@ class Engine:
     # --- 수집 ---
     def observe(self) -> Observation:
         obs = Observation(ts=ts_now())
-        endpoint, endpoint_capped = self._tunnel_probe_plan()
+        endpoint, endpoint_capped = self._claim_tunnel_probe()
         ctx: Dict[str, Any] = {
             "allow_location": self.cfg.effective("detect.evil_twin"),
             "allow_external": self.cfg.effective("detect.public_ip"),
@@ -207,58 +209,87 @@ class Engine:
                                       prev_arp=self._last_arp,
                                       method=liveness.method_for(self.state))
 
-    def _tunnel_endpoint(self) -> Optional[str]:
-        """이번 주기에 터널 엔드포인트로 삼을 주소. 없으면 None.
+    def _claim_tunnel_probe(self) -> Tuple[Optional[str], bool]:
+        """(이번 주기에 잴 주소, 상한에 닿아 보내지 않는 주기인가).
 
-        **직전 주기**의 VPN 관측에서 얻는다 — 같은 주기의 값은 아직 없고
-        (link 가 vpn 보다 먼저 돈다), 뒤에 직렬로 붙이면 한 주기가 약 1.84초
-        길어져 조사 중 2~3초 주기를 넘긴다 (AC-4c). 그래서 첫 홉 측정과 같은
-        묶음에서 동시에 나가고, 대신 끊김이 시작된 첫 주기에는 주소가 없어
-        관측이 한 주기 늦게 시작된다.
+        **한 주기에 한 번만 부른다. 부르는 것이 곧 예산을 쓰는 것이다** —
+        보내기로 정하면서 그 발 수를 세기 때문에, 조회하듯 다시 부르면 같은
+        주기가 두 번 세진다. 그래서 값만 돌려주는 껍데기를 따로 두지 않는다.
 
-        동의도 기능도 없으면 **주소를 고르지도 않는다.** 여기서 고른 값은
-        수집기에 넘어가는 순간 송신 대상이 되므로, 꺼져 있을 때는 만들지
-        않는 편이 낫다.
+        주소는 **직전 주기**의 VPN 관측에서 얻는다 — 같은 주기의 값은 아직
+        없고(link 가 vpn 보다 먼저 돈다), 뒤에 직렬로 붙이면 한 주기가 약
+        1.84초 길어져 조사 중 2~3초 주기를 넘긴다 (AC-4c). 그래서 끊김이
+        시작된 첫 주기에는 주소가 없어 관측이 한 주기 늦게 시작된다.
 
         `self._last_vpn` 은 다발 측정 판단이 쓰는 것과 같은, 직전 주기의 VPN
         블록이다(`_remember_for_burst`). 링크가 없어 판정을 건너뛴 주기도
         여기에는 남는다 — VPN 상태는 링크가 없어도 수집되기 때문이다.
 
-        어떤 상태에 보내는지(`vpn.PROBE_STATES`)와 한 구간의 상한
-        (`vpn.TUNNEL_PROBE_CAP`)은 `_tunnel_probe_plan` 이 본다.
-        """
-        return self._tunnel_probe_plan()[0]
-
-    def _tunnel_probe_plan(self) -> Tuple[Optional[str], bool]:
-        """(이번 주기에 잴 주소, 상한에 닿아 보내지 않는 주기인가).
-
-        **한 주기에 한 번만 부른다** — 보내기로 정하면서 그 사실을 세기
-        때문이다. 세는 단위는 연결돼 있지 않은 구간 하나이고
-        (`vpn.probe_window_open`), 구간이 닫히면 0 부터 다시 센다.
+        세는 단위는 **공급자 하나의 끊김 하나**이고(`vpn.carry_probe_counts`),
+        세는 것은 주기가 아니라 **발 수**다 — 한 주기에 나가는 발 수가
+        `ping_count` 설정에 달렸기 때문이다(netmon/collect/link.py).
 
         센 값은 `state.json` 에 둔다. 메모리에 두면 launchd 가 되살릴 때마다
         0 이 되어(이 파일 위쪽 주석 — 의도치 않은 재시작이 잦다) 긴 끊김에서
-        상한이 사실상 없어진다. **키가 없어도 동작한다** — 없으면 0 이고,
-        숫자가 아닌 값이 들어 있어도 0 으로 본다.
+        상한이 사실상 없어진다.
+
+        **직전 주기가 아직 없으면(새 프로세스의 첫 주기) 아무것도 건드리지
+        않는다.** "직전 주기가 없다" 와 "끊김이 끝났다" 는 다르다. 첫 주기에
+        기록을 지우면 재시작할 때마다 상한이 새로 채워져, `state.json` 에
+        둔 까닭이 바로 그 경로에서 무너진다. 그 주기에는 어차피 주소도 없다.
         """
-        if not vpn.probe_window_open(self._last_vpn):
-            self.state.pop(ENDPOINT_PROBES_KEY, None)
+        last = self._last_vpn
+        if last is None:
             return None, False
+        counts = vpn.carry_probe_counts(self.state.get(ENDPOINT_PROBES_KEY), last)
+        self._save_probe_counts(counts)
         if not self.cfg.effective("vpn.tunnel_probe"):
+            # 동의도 기능도 없으면 **주소를 고르지도 않는다.** 여기서 고른 값은
+            # 수집기에 넘어가는 순간 송신 대상이 된다.
             return None, False
         # **주소를 먼저 고른다.** 상한을 먼저 보면, 보낼 주소가 없어서 어차피
         # 나가지 않았을 주기까지 "상한 때문에 안 보냄" 으로 적힌다. 고르는
         # 것만으로는 아무것도 나가지 않는다 (문자열 파싱이다).
-        addr = vpn.tunnel_endpoint(self._last_vpn)
-        if addr is None:
+        target = vpn.tunnel_probe_target(last)
+        if target is None:
             # 고르지 못한 주기는 보내지 않은 주기다. 세지 않는다.
             return None, False
-        sent = self.state.get(ENDPOINT_PROBES_KEY)
-        sent = sent if isinstance(sent, int) and not isinstance(sent, bool) else 0
-        if sent >= vpn.TUNNEL_PROBE_CAP:
+        name, addr = target
+        sent = int(counts.get(name, {}).get("shots", 0))
+        shots = self._endpoint_shots()
+        if sent + shots > vpn.TUNNEL_PROBE_CAP:
+            # 남은 예산이 이번 주기의 발 수를 못 받는다. 이 끊김에서는 더
+            # 보내지 않는다 — 상한을 넘겨 보내느니 재지 않는 편이 낫다.
+            counts[name] = {"shots": sent, "capped": True}
+            self._save_probe_counts(counts)
             return None, True
-        self.state[ENDPOINT_PROBES_KEY] = sent + 1
+        counts[name] = {"shots": sent + shots, "capped": False}
+        self._save_probe_counts(counts)
         return addr, False
+
+    def _save_probe_counts(self, counts: Dict[str, Dict[str, Any]]) -> None:
+        """센 값을 상태에 남긴다. 셀 것이 없으면 키를 지운다.
+
+        빈 dict 를 남기지 않는 것은 `state.json` 에 뜻 없는 키를 쌓지 않기
+        위해서다. 읽는 쪽은 키가 없는 것과 빈 것을 같게 본다.
+        """
+        if counts:
+            self.state[ENDPOINT_PROBES_KEY] = counts
+        else:
+            self.state.pop(ENDPOINT_PROBES_KEY, None)
+
+    def _endpoint_shots(self) -> int:
+        """엔드포인트 한 번 측정에 나가는 ICMP 발 수.
+
+        수집기가 엔드포인트에 쓰는 값과 같아야 한다 — 거기서는 대상이
+        하나라 `per = count` 이고 그 `count` 가 `ping_count` 다
+        (netmon/collect/link.py). 설정이 망가져 있으면 1 로 본다.
+        """
+        try:
+            n = int(self.cfg.data.get("ping_count", 1))
+        except (TypeError, ValueError):
+            return 1
+        return max(1, n)
 
     def _remember_for_burst(self, obs: Observation) -> None:
         """다음 주기의 다발 측정 판단에 쓸, 직전 두 주기의 상태를 남긴다.

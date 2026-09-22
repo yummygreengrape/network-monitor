@@ -821,52 +821,58 @@ class TestEngineDecidesWhetherToProbeTheEndpoint(unittest.TestCase):
         return helpers.obs(vpn=helpers.vpn_state(state, reason=reason))
 
     def test_a_cycle_after_a_disconnection_gets_the_address(self):
-        self.assertEqual(self._engine(self._down())._tunnel_endpoint(), ENDPOINT)
+        self.assertEqual(self._engine(self._down())._claim_tunnel_probe()[0], ENDPOINT)
 
     def test_the_first_cycle_of_an_outage_has_no_address_yet(self):
         """직전 주기가 connected 면 주소가 없다. 한 주기 늦게 시작된다 (AC-4c)."""
         eng = self._engine(helpers.obs(vpn=helpers.vpn_state("connected")))
-        self.assertIsNone(eng._tunnel_endpoint())
+        self.assertIsNone(eng._claim_tunnel_probe()[0])
 
     def test_a_normal_cycle_sends_nothing(self):
         """평소 주기에는 보내지 않는다 (QA-19)."""
         eng = self._engine(helpers.obs(vpn=helpers.vpn_state(
             "connected", reason=helpers.ENDPOINT_REASON)))
-        self.assertIsNone(eng._tunnel_endpoint())
+        self.assertIsNone(eng._claim_tunnel_probe()[0])
 
     def test_no_previous_cycle_no_address(self):
-        self.assertIsNone(self._engine()._tunnel_endpoint())
+        self.assertIsNone(self._engine()._claim_tunnel_probe()[0])
 
     def test_the_feature_alone_does_not_open_the_gate(self):
-        self.assertIsNone(self._engine(self._down(), consent=False)._tunnel_endpoint())
+        self.assertIsNone(self._engine(self._down(), consent=False)._claim_tunnel_probe()[0])
 
     def test_the_consent_alone_does_not_open_the_gate(self):
-        self.assertIsNone(self._engine(self._down(), feature=False)._tunnel_endpoint())
+        self.assertIsNone(self._engine(self._down(), feature=False)._claim_tunnel_probe()[0])
 
     def test_revoking_the_consent_closes_it_again(self):
         eng = self._engine(self._down())
-        self.assertEqual(eng._tunnel_endpoint(), ENDPOINT)
+        self.assertEqual(eng._claim_tunnel_probe()[0], ENDPOINT)
         eng.cfg.revoke("external_probes")
-        self.assertIsNone(eng._tunnel_endpoint())
+        self.assertIsNone(eng._claim_tunnel_probe()[0])
 
     def test_a_hostile_address_never_becomes_a_target(self):
         eng = self._engine(self._down(reason="No Network via 127.0.0.1:2408"))
-        self.assertIsNone(eng._tunnel_endpoint())
+        self.assertIsNone(eng._claim_tunnel_probe()[0])
 
 
 class TestTheProbeCap(unittest.TestCase):
-    """한 구간에 최대 12번 (AC-4 수정분, 사용자 결정 2026-09-22).
+    """**한 공급자의 한 끊김에 최대 12발** (AC-4 수정분, 사용자 결정 2026-09-22).
 
-    67분짜리 끊김에서 수백 번이 제3자에게 나가는 일을 막는다. 세는 단위는
-    연결돼 있지 않은 구간 하나이고, 다시 연결되면 0 부터 센다.
+    67분짜리 끊김에서 수백 발이 제3자에게 나가는 일을 막는다. 세는 단위는
+    공급자 하나의 끊김 하나이고, 그 공급자가 다시 연결되면 0 부터 센다.
+
+    **부르는 것이 곧 예산을 쓰는 것이다** — `_claim_tunnel_probe()` 는 보내기로
+    정하면서 그 발 수를 센다. 아래에서 한 테스트가 여러 번 부르는 것은 여러
+    주기를 흉내 내는 것이다.
     """
 
-    def _engine(self, state=None, last_vpn=None):
+    def _engine(self, state=None, last_vpn=None, ping_count=None):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         cfg = configmod.load(os.path.join(d, "config.json"))
         cfg.grant("external_probes", note="테스트")
         cfg.set_feature("vpn.tunnel_probe", True)
+        if ping_count is not None:
+            cfg.data["ping_count"] = ping_count
         eng = Engine.__new__(Engine)
         eng.cfg = cfg
         eng.state = {} if state is None else state
@@ -874,16 +880,44 @@ class TestTheProbeCap(unittest.TestCase):
             "disconnected", reason=helpers.ENDPOINT_REASON)
         return eng
 
+    def _counts(self, eng):
+        return eng.state.get(enginemod.ENDPOINT_PROBES_KEY)
+
     def test_the_cap_is_twelve(self):
         self.assertEqual(vpnmod.TUNNEL_PROBE_CAP, 12)
 
     def test_twelve_go_out_and_the_thirteenth_does_not(self):
         eng = self._engine()
         for i in range(12):
-            self.assertEqual(eng._tunnel_probe_plan(), (ENDPOINT, False), i)
-        self.assertEqual(eng._tunnel_probe_plan(), (None, True))
-        self.assertEqual(eng._tunnel_probe_plan(), (None, True))
-        self.assertEqual(eng.state[enginemod.ENDPOINT_PROBES_KEY], 12)
+            self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False), i)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng),
+                         {"warp": {"shots": 12, "capped": True}})
+
+    def test_the_cap_counts_packets_not_cycles(self):
+        """한 주기에 나가는 발 수는 `ping_count` 에 달렸다 (AC-4 는 "12발").
+
+        주기를 세면 `ping_count` 를 올려 둔 사람에게는 12발보다 많이 나간다
+        — 엔드포인트는 대상이 하나라 한 주기에 `ping_count` 발이 나간다
+        (`collect/link.collect` 의 `per = 1 if n > 1 else count`).
+        """
+        eng = self._engine(ping_count=3)
+        for i in range(4):
+            self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False), i)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng)["warp"]["shots"], 12)
+
+    def test_a_ping_count_over_the_cap_sends_nothing_and_says_so(self):
+        """상한을 넘겨 보내느니 재지 않는다. 그 사실은 표시로 남는다."""
+        eng = self._engine(ping_count=13)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+        self.assertEqual(self._counts(eng), {"warp": {"shots": 0, "capped": True}})
+
+    def test_a_broken_ping_count_is_read_as_one(self):
+        eng = self._engine(ping_count="많이")
+        self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False))
+        self.assertEqual(self._counts(eng)["warp"]["shots"], 1)
 
     def test_the_count_is_where_a_restart_can_find_it(self):
         """launchd 가 되살려도 상한이 남아 있어야 한다.
@@ -893,33 +927,70 @@ class TestTheProbeCap(unittest.TestCase):
         """
         eng = self._engine()
         for _ in range(12):
-            eng._tunnel_probe_plan()
+            eng._claim_tunnel_probe()
         restarted = self._engine(state=dict(eng.state))
-        self.assertEqual(restarted._tunnel_probe_plan(), (None, True))
+        self.assertEqual(restarted._claim_tunnel_probe(), (None, True))
 
     def test_it_works_without_the_key(self):
-        """키가 없거나 이상한 값이어도 0 부터 센다 (상태 파일 규칙)."""
-        for state in ({}, {enginemod.ENDPOINT_PROBES_KEY: "많이"},
-                      {enginemod.ENDPOINT_PROBES_KEY: None},
-                      {enginemod.ENDPOINT_PROBES_KEY: True}):
+        """키가 없거나 이상한 값이어도 0 부터 센다 (상태 파일 규칙).
+
+        정수 하나였던 옛 모양도 여기에 든다 — 그 판은 공급자를 가리지 않고
+        하나로 셌다.
+        """
+        KEY = enginemod.ENDPOINT_PROBES_KEY
+        for state in ({}, {KEY: "많이"}, {KEY: None}, {KEY: True}, {KEY: 12},
+                      {KEY: {"warp": 12}}, {KEY: {"warp": None}},
+                      {KEY: {"warp": {"shots": "많이"}}}):
             eng = self._engine(state=dict(state))
-            self.assertEqual(eng._tunnel_probe_plan(), (ENDPOINT, False), state)
+            self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False), state)
 
     def test_reconnecting_starts_the_count_again(self):
         eng = self._engine()
         for _ in range(12):
-            eng._tunnel_probe_plan()
-        self.assertEqual(eng._tunnel_probe_plan(), (None, True))
+            eng._claim_tunnel_probe()
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
 
         eng._last_vpn = helpers.vpn_state("connected")
-        self.assertEqual(eng._tunnel_probe_plan(), (None, False))
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
         self.assertNotIn(enginemod.ENDPOINT_PROBES_KEY, eng.state)
 
         eng._last_vpn = helpers.vpn_state("disconnected",
                                           reason=helpers.ENDPOINT_REASON)
         for i in range(12):
-            self.assertEqual(eng._tunnel_probe_plan(), (ENDPOINT, False), i)
-        self.assertEqual(eng._tunnel_probe_plan(), (None, True))
+            self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False), i)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+    def test_a_provider_that_is_always_unknown_does_not_eat_the_budget(self):
+        """늘 `unknown` 인 공급자가 있어도 상한은 "한 끊김" 으로 남는다.
+
+        `MacOSNative` 는 직접 담당할 서비스가 없으면 설계상 늘 `unknown` 을
+        돌려주고(`vpn/__init__.py` 의 "직접 담당할 서비스 없음"), `scutil` 은
+        모든 맥에 있어 기본 설정에서 그 공급자가 늘 목록에 든다. 창을
+        "아무 공급자나 비connected" 로 세면 창이 영영 닫히지 않아, 첫 12발을
+        쓰고 나면 **그 뒤의 어떤 끊김에서도 한 발도 나가지 않았다**
+        (검수 1차 지적).
+        """
+        def block(warp_state):
+            out = {"macos": {"provider": "macos", "state": "unknown",
+                             "reason": "직접 담당할 서비스 없음 (전용 공급자가 처리)"}}
+            out.update(helpers.vpn_state(warp_state,
+                                         reason=helpers.ENDPOINT_REASON))
+            return out
+
+        eng = self._engine(last_vpn=block("disconnected"))
+        for _ in range(12):
+            eng._claim_tunnel_probe()
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+        # 끊김이 끝났다. 늘 unknown 인 공급자가 옆에 있어도 창이 닫힌다.
+        eng._last_vpn = block("connected")
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        self.assertNotIn(enginemod.ENDPOINT_PROBES_KEY, eng.state)
+
+        # 다음 끊김에서는 다시 잰다 — 이 작업이 만들려는 근거가 그 시점부터
+        # 수집되지 않는 것이 고치기 전의 결함이었다.
+        eng._last_vpn = block("disconnected")
+        self.assertEqual(eng._claim_tunnel_probe(), (ENDPOINT, False))
 
     def test_a_failed_provider_query_does_not_refill_the_cap(self):
         """`unknown` 주기는 보내지도 않고 세던 것을 버리지도 않는다.
@@ -928,20 +999,46 @@ class TestTheProbeCap(unittest.TestCase):
         """
         eng = self._engine()
         for _ in range(12):
-            eng._tunnel_probe_plan()
+            eng._claim_tunnel_probe()
         eng._last_vpn = helpers.vpn_state("unknown",
                                           reason=helpers.ENDPOINT_REASON)
-        self.assertEqual(eng._tunnel_probe_plan(), (None, False))
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
         eng._last_vpn = helpers.vpn_state("disconnected",
                                           reason=helpers.ENDPOINT_REASON)
-        self.assertEqual(eng._tunnel_probe_plan(), (None, True))
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+    def test_a_missing_vpn_block_does_not_refill_the_cap(self):
+        """수집이 통째로 실패한 주기도 "연결됐다" 가 아니다."""
+        eng = self._engine()
+        for _ in range(12):
+            eng._claim_tunnel_probe()
+        eng._last_vpn = {}
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        eng._last_vpn = helpers.vpn_state("disconnected",
+                                          reason=helpers.ENDPOINT_REASON)
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+    def test_each_provider_has_its_own_budget(self):
+        """한 공급자가 예산을 다 써도 다른 공급자의 끊김은 그대로 잰다."""
+        other = "No Network via 203.0.113.9:2408"
+        eng = self._engine(last_vpn=helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON))
+        for _ in range(12):
+            eng._claim_tunnel_probe()
+        self.assertEqual(eng._claim_tunnel_probe(), (None, True))
+
+        eng._last_vpn = helpers.vpn_state("disconnected", reason=other,
+                                          provider="tailscale")
+        self.assertEqual(eng._claim_tunnel_probe(), ("203.0.113.9", False))
+        self.assertEqual(self._counts(eng)["tailscale"]["shots"], 1)
+        self.assertEqual(self._counts(eng)["warp"]["shots"], 12)
 
     def test_a_cycle_without_an_address_is_not_counted(self):
         """주소를 못 고른 주기는 보내지 않은 주기다."""
         eng = self._engine(last_vpn=helpers.vpn_state("disconnected",
                                                       reason="No Network"))
         for _ in range(20):
-            self.assertEqual(eng._tunnel_probe_plan(), (None, False))
+            self.assertEqual(eng._claim_tunnel_probe(), (None, False))
         self.assertNotIn(enginemod.ENDPOINT_PROBES_KEY, eng.state)
 
     def test_a_closed_gate_never_counts_or_caps(self):
@@ -949,8 +1046,22 @@ class TestTheProbeCap(unittest.TestCase):
         eng = self._engine()
         eng.cfg.revoke("external_probes")
         for _ in range(20):
-            self.assertEqual(eng._tunnel_probe_plan(), (None, False))
+            self.assertEqual(eng._claim_tunnel_probe(), (None, False))
         self.assertNotIn(enginemod.ENDPOINT_PROBES_KEY, eng.state)
+
+    def test_the_first_cycle_of_a_process_does_not_touch_the_count(self):
+        """직전 주기가 아직 없는 주기는 "끊김이 끝났다" 가 아니다.
+
+        `_last_vpn` 은 `observe()` 끝에서야 채워지므로 새 프로세스의 첫
+        주기에는 없다. 여기서 기록을 지우면 launchd 가 되살릴 때마다 12발이
+        새로 채워진다 (검수 1차 지적). `observe()` 를 통째로 돌리는 확인은
+        TestEnginePassesBothGatesToTheCollector 에 있다.
+        """
+        saved = {"warp": {"shots": 12, "capped": True}}
+        eng = self._engine(state={enginemod.ENDPOINT_PROBES_KEY: dict(saved)})
+        del eng._last_vpn  # 클래스 기본값(None)으로 되돌린다 = 첫 주기
+        self.assertEqual(eng._claim_tunnel_probe(), (None, False))
+        self.assertEqual(self._counts(eng), saved)
 
 
 class TestEnginePassesBothGatesToTheCollector(unittest.TestCase):
@@ -979,7 +1090,11 @@ class TestEnginePassesBothGatesToTheCollector(unittest.TestCase):
         eng.prev = None
         eng.prev_wall = None
         eng._arp_log_read_at = None
-        eng._last_vpn = last_vpn
+        if last_vpn is not None:
+            # **넘기지 않으면 세팅하지 않는다.** 새 프로세스의 첫 주기에는
+            # `_last_vpn` 이 아예 없다(클래스 기본값 None) — 그 주기를
+            # 모사하려면 여기서 대신 채워 주면 안 된다 (검수 1차 지적).
+            eng._last_vpn = last_vpn
         seen = {}
 
         def fake_link_collect(ctx):
@@ -1031,9 +1146,35 @@ class TestEnginePassesBothGatesToTheCollector(unittest.TestCase):
 
     def test_a_capped_cycle_reaches_the_collector_as_a_mark(self):
         """상한에 닿은 주기는 주소 없이 '상한' 표시만 넘어간다."""
-        eng_state = {enginemod.ENDPOINT_PROBES_KEY: vpnmod.TUNNEL_PROBE_CAP}
+        eng_state = {enginemod.ENDPOINT_PROBES_KEY:
+                     {"warp": {"shots": vpnmod.TUNNEL_PROBE_CAP, "capped": True}}}
         seen = self._observe(last_vpn=helpers.vpn_state(
             "disconnected", reason=helpers.ENDPOINT_REASON), state=eng_state)
+        self.assertIsNone(seen["tunnel_endpoint"])
+        self.assertTrue(seen["tunnel_probe_capped"])
+
+    def test_the_first_cycle_after_a_restart_keeps_the_count_on_disk(self):
+        """새 프로세스의 첫 주기가 디스크에서 읽어 온 카운터를 지우지 않는다.
+
+        `_last_vpn` 은 `observe()` **끝**에서 채워지는데 `observe()` 는 맨 첫
+        줄에서 이 판단을 한다. 그래서 첫 주기는 늘 "직전 주기가 없다" 이고,
+        그것을 "끊김이 끝났다" 로 읽으면 launchd 가 되살릴 때마다 12발이
+        새로 채워진다 — 카운터를 `state.json` 에 둔 까닭이 바로 그 경로에서
+        무너진다 (검수 1차 지적). 여기서는 `_last_vpn` 을 **세팅하지 않고**
+        `observe()` 를 돌려 실제 첫 주기를 그대로 모사한다.
+        """
+        saved = {"warp": {"shots": vpnmod.TUNNEL_PROBE_CAP, "capped": True}}
+        state = {enginemod.ENDPOINT_PROBES_KEY: dict(saved)}
+        seen = self._observe(state=state)
+        # 그 주기에는 어차피 주소가 없다. 아무것도 나가지 않는다.
+        self.assertIsNone(seen["tunnel_endpoint"])
+        self.assertFalse(seen["tunnel_probe_capped"])
+        # **값으로 확인한다** — 디스크에서 읽어 온 카운터가 그대로 있어야 한다.
+        self.assertEqual(state[enginemod.ENDPOINT_PROBES_KEY], saved)
+
+        # 그다음 주기(직전 주기가 생긴 뒤)에는 상한이 그대로 걸린다.
+        seen = self._observe(state=state, last_vpn=helpers.vpn_state(
+            "disconnected", reason=helpers.ENDPOINT_REASON))
         self.assertIsNone(seen["tunnel_endpoint"])
         self.assertTrue(seen["tunnel_probe_capped"])
 

@@ -216,13 +216,13 @@ class TestTunnelEndpointConsent(unittest.TestCase):
 CANON_KO = ("VPN 이 연결돼 있지 않은 동안(끊김·재협상) 공급자가 사유에 적어 준 "
             "터널 상대편(엔드포인트) 주소로 ICMP 를 보냅니다(ping_count 만큼, 기본 1발). "
             "보낼지는 직전 주기의 상태로 정하므로 다시 연결된 직후 첫 주기에도 한 번 나가고, "
-            "한 구간에 최대 12번까지만 보냅니다.")
+            "공급자마다 한 끊김에 최대 12발까지만 보냅니다.")
 
 CANON_EN = ("While a VPN is not connected (down or renegotiating) it sends ICMP "
             "to the tunnel endpoint address the provider reported — ping_count "
             "packets, 1 by default. The decision uses the previous cycle's state, "
             "so one probe also goes out on the first cycle after reconnecting, "
-            "and at most 12 go out per stretch.")
+            "and at most 12 packets go out per provider per outage.")
 
 
 def _flat(text):
@@ -241,14 +241,25 @@ class TestTheFourTextsSayTheSameThing(unittest.TestCase):
       - 어떤 상태에 보내는가 (연결돼 있지 않은 동안 — 끊김·재협상 둘 다)
       - 몇 발인가 (`ping_count` 만큼. "한 발" 로 단정하지 않는다)
       - 직전 주기 기준이라 다시 연결된 직후 첫 주기에도 나간다
-      - 한 구간의 상한 (12번)
+      - 한 끊김의 상한 (12발). 세는 단위가 "구간" 이면 읽는 사람이 어느
+        구간인지 알 수 없다 — 공급자 하나의 끊김 하나다 (검수 1차 지적).
     """
 
     def _readme(self):
+        """저장소의 README. 설치본에는 없을 수 있으므로 없으면 건너뛴다.
+
+        `netmon.__file__` 의 두 단계 위는 저장소에서만 README 가 있는
+        자리다. 패키지만 설치한 환경에서는 그 파일이 없어 이 검사가
+        `FileNotFoundError` 로 터진다 — 없는 파일은 실패가 아니라 검사할
+        수 없는 것이다 (검수 1차 지적).
+        """
         import netmon
 
         root = os.path.dirname(os.path.dirname(os.path.abspath(netmon.__file__)))
-        with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
+        path = os.path.join(root, "README.md")
+        if not os.path.isfile(path):
+            self.skipTest("README.md 가 없다 (저장소 밖에서 돌린 검사)")
+        with open(path, encoding="utf-8") as fh:
             return fh.read()
 
     def test_the_readme_carries_the_sentence(self):
