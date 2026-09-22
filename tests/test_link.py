@@ -1235,12 +1235,17 @@ class TestEnginePassesBothGatesToTheCollector(unittest.TestCase):
         self.assertFalse(seen["allow_tunnel_probe"])
         self.assertIsNone(seen["tunnel_endpoint"])
 
-    def test_one_probe_still_goes_out_right_after_reconnecting(self):
-        """방아쇠가 직전 주기 기준이라 재접속 직후 첫 주기에도 한 번 나간다.
+    def test_a_probe_can_still_go_out_right_after_reconnecting(self):
+        """직전 주기에 주소가 있었으면 재접속 직후 첫 주기에도 나간다.
 
         이번 주기의 VPN 상태는 이 결정을 내릴 때 아직 없다 — link 가 vpn
-        보다 먼저 돌기 때문이다(`netmon/engine.py` 의 수집 순서). 문구가
-        이 사실을 적어야 하므로(AC-4 수정분 (d)) 동작으로 고정해 둔다.
+        보다 먼저 돌기 때문이다(`netmon/engine.py` 의 수집 순서).
+
+        **"나간다" 가 아니라 "나갈 수 있다" 다.** 이 픽스처는 직전 주기 사유에
+        주소가 있는 경우를 준다(`helpers.ENDPOINT_REASON`). 주소가 없었으면
+        대상이 없어 한 발도 나가지 않는다. 발 수도 "한 번" 이 아니라
+        `ping_count` 만큼이다. 문구 네 곳이 그렇게 적혀 있고(AC-4 수정분 (d)),
+        여기서 고정하는 것은 **주소가 있었을 때의 동작**이다.
         """
         seen = self._observe(
             last_vpn=helpers.vpn_state("disconnected",
