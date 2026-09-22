@@ -944,6 +944,15 @@ class TestTheProbeCap(unittest.TestCase):
         self.assertEqual(eng._claim_tunnel_probe(), (None, True))
         self.assertEqual(self._counts(eng), {"warp": {"shots": 0, "capped": True}})
 
+        # 상한이 거절하지 않았다면 실제로 나갔을 인자. 엔진이 센 값과 같아야
+        # 12발 상한이 뜻대로 센 것이 된다 (DEV-13 (b) 가 세우고 DEV-16 이
+        # 상한 값 대신 설정값으로 다시 맞춘 단언).
+        fake = FakeRun()
+        collect_with(fake, ping_count=13, allow_tunnel_probe=True,
+                     tunnel_endpoint=ENDPOINT)
+        for c in fake.calls:
+            self.assertEqual(c["argv"][3], str(eng._endpoint_shots()))
+
         fake = FakeRun()
         collect_with(fake, ping_count=13)
         for c in fake.calls:
@@ -1496,7 +1505,16 @@ class TestThePingCountBounds(unittest.TestCase):
         self.assertEqual(first_hop.packets_per_command(-3), 1)
 
     def test_a_value_that_is_not_a_number_falls_back_to_the_default(self):
-        for bad in ("많이", None, [], {}, object()):
+        """수로 읽을 수 없는 값은 기본값 1 이다.
+
+        `float("inf")` 도 여기 든다 — `int()` 가 `OverflowError` 를 던지는데
+        그것은 `TypeError`·`ValueError` 가 아니라, 잡지 않으면 수집기 주기
+        하나가 통째로 예외로 끝난다. JSON 은 `Infinity`·`NaN` 을 그대로 읽으므로
+        (`json.loads` 기본값) 손으로 고친 설정에서 올 수 있다. DEV-16 검수 1차
+        지적으로 확인했고, `except` 에 `OverflowError` 를 더해 맞췄다.
+        """
+        for bad in ("많이", None, [], {}, object(),
+                    float("inf"), float("-inf"), float("nan")):
             self.assertEqual(first_hop.packets_per_command(bad),
                              first_hop.DEFAULT_COUNT, bad)
 
@@ -1554,15 +1572,26 @@ class TestThePingCountBounds(unittest.TestCase):
 
 
 class TestARaisedPingCount(unittest.TestCase):
-    """`ping_count` 를 4 이상으로 올린 주기는 **유보된다** (DEV-16).
+    """제한을 넘기는 `ping_count` 주기는 **유보로 남는다** (DEV-16).
 
-    상한 자르기를 없앤 대가다. 한 명령의 소요(`ping_seconds`)가 subprocess
-    제한(`PING_TIMEOUT_SECONDS`)을 넘으면 응답이 오는 평소 주기도 제한에
-    걸려, 그 주기는 "끝나지 못함"(`PROBE_TIMED_OUT`)으로 남는다.
+    상한 자르기를 없앤 대가다. 한 명령의 소요가 subprocess 제한
+    (`PING_TIMEOUT_SECONDS`)을 넘으면 그 주기는 "끝나지 못함"
+    (`PROBE_TIMED_OUT`)으로 남는다.
+
+    **넘기 시작하는 발 수를 하나로 말하지 않는다.** 여기서 고정하는 경계는
+    `ping_seconds`, 곧 **무응답 대상 기준 추정**의 경계(4발)뿐이다. 응답이
+    오는 대상은 패킷 간격 1초 모형(collect/link.py 의 `DEFAULT_COUNT` 위
+    주석)을 따르므로 경계가 그보다 뒤이고, 그 값은 재지 않았다. 아래 가짜
+    `run` 도 무응답 모형을 쓴다(`_timing_run` 참고).
+
+    **유보되는 것은 VPN 끊김 판정뿐이다.** 품질 축은 같은 주기를
+    `gateway_reachable=False` 로 읽어 `gw_fail_streak` 을 계속 올린다
+    (netmon/baseline.py, netmon/detect/quality.py). 그 파급은
+    collect/link.py `packets_per_command` 의 docstring 에 적혀 있다.
 
     **이것은 버그가 아니라 고른 동작이다.** 대안이 둘이었다: (a) 설정을
     말없이 잘라 적게 재면서 그 사실을 남기지 않는다, (b) 설정대로 보내고
-    못 잰 주기를 못 쟀다고 적는다. 잘못된 손실률을 적지 않는 (b) 를 골랐다
+    못 잰 주기를 못 쟀다고 적는다. (b) 를 골랐다
     (사용자 결정 2026-09-22). 되돌리려면 그 결정부터 다시 받아야 한다.
     """
 
@@ -1572,6 +1601,12 @@ class TestARaisedPingCount(unittest.TestCase):
         실제 `run` 은 `subprocess.TimeoutExpired` 를 `timed_out=True` 인
         빈 결과로 바꾼다(netmon/util.py). 여기서는 `-c` 인자로 그 명령이
         걸릴 시간을 계산해 같은 결과를 만든다.
+
+        **무엇을 모형화하는가**: 소요 계산에 `ping_seconds`, 곧 **무응답 대상
+        기준 추정**을 모든 대상에 쓴다. 제한을 넘긴 명령이 관측과 판정에
+        어떻게 남는지만 보려는 것이고, 응답이 오는 대상이 실제로 몇 발부터
+        제한을 넘는지는 여기서 모형화하지 않는다. 제한 안에 든 명령은
+        응답(`REPLY`)을 돌려준다.
         """
         calls = []
 
@@ -1586,15 +1621,25 @@ class TestARaisedPingCount(unittest.TestCase):
         fake.calls = calls
         return fake
 
-    def test_four_packets_no_longer_fit_in_one_command(self):
-        """경계를 코드로 고정한다 — 3발까지는 들어가고 4발부터 넘는다."""
+    def test_four_packets_no_longer_fit_the_silent_target_estimate(self):
+        """**무응답 대상 추정**의 경계를 고정한다 — 3발까지 들고 4발부터 넘는다.
+
+        `ping_seconds` 가 스스로 "무응답 대상 기준" 이라고 적은 추정이다
+        (netmon/collect/link.py). 응답이 오는 대상의 경계는 이 식으로 말할 수
+        없다 — 그쪽은 패킷 간격 1초 모형을 따르고, 재지 않았다.
+        """
         self.assertLess(first_hop.ping_seconds(count=3),
                         first_hop.PING_TIMEOUT_SECONDS)
         self.assertGreater(first_hop.ping_seconds(count=4),
                            first_hop.PING_TIMEOUT_SECONDS)
 
     def test_a_cycle_that_did_not_finish_says_so_instead_of_losing_it(self):
-        """응답이 오는 대상이어도 유보로 남는다. **손실로 적지 않는다.**"""
+        """제한을 넘긴 주기는 `PROBE_TIMED_OUT` 표시를 달고 남는다.
+
+        이 표시가 있어야 끊김 판정이 그 주기를 유보한다. 수집기 관측에는
+        `loss_pct=100.0` 이 **그대로 남는다** — 그 값을 증거에서 빼는 것은
+        netmon/detect/vpn.py 쪽이고 tests/test_detect_vpn.py 가 덮는다.
+        """
         fake = self._timing_run()
         with mock.patch.object(first_hop, "run", fake):
             out = first_hop.collect({"gateway": GW, "ping_count": 4})
@@ -1604,20 +1649,28 @@ class TestARaisedPingCount(unittest.TestCase):
         self.assertNotEqual(got["error"], PROBE_NOT_RUN)  # 나갔을 수는 있다
         self.assertFalse(got["reachable"])
 
-    def test_the_judgement_holds_that_cycle_instead_of_blaming_the_first_hop(self):
-        """유보의 뜻이 판정까지 간다 — 재지 못한 주기가 근거로 쓰이지 않는다.
+    def test_only_the_disconnect_judgement_gets_the_held_cycle(self):
+        """유보의 뜻이 **끊김 판정에만** 간다.
 
-        `_only_timed_out` 이 참이어야 요약문이 "끝나지 못함" 쪽으로 간다
-        (netmon/detect/vpn.py). 이 값이 판정에 닿는 경로는
+        `error` 가 실려야 `_only_timed_out` 이 참이 되어 요약문이 "끝나지
+        못함" 쪽으로 간다(netmon/detect/vpn.py). 이 값이 판정에 닿는 경로는
         tests/test_detect_vpn.py 가 덮는다.
+
+        **품질 축은 유보하지 않는다.** 같은 관측의 `gateway_reachable` 이
+        거짓이므로 netmon/baseline.py 가 `gw_fail_streak` 을 올리고
+        netmon/detect/quality.py 가 3회째에 `FIRST_HOP_UNREACHABLE` 을 낸다.
+        아래 단언은 그 사실을 **그대로 고정한다** — 유보가 품질 축까지
+        가리라고 읽으면 안 된다(파급은 `packets_per_command` docstring).
         """
         fake = self._timing_run()
         with mock.patch.object(first_hop, "run", fake):
             out = first_hop.collect({"gateway": GW, "ping_count": 4,
                                      "first_hop_burst": False})
         self.assertEqual(out["results"]["gateway"]["error"], PROBE_TIMED_OUT)
+        # 품질 축이 읽는 두 값. 유보 표시가 이 값들을 바꾸지 않는다.
         self.assertFalse(out["gateway_reachable"])
         self.assertIsNone(out.get("gateway_rtt_ms"))
+        self.assertEqual(out["results"]["gateway"]["loss_pct"], 100.0)
 
     def test_three_still_measures(self):
         """바로 아래 값은 종전대로 잰다 — 유보가 전부에 걸리는 것이 아니다."""

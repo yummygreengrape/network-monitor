@@ -52,9 +52,13 @@ PING_OVERHEAD_SECONDS = 1.0
 # 여기서 먼저 끊으면 응답할 수 있었던 대상이 손실로 둔갑해서, 손실률이
 # 네트워크가 아니라 우리 제한 시간의 산물이 된다.
 #
-# 넉넉한 것은 **기본값(1발) 기준**이다. `ping_count` 를 4 이상으로 올리면
-# 한 명령의 소요가 이 제한을 넘어 평소 주기도 "끝나지 못함" 으로 유보된다.
-# 그 설정을 자르지 않는 이유는 `packets_per_command` 에 적어 두었다.
+# 넉넉한 것은 **기본값(1발) 기준**이다. `ping_count` 를 올려 한 명령의 소요가
+# 이 제한을 넘으면 그 주기는 "끝나지 못함" 으로 유보된다. 넘기 시작하는 발
+# 수는 **대상이 응답하느냐에 달렸고, 두 경우를 같은 수로 말할 수 없다** —
+# 무응답 대상은 바로 위 추정(`ping_seconds`)으로 4발부터이고, 응답이 오는
+# 대상은 패킷 간격 1초 모형(`DEFAULT_COUNT` 위 주석)상 그보다 뒤다.
+# 응답이 오는 쪽의 경계는 재지 않았다.
+# 그 설정을 자르지 않는 이유와 유보의 파급은 `packets_per_command` 에 적었다.
 PING_TIMEOUT_SECONDS = 4.0
 RESULT_WAIT_SECONDS = 10.0
 
@@ -64,8 +68,11 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
 
     1 미만은 1 로 올린다. **위로는 자르지 않는다** — 설정한 사람이 적어 둔
     발 수를 말없이 줄이면 평소 주기가 조용히 얇아지고, 그 사실이 어디에도
-    남지 않는다(사용자 결정 2026-09-22). 읽을 수 없는 값은 기본값 1 이다
-    (설정 기본값과 같다 — netmon/config.py).
+    남지 않는다(사용자 결정 2026-09-22). 수로 읽을 수 없는 값은 기본값 1 이다
+    (설정 기본값과 같다 — netmon/config.py). `float("inf")` 처럼 `int()` 가
+    `OverflowError` 를 던지는 값도 여기에 든다 — JSON 은 `Infinity` 를 그대로
+    읽으므로(`json.loads` 기본값) 손으로 고친 설정에서 올 수 있고, 잡지
+    않으면 수집기 주기 하나가 통째로 예외로 끝난다.
 
     **하한이 없으면 재지 못한 주기가 "손실 100%" 로 적힌다.** macOS ping 은
     `-c 0`·`-c -3` 을 거절한다: rc 64(EX_USAGE)에 stdout 이 비어 있다
@@ -74,16 +81,41 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
     않고, `parse_ping("")` 이 `{replies: 0, loss_pct: 100.0, reachable: False}`
     를 만든다 — 한 발도 나가지 않은 주기가 **잰 것처럼** 기록된다.
 
-    **`ping_count` 가 4 이상이면 주기가 유보된다 — 버그가 아니라 의도다.**
-    한 명령의 소요는 `ping_seconds(count=4)` = 4.2초로 subprocess 제한
-    (`PING_TIMEOUT_SECONDS`, 4.0초)을 넘는다. 그래서 그 설정에서는 응답이
-    오는 평소 주기도 제한에 걸리고, `probe_failure` 가 `PROBE_TIMED_OUT` 을
-    남겨 판정이 그 주기를 **재지 못한 것으로 유보**한다
-    (netmon/detect/vpn.py `_only_timed_out`, `_probe_phrase`). 재는 주기가
-    줄어드는 대신 **없는 손실률을 적지 않고, 재지 못했다는 사실이 기록에
-    남는다.** 여기서 상한으로 잘라 버리면 설정보다 적게 재면서 그 사실조차
-    남지 않으므로, 자르지 않고 유보되게 둔다
-    (되돌리지 말 것 — tests/test_link.py `TestARaisedPingCount`).
+    **제한을 넘는 `ping_count` 는 그 주기를 유보시킨다 — 버그가 아니라 의도다.**
+    한 명령의 소요가 subprocess 제한(`PING_TIMEOUT_SECONDS`, 4.0초)을 넘으면
+    `probe_failure` 가 `PROBE_TIMED_OUT` 을 남기고, 끊김 판정이 그 주기를
+    **재지 못한 것으로 유보**한다
+    (netmon/detect/vpn.py `_only_timed_out`, `_probe_phrase`).
+
+    넘기 시작하는 발 수는 **대상이 응답하느냐에 따라 다르다.** 무응답 대상은
+    이 파일의 추정(`ping_seconds(count=4)` = 4.2초)으로 4발부터다. 응답이 오는
+    대상은 그 추정의 대상이 아니라 패킷 간격 1초 모형(`DEFAULT_COUNT` 위 주석)을
+    따르므로 경계가 **그보다 뒤**이고, 그 경계는 재지 않았다. 아래 테스트가
+    고정하는 것도 무응답 모형의 경계뿐이다.
+
+    **유보되는 것은 첫 홉 증거를 읽는 VPN 끊김 판정뿐이다.** `error` 와
+    `first_hop_errors` 를 읽는 곳은 netmon/detect/vpn.py 하나다. 같은 주기가
+    관측에는 `gateway_reachable=False`·`loss_pct=100.0` 으로도 남으므로 품질
+    축은 그 주기를 여전히 **"쟀는데 무응답"** 으로 읽는다. 따라오는 동작:
+
+    - `baseline.py` 가 `gw_fail_streak` 을 매 주기 올린다.
+    - streak 3 에서 `detect/quality.py` 가 `FIRST_HOP_UNREACHABLE`
+      (quality, medium)을 내고, 요약문에 `cause_note()` 의 원인 추정까지
+      붙인다 — 한 발도 결과를 받지 못한 주기에 대해 원인을 좁혀 적는 것이다.
+    - 그 판정은 `investigate/triggers.py` 의 `kinds` 목록에 있어 **조사가
+      자동으로 열린다.**
+    - ICMP 응답이 계속 없고 ARP 는 정상이면 `liveness.calibrate` 가
+      `icmp_gw=False` 로 굳혀 `GATEWAY_ICMP_SILENT` 를 남기고 그 망의 ICMP 기반
+      판정을 끈다. **우리 제한 시간이 만든 결과로 상대 네트워크의 성질을
+      단정하는 것**이고, state.json 에 남는다.
+    - `rtt_ewma` 는 `gateway_reachable` 이 참일 때만 갱신돼 오염되지 않고 멈춘다.
+
+    품질 축까지 함께 유보시키는 것은 판정 동작 변경이라 여기서 하지 않았다.
+
+    그럼에도 상한으로 자르지 않는 이유는 **자르면 설정보다 적게 재면서 그
+    사실조차 남지 않기** 때문이다. 유보된 주기는 적어도 "끝나지 못했다" 는
+    사실이 기록에 남는다 (되돌리지 말 것 —
+    tests/test_link.py `TestARaisedPingCount`).
 
     **부르는 곳이 둘이라 함수로 둔다.** 수집기는 이 값을 `ping -c` 에 넘기고,
     엔진은 같은 값으로 터널 엔드포인트의 상한을 센다
@@ -92,7 +124,7 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
     """
     try:
         n = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return DEFAULT_COUNT
     return max(DEFAULT_COUNT, n)
 
