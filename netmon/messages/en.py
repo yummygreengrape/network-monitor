@@ -117,12 +117,23 @@ VPN_RENEGOTIATING = "%s is renegotiating its tunnel (provider state connecting).
 # A drop seen in a cycle with no primary interface. Same finding kind, but the
 # sentence says the link was absent - otherwise a drop that follows the link
 # down is filed next to a drop on a live link, and the two have different root
-# causes. Nothing else was measured in that cycle, so nothing is narrowed.
+# causes.
+# What the sentence claims stops at "the link was absent in the same cycle":
+# within one cycle the order of the two cannot be told, and the provider reason
+# is not always No Network (a failed handshake reads the same here). So it does
+# not say the VPN path is fine - the observation does not reach that far.
 VPN_DISCONNECTED_NO_LINK = ("%s disconnected (provider state %s). There was no primary "
-                            "interface in the same cycle - a drop while the link was "
-                            "absent, so it is not read as a fault on the VPN path itself. "
-                            "The rest of this cycle was not measured, so nothing is "
-                            "narrowed further.")
+                            "interface in the same cycle - within a single cycle the "
+                            "order of the link loss and the drop cannot be told, and the "
+                            "rest of the cycle was not measured, so the cause is not "
+                            "narrowed.")
+# The same cycle, but the provider reported connecting: not called a drop
+# (AC-9), the same rule the full-cycle VPN_RENEGOTIATING follows.
+VPN_RENEGOTIATING_NO_LINK = ("%s is renegotiating its tunnel (provider state connecting). "
+                             "There was no primary interface in the same cycle - within a "
+                             "single cycle the order of the link loss and the "
+                             "renegotiation cannot be told, and the rest of the cycle was "
+                             "not measured, so the cause is not narrowed.")
 VPN_TUNNEL_OFF = ("%s is connected but in a mode that builds no tunnel (%s). Traffic "
                   "leaves outside the tunnel, and other devices on this L2 can read it.")
 VPN_TUNNEL_OFF_SAE = ("%s is connected but in a mode that builds no tunnel (%s). WPA3-SAE "

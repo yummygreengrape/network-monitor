@@ -1526,6 +1526,33 @@ class TestDropWhileTheLinkIsAbsent(unittest.TestCase):
         # 평소 주기의 문장과 섞이지 않는다.
         self.assertNotIn(msg.VPN_DISCONNECTED % ("warp", ""), f.summary)
 
+    def test_connecting_is_not_called_a_drop_here_either(self):
+        """AC-9 는 이 경로에도 그대로 적용된다.
+
+        `was == connected` 이고 `now` 가 connected·unknown·빈값이 아니면
+        여기 들어오므로, **`connecting` 인 주기가 그대로 들어온다.** 링크가
+        빠지는 끊김에서는 첫 비연결 관측이 `connecting` 일 수 있고, 보관
+        표본을 재생해 보면 실제로 그런 주기가 있다(2026-09-17 05시 42분 14초
+        UTC — 직전 주기 connected, 주 인터페이스 없음, 공급자 상태 connecting).
+        판정 종류·축·등급은 평소와 같고 바뀌는 것은 문장뿐이다.
+        """
+        f = self._run(self._absent(state="connecting"))[0][0]
+        self.assertEqual((f.kind, f.axis, f.severity, f.confidence),
+                         ("VPN_DISCONNECTED", "quality", "medium", "confirmed"))
+        self.assertEqual(f.evidence["provider_state"], "connecting")
+        self.assertEqual(
+            f.summary,
+            " ".join([msg.VPN_RENEGOTIATING_NO_LINK % "warp",
+                      msg.VPN_PROVIDER_REASON % "No Network"]))
+        # "연결 끊김" 으로 적지 않는다 — 공급자 자신은 다시 맺는 중이라고 한다.
+        self.assertNotIn(msg.VPN_DISCONNECTED_NO_LINK % ("warp", "connecting"),
+                         f.summary)
+        for code in ("ko", "en"):
+            with self.subTest(lang=code):
+                head = messages.get("VPN_DISCONNECTED", code).split("%s", 1)[1]
+                self.assertNotIn(head.split(".")[0].strip(),
+                                 messages.get("VPN_RENEGOTIATING_NO_LINK", code))
+
     def test_it_does_not_pick_a_likely_cause(self):
         """재지 못한 관측으로 원인을 고르지 않는다.
 

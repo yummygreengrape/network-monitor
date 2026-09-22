@@ -602,8 +602,15 @@ def _no_link_summary(name: str, now: Any, cur_st: Dict[str, Any]) -> str:
     (실측 2026-09-21 05:49:17 이 그랬다). 대신 **링크가 없었다는 관측 사실**을
     적는다. 공급자 사유는 평소와 같은 기준으로만 인용한다(고정 목록과 정확히
     일치할 때만 — 사유 문자열에 주소·포트가 섞여 있고 요약문은 가려지지 않는다).
+
+    같은 점도 하나 있다. **`connecting` 을 "연결 끊김" 이라고 적지 않는다**
+    (AC-9) — 이 경로에도 `connecting` 인 주기가 들어올 수 있다. 링크가 빠지는
+    끊김에서 첫 비연결 관측이 `connecting` 일 수 있기 때문이다.
     """
-    parts = [msg.VPN_DISCONNECTED_NO_LINK % (name, now)]
+    if now == "connecting":
+        parts = [msg.VPN_RENEGOTIATING_NO_LINK % name]
+    else:
+        parts = [msg.VPN_DISCONNECTED_NO_LINK % (name, now)]
     quotable = _quotable_reason(cur_st.get("reason"))
     if quotable:
         parts.append(msg.VPN_PROVIDER_REASON % quotable)
