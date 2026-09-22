@@ -47,8 +47,9 @@ def _collect_error(exc: Exception) -> str:
     PermissionError·TimeoutExpired 뿐이라 그런 OSError 는 여기까지 올라온다.
 
     `ident()` 로 감싸지 않는 이유는 collect/link.py 의 `_error_note` 와 같다 —
-    자유 문장을 담을 `ID_KINDS` 종류가 없고, 감싸면 `redact` 가 문장 전체를
-    토큰 하나로 바꿔 오류 내용 자체가 사라진다.
+    여기 오는 것은 경로 하나가 아니라 **문장**이라 `ID_KINDS` 의 어느 종류에도
+    맞지 않고(`path` 종류는 있으나 경로 값에 붙이는 이름이다 — netmon/model.py),
+    문장째 감싸면 `redact` 가 전체를 토큰 하나로 바꿔 오류 내용이 사라진다.
 
     잃는 것은 예외 메시지의 진단 정보다. 어느 갈래였는지는 종류 이름으로
     가릴 수 있고, 흔한 실패(명령 없음·권한·제한 시간)는 `util.run` 이 이미

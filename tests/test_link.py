@@ -1897,9 +1897,13 @@ class TestTheBurstFeedbackOfAHeldCycle(unittest.TestCase):
         `ctx.quality_attribution()` 을 붙이고(netmon/detect/quality.py),
         `triggers.is_meaningful` 은 귀속이 있고 `include_attributed` 가
         거짓이면(기본값) 거짓을 준다(netmon/investigate/triggers.py).
-        잠자기 직후처럼 첫 홉이 조용한 전형적 상황이 그 조합이다.
-
         위 시험들은 `attributions=[]` 로만 돌아 이 갈래를 가리지 못했다.
+
+        **고정하는 범위**: 귀속을 `Context` 에 **직접 넣어** 본다. 엔진의 귀속
+        계산도, 정체성 귀속이 일어난 주기의 기준선 초기화
+        (netmon/engine.py 의 `reset_for_new_network` 호출)도 거치지 않는다.
+        그래서 실제로 경보 주기와 귀속이 얼마나 겹치는지는 여기서 말하지
+        않는다 — 그쪽은 `packets_per_command` docstring 의 "조사를 여는 조건".
         """
         rules = triggers.merge_rules(None)
 

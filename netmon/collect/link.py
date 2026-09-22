@@ -142,13 +142,20 @@ def packets_per_command(value: Any = DEFAULT_COUNT) -> int:
       `evaluate` 가 `alive False` 를 준 주기에만 오르고, `alive True` 한 번이면
       0 으로 돌아간다(그래서 위 첫째 갈래가 경보에 닿지 않는다).
     - **조사를 여는 조건**: netmon/investigate/triggers.py:59-68 `is_meaningful`.
-      `kinds` 에 있어도 귀속(`finding.attribution`)이 붙어 있으면
+      `kinds` 에 있어도 **귀속(`finding.attribution`)이 붙은 판정이면**
       `include_attributed` 가 거짓인 한(기본값) 열지 않는다. `quality.detect` 는
-      `FIRST_HOP_UNREACHABLE` 에 `ctx.quality_attribution()` 을 붙이므로
-      (netmon/detect/quality.py) 잠자기·인터페이스 변경·네트워크 이동·링크
-      재시작 직후처럼 첫 홉이 조용한 상황에서는 판정만 나고 조사는 열리지
-      않는다 (tests/test_link.py `TestTheBurstFeedbackOfAHeldCycle` 의
+      `FIRST_HOP_UNREACHABLE` 에 `ctx.quality_attribution()` 을 붙인다
+      (netmon/detect/quality.py). **고정한 것은 여기까지다** — 귀속을 직접 넣어
+      확인한다(tests/test_link.py `TestTheBurstFeedbackOfAHeldCycle` 의
       `test_an_explained_alert_does_not_open_an_investigation`).
+      **어떤 상황에서 실제로 겹치는지는 재지 않았다.** 확인된 것은 겹치지 않는
+      쪽 하나다: 정체성 귀속 셋(`network_change`·`iface_change`·`link_restart`)이
+      붙는 주기는 엔진이 `reset_for_new_network` 로 `gw_fail_streak` 을 지우고
+      (netmon/engine.py:418-421, `VOLATILE_KEYS` — netmon/baseline.py:45)
+      `update_counters` 가 1 부터 다시 세므로(netmon/baseline.py:142-143)
+      그 주기에는 경보 조건(streak == 3)이 성립하지 않는다. 남는 것은 `sleep`
+      이고, 그것이 겹치려면 경보가 나는 그 주기에 측정 공백까지 있어야 한다
+      (netmon/detect/__init__.py:206-207).
 
     `rtt_ewma` 는 `gateway_reachable` 이 참일 때만 갱신돼 오염되지 않고 멈춘다.
 
