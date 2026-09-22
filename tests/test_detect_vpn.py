@@ -14,6 +14,7 @@ from netmon import vpn as vpnmod
 from netmon.collect.link import merge_probes, parse_ping
 from netmon.detect import Context, attributions_for, network_key, run_all
 from netmon.detect import vpn as vpn_rules
+from netmon.model import PROBE_NOT_RUN, PROBE_TIMED_OUT
 from tests.helpers import (ENDPOINT, ENDPOINT_REASON, GW_MAC, by_kind,
                            command_failed, endpoint_probe, kinds, obs,
                            vpn_state)
@@ -662,6 +663,140 @@ class TestAMeasurementThatNeverRanIsNotEvidence(unittest.TestCase):
         self.assertNotIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
 
 
+class TestNotRunAndTimedOutAreDifferentThings(unittest.TestCase):
+    """실행되지 못한 주기와 끝나지 못한 주기를 뭉개지 않는다 (DEV-10, AC-10).
+
+    전자는 패킷이 한 발도 나가지 않았고, 후자는 나갔을 수도 있는데 결과를
+    받지 못했다. 어느 쪽도 "쟀다" 가 아니므로 구간을 지목하지 않지만,
+    문구까지 같게 적으면 기록을 읽는 쪽이 둘을 구분할 수 없다.
+    """
+
+    def _drop(self, cur, state=None):
+        return by_kind(judge(obs(vpn=vpn_state("connected")), cur,
+                             state=state or {"icmp_gw": True}),
+                       "VPN_DISCONNECTED")
+
+    def _single(self, error):
+        return self._drop(command_failed(obs(vpn=vpn_state("disconnected")),
+                                         error=error))
+
+    def _burst(self, probes):
+        cur = obs(vpn=vpn_state("disconnected"), icmp_ok=False)
+        # 모양은 실제 생산자에게 맡긴다 (collect/link.merge_probes).
+        cur.data["link"]["results"]["gateway"] = merge_probes(probes)
+        cur.data["link"]["gateway_reachable"] = bool(probes[0].get("reachable"))
+        cur.data["link"]["first_hop_probes"] = len(probes)
+        return self._drop(cur)
+
+    def test_a_probe_that_ran_out_of_time_is_not_called_unrun(self):
+        f = self._single(PROBE_TIMED_OUT)
+        self.assertIn(msg.WHY_FIRST_HOP_TIMED_OUT, f.summary)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_TIMED_OUT, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_NOT_RUN, f.summary)
+
+    def test_a_probe_that_ran_out_of_time_still_names_no_leg(self):
+        f = self._single(PROBE_TIMED_OUT)
+        self.assertNotIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_ONE_COMMAND, f.summary)
+        self.assertEqual(f.evidence["first_hop_errors"], [PROBE_TIMED_OUT])
+
+    def test_a_probe_that_never_ran_keeps_its_own_words(self):
+        f = self._single(PROBE_NOT_RUN)
+        self.assertIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_NOT_RUN, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_TIMED_OUT, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_TIMED_OUT, f.summary)
+
+    def test_an_unknown_failure_reads_as_before(self):
+        """수집기의 future 예외 갈래가 남기는 문구는 종전 그대로다."""
+        f = self._single("TimeoutError")
+        self.assertIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_TIMED_OUT, f.summary)
+
+    def test_a_mixed_burst_makes_the_weaker_claim(self):
+        """하나라도 실행되지 못했으면 "전부 시간만 넘겼다" 고 적지 않는다."""
+        f = self._burst([{"reachable": False, "error": PROBE_TIMED_OUT},
+                         {"reachable": False, "error": PROBE_NOT_RUN},
+                         {"reachable": False, "error": PROBE_TIMED_OUT}])
+        self.assertEqual(sorted(f.evidence["first_hop_errors"]),
+                         sorted([PROBE_TIMED_OUT, PROBE_NOT_RUN]))
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST_NOT_RUN, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_BURST_TIMED_OUT_NONE, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
+
+    def test_a_burst_that_only_ran_out_of_time_says_so(self):
+        f = self._burst([{"reachable": False, "error": PROBE_TIMED_OUT}] * 3)
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST_TIMED_OUT_NONE, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_BURST_NOT_RUN, f.summary)
+        self.assertIn(msg.WHY_FIRST_HOP_TIMED_OUT, f.summary)
+        self.assertNotIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
+        self.assertNotIn("일부", f.summary)
+
+    def test_a_partly_timed_out_burst_keeps_the_answer_count(self):
+        """응답이 하나라도 있으면 나간 발이 있었다 — 손실률만 못 읽는다."""
+        f = self._burst([{"reachable": True, "rtt_ms": 3.0, "replies": 1},
+                         {"reachable": False, "error": PROBE_TIMED_OUT},
+                         {"reachable": False, "error": PROBE_TIMED_OUT}])
+        self.assertIn(msg.FIRST_HOP_EVIDENCE_BURST_TIMED_OUT % 1, f.summary)
+        self.assertNotIn(msg.FIRST_HOP_EVIDENCE_BURST_FAILED % 1, f.summary)
+        self.assertNotIn(msg.WHY_FIRST_HOP_TIMED_OUT, f.summary)
+
+    def test_both_kinds_are_still_kept_out_of_the_english_summary_too(self):
+        """두 문구가 en 카탈로그에도 있어야 요약문이 갈린다."""
+        for key in ("WHY_FIRST_HOP_TIMED_OUT", "FIRST_HOP_EVIDENCE_TIMED_OUT",
+                    "FIRST_HOP_EVIDENCE_BURST_TIMED_OUT",
+                    "FIRST_HOP_EVIDENCE_BURST_TIMED_OUT_NONE"):
+            for code in ("ko", "en"):
+                self.assertTrue(messages.get(key, code).strip(), (key, code))
+
+
+class TestAnEndpointThatWasNotMeasuredHasNoResult(unittest.TestCase):
+    """나가지 못한 엔드포인트 측정이 도달 실패로 기록되지 않는다 (DEV-10).
+
+    `ping()` 이 실행 실패를 `error` 로 남기므로 엔드포인트 결과에도 그 키가
+    붙는다. 덮였는지 **수집기를 실제로 돌려** 확인한다 — 손으로 적은 모양은
+    수집기가 바뀌면 같이 틀어진다.
+    """
+
+    def _cycle(self, real_argv):
+        from netmon import util
+        from netmon.collect import link as first_hop
+
+        def fake(argv, timeout=None, stdin=""):
+            return util.run(real_argv)
+
+        with mock.patch.object(first_hop, "run", fake):
+            block = first_hop.collect({"gateway": "192.0.2.1",
+                                       "allow_tunnel_probe": True,
+                                       "tunnel_endpoint": ENDPOINT})
+        prev = obs(vpn=vpn_state("connected"), security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:15Z",
+                  vpn=vpn_state("disconnected", reason=ENDPOINT_REASON),
+                  security="WPA2_PSK")
+        cur.data["link"] = block
+        return by_kind(judge(prev, cur), "VPN_DISCONNECTED")
+
+    def test_a_cycle_whose_ping_could_not_run(self):
+        f = self._cycle(["netmon-no-such-command-for-tests"])
+        # 엔드포인트: 도달성은 적지 않고 실패만 남는다.
+        self.assertNotIn("tunnel_endpoint_reachable", f.evidence)
+        self.assertEqual(f.evidence["tunnel_endpoint_error"], PROBE_NOT_RUN)
+        self.assertEqual(f.evidence["tunnel_endpoint"], {"id": "ipv4", "v": ENDPOINT})
+        # 첫 홉: 같은 실패가 근거로 실리고 구간을 지목하지 않는다.
+        self.assertEqual(f.evidence["first_hop_errors"], [PROBE_NOT_RUN])
+        self.assertIn(msg.WHY_FIRST_HOP_NOT_RUN, f.summary)
+        self.assertNotIn(msg.WHY_LINK % msg.METHOD_ICMP, f.summary)
+        self.assertNotIn(ENDPOINT, f.summary)
+
+    def test_a_measured_cycle_still_records_reachability(self):
+        """가드가 넘치지 않는다 — 실제로 나간 주기는 종전대로 적는다."""
+        f = self._cycle(["true"])
+        self.assertIn("tunnel_endpoint_reachable", f.evidence)
+        self.assertFalse(f.evidence["tunnel_endpoint_reachable"])
+        self.assertNotIn("tunnel_endpoint_error", f.evidence)
+
+
 class TestTheKindSetIsFrozen(unittest.TestCase):
     """이 판정기가 내는 종류 집합. 기준 커밋(a502aeb)과 같다.
 
@@ -1249,9 +1384,18 @@ class TestTunnelEndpointEvidence(unittest.TestCase):
         self.assertNotIn("tunnel_endpoint_rtt_ms", f.evidence)
 
     def test_a_probe_that_never_ran_carries_only_the_error_kind(self):
+        """실패한 주기는 **도달성을 적지 않는다** (DEV-10).
+
+        종전에는 같은 결과에서 `tunnel_endpoint_reachable: False` 도 함께
+        만들었다. 그 False 는 "응답이 없었다" 가 아니라 "아는 바가 없다"
+        인데, 값으로 적으면 나가지도 않은 패킷의 무응답이 도달 실패로
+        기록된다.
+        """
         f = self._drop(error="TimeoutError")
         self.assertEqual(f.evidence["tunnel_endpoint_error"], "TimeoutError")
-        self.assertFalse(f.evidence["tunnel_endpoint_reachable"])
+        self.assertNotIn("tunnel_endpoint_reachable", f.evidence)
+        # 대상 주소는 그대로 남는다 — 무엇을 향해 보내려 했는지는 사실이다.
+        self.assertEqual(f.evidence["tunnel_endpoint"], {"id": "ipv4", "v": ENDPOINT})
 
     def test_reaching_the_cap_is_recorded_without_claiming_a_result(self):
         """상한에 닿아 보내지 않은 주기는 그 사실만 남는다 (AC-4 수정분).

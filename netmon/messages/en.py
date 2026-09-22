@@ -168,6 +168,15 @@ FIRST_HOP_EVIDENCE_BURST_NOT_RUN = "First-hop evidence is a concurrent ICMP burs
 # collector leaves a singular `error` key and records reachable as False
 # (collect/link.collect). Nothing was measured about the first hop.
 FIRST_HOP_EVIDENCE_NOT_RUN = "The first-hop ping command failed to run, so the first hop was not measured this cycle."
+# The command started but did not finish inside its limit. A **different
+# fact**: a probe that never ran sent no packet at all, while this one may
+# have sent one and lost the result. Neither can be called a measurement.
+FIRST_HOP_EVIDENCE_TIMED_OUT = "The first-hop probe did not finish inside its time limit, so no result came back - whether a packet went out is unknown."
+# The same distinction for a burst. If anything answered, at least one packet
+# went out and only the loss figure is unreadable; if nothing answered, even
+# that is unknown.
+FIRST_HOP_EVIDENCE_BURST_TIMED_OUT = "First-hop evidence is a concurrent ICMP burst - some probes did not finish inside the time limit, so the loss cannot be read as network loss (%d answered)."
+FIRST_HOP_EVIDENCE_BURST_TIMED_OUT_NONE = "First-hop evidence is a concurrent ICMP burst - nothing answered and at least one probe did not finish inside the time limit, so whether any packet went out is unknown."
 
 # The reason string from the provider. Quoted in a summary only on an exact
 # match against a fixed list - these strings carry public addresses and ports,
@@ -198,6 +207,9 @@ WHY_FIRST_HOP_MIXED = "first hop answered only some probes (by %s) — which leg
 # The probe never ran. reachable stays False, but that means "not measured",
 # not "silent" - a packet that never went out cannot point at a leg.
 WHY_FIRST_HOP_NOT_RUN = "the first-hop probe failed to run — which leg is at fault cannot be told from this observation alone"
+# The probe ran out of time. A packet may have gone out, but no result came
+# back, so this is still not a measurement. Not merged with "failed to run".
+WHY_FIRST_HOP_TIMED_OUT = "the first-hop probe did not finish inside its time limit — which leg is at fault cannot be told from this observation alone"
 WHY_UNKNOWN = "not enough evidence to tell"
 
 DETECTOR_ERROR = "Detector %s stopped with an exception: %s"

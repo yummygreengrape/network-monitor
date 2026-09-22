@@ -25,7 +25,8 @@ from netmon import link, liveness
 from netmon import vpn as vpnmod
 from netmon.collect import link as first_hop
 from netmon.engine import Engine
-from netmon.model import ident
+from netmon import util
+from netmon.model import PROBE_NOT_RUN, PROBE_TIMED_OUT, ident
 from netmon.util import CmdResult
 from tests import helpers
 
@@ -1177,6 +1178,153 @@ class TestEnginePassesBothGatesToTheCollector(unittest.TestCase):
             "disconnected", reason=helpers.ENDPOINT_REASON))
         self.assertIsNone(seen["tunnel_endpoint"])
         self.assertTrue(seen["tunnel_probe_capped"])
+
+
+# --- 실행되지 못한 탐침 (DEV-10, AC-10) ---------------------------------
+#
+# 아래 두 클래스는 **`util.run` 이 실제로 돌려주는 모양**으로 판정한다.
+# CmdResult 를 손으로 지어내면 실제 실패 경로(`FileNotFoundError` 갈래가
+# not_found 와 rc 를 함께 세우는 것 등)가 바뀌어도 통과해 버린다.
+
+MISSING_COMMAND = ["netmon-no-such-command-for-tests"]
+
+
+@contextlib.contextmanager
+def a_file_without_the_execute_bit():
+    d = tempfile.mkdtemp()
+    try:
+        path = os.path.join(d, "ping")
+        with open(path, "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(path, 0o644)
+        yield path
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+class TestTheShapesRunReallyReturns(unittest.TestCase):
+    """`util.run` 의 실패 갈래 세 가지. 네트워크로 아무것도 보내지 않는다."""
+
+    def test_a_command_that_is_not_there(self):
+        r = util.run(MISSING_COMMAND)
+        self.assertTrue(r.not_found)
+        self.assertEqual(r.rc, 127)
+        self.assertEqual(r.out, "")
+        self.assertFalse(r.ok)
+
+    def test_a_command_that_cannot_be_executed(self):
+        with a_file_without_the_execute_bit() as path:
+            r = util.run([path])
+        self.assertEqual(r.rc, 126)
+        self.assertFalse(r.not_found)
+        self.assertFalse(r.timed_out)
+        self.assertEqual(r.out, "")
+
+    def test_a_command_that_outlives_its_limit(self):
+        r = util.run(["sleep", "5"], timeout=0.05)
+        self.assertTrue(r.timed_out)
+        self.assertEqual(r.out, "")
+
+    def test_a_silent_ping_is_not_one_of_those(self):
+        """응답이 없는 ping 도 rc 는 0 이 아니다 — 실행은 됐다."""
+        r = CmdResult(["ping", GW], 2, LOST, "")
+        self.assertFalse(r.ok)
+        self.assertFalse(r.not_found)
+        self.assertFalse(r.timed_out)
+
+
+def ping_through(real_argv, limit=None, target=GW):
+    """`ping()` 을 `util.run` 의 **진짜 실패 결과**로 돌린다.
+
+    ping 명령은 실행하지 않는다. 대신 실패하는 다른 명령(없는 명령, 실행
+    권한이 없는 파일, 시간을 넘기는 sleep)을 실제로 돌려 그 CmdResult 를
+    ping 자리에 넣는다.
+    """
+    def fake(argv, timeout=None, stdin=""):
+        # 제한 시간은 이 시험이 정한다 — ping 의 4초를 실제로 기다리지 않는다.
+        return util.run(real_argv, timeout=limit) if limit else util.run(real_argv)
+
+    with mock.patch.object(first_hop, "run", fake):
+        return first_hop.ping(target)
+
+
+class TestAProbeThatCouldNotRunSaysSo(unittest.TestCase):
+    """나가지 않은 패킷을 무응답으로 적지 않는다 (DEV-10, AC-10).
+
+    `ping()` 이 `run` 의 rc·timed_out·not_found 를 버리면, 명령을 찾지
+    못한 주기도 `{replies: 0, loss_pct: 100.0, reachable: False}` 로만 나와
+    판정이 그것을 "무응답" 으로 읽는다. 관측에 남는 신호는 기존 `error`
+    키다 — 새 키를 만들지 않는다.
+    """
+
+    def test_a_missing_binary_is_recorded_as_not_run(self):
+        out = ping_through(MISSING_COMMAND)
+        self.assertEqual(out["error"], PROBE_NOT_RUN)
+        self.assertFalse(out["reachable"])
+
+    def test_a_binary_that_cannot_be_executed_is_recorded_as_not_run(self):
+        with a_file_without_the_execute_bit() as path:
+            out = ping_through([path])
+        self.assertEqual(out["error"], PROBE_NOT_RUN)
+
+    def test_a_timeout_is_recorded_as_a_different_thing(self):
+        """"실행되지 못함" 과 "끝나지 못함" 은 뜻이 다르다."""
+        out = ping_through(["sleep", "5"], limit=0.05)
+        self.assertEqual(out["error"], PROBE_TIMED_OUT)
+        self.assertNotEqual(PROBE_TIMED_OUT, PROBE_NOT_RUN)
+
+    def test_a_silent_but_real_ping_carries_no_error(self):
+        """가드가 넘치지 않는다 — 무응답 주기는 rc 가 0 이 아니어도 실행됐다."""
+        fake = FakeRun(outs=[LOST], rc=2)
+        with mock.patch.object(first_hop, "run", fake):
+            out = first_hop.ping(GW)
+        self.assertNotIn("error", out)
+        self.assertEqual(out["loss_pct"], 100.0)
+        self.assertFalse(out["reachable"])
+
+    def test_an_answered_ping_keeps_its_shape(self):
+        with mock.patch.object(first_hop, "run", FakeRun()):
+            out = first_hop.ping(GW)
+        self.assertEqual(set(out),
+                         {"rtt_ms", "rtt_max_ms", "loss_pct", "replies", "reachable"})
+
+    def test_the_note_is_a_fixed_word_without_the_target(self):
+        """터널 엔드포인트에도 같은 문구가 쓰인다 — 주소가 섞이면 안 된다.
+
+        `_error_note` 가 엔드포인트에 두는 제약(고정된 낱말, 주소 불포함)을
+        여기서도 지킨다. 권한 오류 메시지에는 실행 파일 경로가 들어 있다.
+        """
+        with a_file_without_the_execute_bit() as path:
+            out = ping_through([path], target=helpers.ENDPOINT)
+            self.assertNotIn(path, repr(out))
+        self.assertNotIn(helpers.ENDPOINT, repr(out))
+        self.assertIn(out["error"], (PROBE_NOT_RUN, PROBE_TIMED_OUT))
+
+    def test_the_whole_cycle_carries_the_failure(self):
+        """수집기를 통과해도 남는다. 다발은 합쳐진 `errors` 로 실린다."""
+        def fake(argv, timeout=None, stdin=""):
+            return util.run(MISSING_COMMAND)
+        with mock.patch.object(first_hop, "run", fake):
+            single = first_hop.collect({"gateway": GW})
+            burst = first_hop.collect({"gateway": GW, "first_hop_burst": True,
+                                       "interval": 5})
+        self.assertEqual(single["results"]["gateway"]["error"], PROBE_NOT_RUN)
+        self.assertEqual(burst["results"]["gateway"]["errors"], [PROBE_NOT_RUN])
+        self.assertEqual(burst["results"]["gateway"]["sent"], 3)
+
+    def test_the_endpoint_result_carries_it_without_the_address(self):
+        """엔드포인트 결과에도 주소가 섞이지 않는다 (DEV-10 4번)."""
+        with a_file_without_the_execute_bit() as path:
+            def fake(argv, timeout=None, stdin=""):
+                return util.run([path])
+            with mock.patch.object(first_hop, "run", fake):
+                block = first_hop.collect({"gateway": GW,
+                                           "allow_tunnel_probe": True,
+                                           "tunnel_endpoint": helpers.ENDPOINT})
+            got = block["results"][first_hop.TUNNEL_ENDPOINT]
+            self.assertEqual(got["error"], PROBE_NOT_RUN)
+            self.assertNotIn(path, repr(got))
+        self.assertNotIn(helpers.ENDPOINT, repr(got))
 
 
 if __name__ == "__main__":

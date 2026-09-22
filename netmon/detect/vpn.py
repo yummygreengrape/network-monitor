@@ -23,8 +23,8 @@ from typing import Any, Dict, List, Optional
 from .. import messages as msg
 from .. import wifi_security
 from ..liveness import ICMP, evaluate, method_label
-from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, QUALITY, SECURITY,
-                     Finding, Observation)
+from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, PROBE_TIMED_OUT,
+                     QUALITY, SECURITY, Finding, Observation)
 
 FEATURE = "detect.vpn"
 
@@ -99,6 +99,11 @@ def _endpoint_evidence(cur: Observation) -> Dict[str, Any]:
     예외가 하나 있다. 한 끊김의 상한에 닿아 **일부러 보내지 않은** 주기는
     그 사실을 남긴다(`tunnel_endpoint_capped`). 그때도 도달성은 적지
     않는다 — 보내지 않았으므로 아는 바가 없다.
+
+    측정이 실행되지 못했거나 끝나지 못한 주기도 같다. 수집기의 `reachable`
+    은 그때 False 로 남지만 그것은 "응답이 없었다" 가 아니라 "아는 바가
+    없다" 이므로, **도달성을 적지 않고** 실패 사실만 남긴다. 값으로 적으면
+    나가지도 않은 패킷의 무응답을 도달 실패로 기록하게 된다.
     """
     out: Dict[str, Any] = {}
     if (cur.get("link") or {}).get("tunnel_endpoint_capped"):
@@ -107,19 +112,21 @@ def _endpoint_evidence(cur: Observation) -> Dict[str, Any]:
     got = results.get("tunnel_endpoint") if isinstance(results, dict) else None
     if not isinstance(got, dict):
         return out
-    out["tunnel_endpoint_reachable"] = bool(got.get("reachable"))
     targets = cur.get("link", "targets")
     addr = targets.get("tunnel_endpoint") if isinstance(targets, dict) else None
     if addr is not None:
         out["tunnel_endpoint"] = addr
+    err = got.get("error")
+    if err:
+        # 수집기가 남기는 문구는 **고정된 낱말**이다 — 실행 실패는
+        # `netmon/model.PROBE_*`, 결과를 받지 못한 예외는 예외 종류 이름까지만
+        # (collect/link._error_note). 어느 쪽도 대상 주소를 담지 않는다.
+        out["tunnel_endpoint_error"] = str(err)[:80]
+        return out
+    out["tunnel_endpoint_reachable"] = bool(got.get("reachable"))
     rtt = got.get("rtt_ms")
     if isinstance(rtt, (int, float)) and not isinstance(rtt, bool):
         out["tunnel_endpoint_rtt_ms"] = float(rtt)
-    err = got.get("error")
-    if err:
-        # 측정이 실행되지 못한 주기다. 수집기가 예외 종류 이름까지만
-        # 남기므로(collect/link._error_note) 여기서 주소가 섞여 들어오지 않는다.
-        out["tunnel_endpoint_error"] = str(err)[:80]
     return out
 
 
@@ -185,6 +192,24 @@ def _probe_evidence(cur: Observation) -> Dict[str, Any]:
     return burst
 
 
+def _only_timed_out(evidence: Dict[str, Any]) -> bool:
+    """실행 실패 목록이 **전부** "끝나지 못함" 인가.
+
+    두 가지는 뜻이 다르다. 명령을 찾지 못했거나 권한이 없으면 패킷이 한 발도
+    나가지 않았고(`PROBE_NOT_RUN`), 제한 시간을 넘긴 것은 나갔을 수도 있는데
+    결과를 받지 못한 것이다(`PROBE_TIMED_OUT`). 어느 쪽도 "쟀다" 가 아니지만
+    같은 말도 아니므로 요약문에서 뭉개지 않는다.
+
+    하나라도 다른 것이 섞이면 거짓이다 — 목록은 같은 문구끼리 합쳐지므로
+    (collect/link.merge_probes) 섞인 주기에 대해 "전부 시간만 넘겼다" 고
+    말할 근거가 없다. 그때는 더 약한 주장(실행되지 못한 것이 있다) 쪽으로 간다.
+    """
+    errors = evidence.get("first_hop_errors")
+    if not isinstance(errors, list) or not errors:
+        return False
+    return all(str(e) == PROBE_TIMED_OUT for e in errors)
+
+
 def _probe_phrase(evidence: Dict[str, Any]) -> str:
     """첫 홉 증거의 성격을 요약문에 드러내는 한 문장.
 
@@ -194,8 +219,10 @@ def _probe_phrase(evidence: Dict[str, Any]) -> str:
     mode = evidence.get("first_hop_probe_mode")
     if mode == "single":
         if evidence.get("first_hop_errors"):
-            # 명령이 실행되지 못한 주기다. "ping 명령 한 번" 이라고 적으면
-            # 보내지 않은 측정을 증거로 내세우게 된다.
+            # 명령이 실행되지 못했거나 끝나지 못한 주기다. "ping 명령 한 번"
+            # 이라고 적으면 재지 못한 측정을 증거로 내세우게 된다.
+            if _only_timed_out(evidence):
+                return msg.FIRST_HOP_EVIDENCE_TIMED_OUT
             return msg.FIRST_HOP_EVIDENCE_NOT_RUN
         # **발 수를 주장하지 않는다.** 관측에 남는 것은 받은 수와 손실률뿐이라
         # (collect/link.parse_ping), `ping_count` 를 올려 둔 주기가 전부
@@ -212,12 +239,17 @@ def _probe_phrase(evidence: Dict[str, Any]) -> str:
         # 실행되지 못한 측정이 섞여 있으면 손실률을 네트워크 손실로 읽을 수
         # 없다. 보낸 수도 주장하지 않는다 — 발 수를 모르면 말하지 않는다는
         # 평소 주기(single) 기준과 같다.
+        timed_out = _only_timed_out(evidence)
         if isinstance(received, int) and received > 0:
+            if timed_out:
+                return msg.FIRST_HOP_EVIDENCE_BURST_TIMED_OUT % received
             return msg.FIRST_HOP_EVIDENCE_BURST_FAILED % received
         if isinstance(received, int):
             # 받은 것이 하나도 없다. 실패 목록은 같은 문구끼리 합쳐지므로
             # (collect/link.merge_probes) 몇 발이 실패했는지 셀 수 없고,
             # 전부 실패했을 수도 있다 — "일부" 라고 적을 근거가 없다.
+            if timed_out:
+                return msg.FIRST_HOP_EVIDENCE_BURST_TIMED_OUT_NONE
             return msg.FIRST_HOP_EVIDENCE_BURST_NOT_RUN
         return ""
     loss = evidence.get("first_hop_loss_pct")
@@ -262,7 +294,12 @@ def _mixed_first_hop(method: str, evidence: Dict[str, Any]) -> bool:
 
 
 def first_hop_not_run(method: str, evidence: Dict[str, Any]) -> bool:
-    """이번 주기의 첫 홉 측정이 실행되지 못했는가.
+    """이번 주기의 첫 홉을 **재지 못했는가**.
+
+    실행되지 못한 주기(명령을 못 찾음·권한)와 끝나지 못한 주기(제한 시간
+    초과)를 함께 본다. 둘의 뜻은 다르지만(`_only_timed_out` 이 문구에서
+    가른다) "잰 결과가 아니다" 라는 점은 같고, 여기서 갈리는 것은 구간을
+    지목할 수 있느냐다.
 
     **모듈 밖에서도 쓴다.** 조사 결론(investigate/playbooks)이 끊김마다
     같은 판단을 해야 하는데, 규칙을 그쪽에 다시 적으면 두 판단이 갈린다 —
@@ -320,7 +357,10 @@ def _likely(cur: Observation, ctx, state: Dict[str, Any],
     # 한다 — 같은 기계의 같은 주기를 셋이 다른 말로 부르면 안 된다.
     label = method_label(method)
     if first_hop_not_run(method, evidence or {}):
-        # 재지 못한 주기다. 어느 쪽으로도 단정하지 않는다.
+        # 재지 못한 주기다. 어느 쪽으로도 단정하지 않는다. 다만 "실행되지
+        # 못함"(패킷이 안 나감)과 "끝나지 못함"(결과를 못 받음)은 다른 말이다.
+        if _only_timed_out(evidence or {}):
+            return msg.WHY_FIRST_HOP_TIMED_OUT
         return msg.WHY_FIRST_HOP_NOT_RUN
     if _mixed_first_hop(method, evidence or {}):
         return msg.WHY_FIRST_HOP_MIXED % label

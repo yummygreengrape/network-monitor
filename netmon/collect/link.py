@@ -15,8 +15,8 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .. import liveness
-from ..model import ident, unwrap
-from ..util import OK, Capability, run
+from ..model import PROBE_NOT_RUN, PROBE_TIMED_OUT, ident, unwrap
+from ..util import OK, Capability, CmdResult, run
 from ..vpn import public_unicast
 
 NAME = "link"
@@ -60,13 +60,57 @@ def ping_seconds(wait_ms: int = DEFAULT_WAIT_MS, count: int = DEFAULT_COUNT) -> 
     return PING_OVERHEAD_SECONDS + count * (wait_ms / 1000.0)
 
 
+# `util.run` 이 **자기 예외 갈래에서만** 쓰는 종료 코드. 명령을 실행조차 하지
+# 못했다는 표시다 (FileNotFoundError → 127, PermissionError → 126). ping 이
+# 실제로 돌았다면 이 값이 나오지 않는다 — macOS ping 은 무응답을 2 로 알린다.
+NOT_RUN_RCS = (126, 127)
+
+
+def probe_failure(r: CmdResult) -> Optional[str]:
+    """이 ping 이 실행되지 못했거나 끝나지 못했으면 관측에 남길 고정 낱말.
+
+    **rc != 0 을 실행 실패로 보지 않는다.** 정상적으로 나간 ping 도 응답이
+    없으면 0 이 아닌 코드로 끝난다. 그것을 실패로 세면 평범한 무응답 주기가
+    전부 "재지 못함" 이 되어, 이번에는 반대 방향으로 관측을 왜곡한다.
+    `util.run` 이 **스스로** 만드는 세 갈래만 가린다.
+
+    `not r.out` 을 함께 본다. 그 세 갈래의 stdout 은 항상 비어 있으므로,
+    통계를 출력한(= 실제로 돌아간) ping 이 여기에 걸리지 않는다.
+    """
+    if r.not_found:
+        return PROBE_NOT_RUN
+    if r.timed_out:
+        return PROBE_TIMED_OUT
+    if r.rc in NOT_RUN_RCS and not r.out:
+        return PROBE_NOT_RUN
+    return None
+
+
 def ping(target: str, count: int = DEFAULT_COUNT, wait_ms: int = DEFAULT_WAIT_MS,
          timeout: float = PING_TIMEOUT_SECONDS) -> Dict[str, Any]:
+    """대상 하나에 ping. 실행 자체가 실패하면 그 사실을 `error` 로 남긴다.
+
+    실패를 남기지 않으면 패킷이 한 발도 나가지 않은 주기가
+    `{replies: 0, loss_pct: 100.0, reachable: False}` 로만 나와, 판정이 그것을
+    **무응답**(잰 결과)으로 읽는다. 그러면 나가지도 않은 패킷이 "이 기기와
+    공유기 사이 구간 문제" 의 근거가 된다.
+
+    새 키를 만들지 않고 `error` 를 쓴다 — 실행 실패에 그 키를 남기는 자리가
+    이미 있고(`collect` 의 future 예외 처리), 판정도 그 키를 본다
+    (netmon/detect/vpn). 성공한 주기의 결과 모양은 종전 그대로다.
+    """
     family = ["ping6"] if ":" in target else ["ping"]
     argv = family + ["-n", "-c", str(count), "-W", str(wait_ms), target]
     r = run(argv, timeout=timeout)
     out = parse_ping(r.out)
     out["reachable"] = bool(out["replies"])
+    failure = probe_failure(r)
+    if failure:
+        # 고정 낱말이다. `r.err` 를 옮기지 않는다 — 권한 오류 메시지에는
+        # 실행 파일 경로가, 대상에 따라서는 주소가 섞여 나올 수 있고,
+        # 감싸지 않은 문자열은 내보낼 때 가려지지 않는다
+        # (_error_note 가 터널 엔드포인트에 두는 제약과 같은 이유다).
+        out["error"] = failure
     return out
 
 
@@ -101,11 +145,11 @@ TUNNEL_ENDPOINT = "tunnel_endpoint"
 # 주기라는 표시. 결과를 만들지 않는 다른 이유들(동의 없음, 주소 모름)과
 # 구분하려고 둔다.
 #
-# 기존 자리로는 적을 수 없었다. `results[TUNNEL_ENDPOINT]["error"]` 에 적으면
-# 판정이 같은 결과에서 `tunnel_endpoint_reachable: False` 도 함께 만들어
-# (netmon/detect/vpn._endpoint_evidence) **보내지도 않은 패킷의 무응답**을
-# 도달 실패로 기록한다 — 이 작업이 없애려는 결함이 그것이다. 블록의 `note`
-# 는 "측정 대상 없음" 이라는 다른 뜻으로 이미 쓰인다.
+# 기존 자리로는 적을 수 없었다. `results[TUNNEL_ENDPOINT]["error"]` 는
+# "보내려 했는데 실행되지 못했다" 는 다른 사실이고, 그 자리에 적으면 판정이
+# 실행 실패로 읽는다(netmon/detect/vpn._endpoint_evidence). 상한에 닿은 주기는
+# 애초에 보내지 않기로 한 주기다. 블록의 `note` 는 "측정 대상 없음" 이라는
+# 또 다른 뜻으로 이미 쓰인다.
 TUNNEL_CAPPED = "tunnel_endpoint_capped"
 
 
