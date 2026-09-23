@@ -146,7 +146,13 @@ class Warp(Provider):
             if line.lower().startswith("status update:"):
                 val = line.split(":", 1)[1].strip()
                 low = val.lower()
+                # **"disconnected" 에도 "connect" 가 들어 있다.** 부분 문자열로
+                # 먼저 가르면 `Disconnected` 가 connecting 으로 기록된다.
+                # 기록에서 그 흔적으로 보이는 것과 근거의 한계는
+                # tests/test_detect_vpn.py 의 TestWarpStatusParsing 에 적었다.
+                # `Unable`(No Network 등)은 전과 같이 끊김이다.
                 state = (CONNECTED if low.startswith("connected")
+                         else DISCONNECTED if low.startswith("disconnected")
                          else CONNECTING if "connect" in low
                          else DISCONNECTED)
             elif line.lower().startswith("reason:"):

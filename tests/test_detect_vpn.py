@@ -909,6 +909,79 @@ class TestProviderDedup(unittest.TestCase):
 
 
 
+class TestWarpStatusParsing(unittest.TestCase):
+    """warp-cli 의 `Status update:` 값을 상태로 옮긴다.
+
+    **"disconnected" 에도 "connect" 가 들어 있다.** 부분 문자열로 먼저 가르면
+    `Disconnected` 가 `connecting` 으로 옮겨진다. 확정된 것은 이 코드 동작이다
+    (아래 첫 검사).
+
+    기록에서 그 흔적으로 보이는 것은 사유가 `Settings Changed` 인 454주기다
+    (2026-09-16~22 UTC 전체). `connecting` 으로 기록됐지만 같은 사유가 한 번에
+    최장 15분 32초(184주기) 이어졌고, 연결 단계 사유가 이어진 구간은 최장
+    16주기(46초)였다. 끊김 상태의 사유라는 근거는 **정황**이다 — warp-cli
+    바이너리에 `DisconnectedReason::SettingsChanged` 라는 형 이름이 있다. WARP
+    데몬 로그(2026-09-22T14:40Z 이후만 남음)에는 그 사유가 한 번도 없어 대조하지
+    못했고, 표본은 상태 원문을 저장하지 않는다.
+
+    사유가 `Manual Disconnection` 인 7주기는 **판단하지 못한다.** 데몬 로그에서
+    확인한 `Disconnected(Manual)` 5건(2026-09-22T15:07Z~2026-09-23T03:19Z)은
+    모두 11ms 안에 `Connecting(CheckingNetwork)` 로 넘어갔으므로, 5초 간격
+    표본이 잡은 그 주기는 연결 단계였을 수도 있다.
+
+    `Settings Changed` 주기에도 품질 축 요약문은 기록된 값을 인용해 "터널 재협상
+    중(공급자 상태 connecting)" 이라고 적었다(2026-09-22T14:33:44Z 와
+    2026-09-22T14:34:04Z 의 두 판정). docs/data-sources.md 의 414 는 2026-09-22
+    19시(한국 시각) 시점까지 센 값이라 그 뒤의 이 구간 40주기가 빠져 있다.
+
+    `Unable`(No Network·happy eyeballs 실패 등)은 전과 같이 `disconnected` 다.
+    """
+
+    def _status(self, text):
+        from netmon.util import CmdResult
+        calls = []
+
+        def fake_run(argv, timeout=None, stdin=""):
+            calls.append(list(argv))
+            if "status" in argv:
+                return CmdResult(argv, 0, text, "")
+            return CmdResult(argv, 0, TestWarpModeParsing.SETTINGS, "")
+
+        orig = vpnmod.run
+        vpnmod.run = fake_run
+        try:
+            return vpnmod.Warp().status(), calls
+        finally:
+            vpnmod.run = orig
+
+    def test_each_reported_state_maps_to_its_own_value(self):
+        for text, expect in (
+                ("Status update: Connected\nNetwork: healthy\n", "connected"),
+                ("Status update: Connecting\nReason: Performing connectivity checks\n",
+                 "connecting"),
+                ("Status update: Disconnected\nReason: Settings Changed\n", "disconnected"),
+                ("Status update: Disconnected\nReason: Manual Disconnection\n",
+                 "disconnected"),
+                ("Status update: Unable\nReason: No Network\n", "disconnected")):
+            st, _ = self._status(text)
+            self.assertEqual(st.state, expect, text)
+
+    def test_a_disconnect_keeps_its_reason(self):
+        st, _ = self._status("Status update: Disconnected\nReason: Settings Changed\n")
+        self.assertEqual(st.reason, "Settings Changed")
+
+    def test_the_mode_is_read_only_when_connected(self):
+        """비연결에서는 모드를 조회하지 않아 터널 여부가 `None`(모름)으로 남는다."""
+        for text in ("Status update: Disconnected\n", "Status update: Connecting\n",
+                     "Status update: Unable\n"):
+            st, calls = self._status(text)
+            self.assertIsNone(st.tunnel, text)
+            self.assertFalse([c for c in calls if "settings" in c], text)
+        st, calls = self._status("Status update: Connected\n")
+        self.assertIs(st.tunnel, False)      # SETTINGS 의 모드가 DnsOverTls
+        self.assertTrue([c for c in calls if "settings" in c])
+
+
 class TestWarpModeParsing(unittest.TestCase):
     """모드 문자열은 요약문에 그대로 실린다. 엉뚱한 줄을 집으면 공개 보고서에
     외부 문자열이 들어간다."""
