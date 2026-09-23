@@ -215,7 +215,7 @@ class TestVpnDropConsequences(unittest.TestCase):
         self.assertIn("VPN_DISCONNECTED", kinds(found))
         self.assertIn("VPN_PROTECTION_LOST", kinds(found))
         self.assertIsNone(by_kind(found, "VPN_PROTECTION_LOST").attribution,
-                          "보호가 사라진 사실까지 억제하면 안 된다")
+                          "보호 상실 판정까지 억제하면 안 된다")
 
     def test_a_resolver_change_to_a_third_party_is_not_attributed(self):
         """공격자가 VPN 을 끊으면서 리졸버를 자기 것으로 바꿀 수 있다.

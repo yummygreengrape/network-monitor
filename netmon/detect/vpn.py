@@ -5,11 +5,14 @@ SLEEP / ARP_ANOMALY). 여기서는 고르지 않는다. 대신 한 번의 끊김
 따로 기록된다.
 
   연결 품질  VPN_DISCONNECTED   연결이 끊겼다
-  보안       VPN_PROTECTION_LOST 신뢰할 수 없는 네트워크에서 보호가 사라졌다
+  보안       VPN_PROTECTION_LOST 신뢰할 수 없는 네트워크에서 VPN 이 연결 상태를 벗어났다
 
-공급자가 `connecting` 을 보고한 전환도 같은 두 판정으로 남지만, 요약문은
-"끊김" 이 아니라 재협상이라고 적는다. 터널 밖으로 나간 사실은 같으므로
-보호 상실 판정의 등급과 조사 개시는 달라지지 않는다.
+공급자가 `connecting` 을 보고한 전환도 같은 두 판정으로 남는다. **두 판정의
+요약문 모두** "끊김" 이 아니라 재협상이라고 적는다 — 품질 축은
+`_down_summary`, 보안 축은 `_protection_summary`. 판정 종류·등급·조사 개시는
+두 상태에서 같고 바뀌는 것은 문장뿐이다. 보안 축을 같은 기준으로 맞춘 것은
+사용자 결정이다(2026-09-23): 한 주기의 같은 관측값을 두 문장이 다르게 적고
+있었다.
 
 "왜 끊겼나"는 분류가 아니라 **근거**로 붙는다. 같은 주기의 첫 홉 상태와
 억제 사유를 함께 기록하므로, 나중에 판단이 틀렸다고 생각되면 되짚을 수 있다.
@@ -399,7 +402,7 @@ def _tunnel_off_findings(name: str, prev_st: Dict[str, Any], cur_st: Dict[str, A
     """연결돼 있는데 터널을 세우지 않는 모드로 바뀐 것.
 
     **끊김이 아니라서 상태 전환 판정에 걸리지 않는다.** DNS only 모드에서도
-    공급자는 "연결됨" 을 보고하므로, 보호가 사라진 사실이 조용히 지나간다
+    공급자는 "연결됨" 을 보고하므로, 터널의 보호가 사라진 사실이 조용히 지나간다
     (2026-09-21 실측). 모드가 바뀐 순간과, 그 모드로 다른 네트워크에 붙은
     순간에만 낸다 — 매 주기 되풀이하지 않는다.
     """
@@ -599,9 +602,11 @@ def _down_summary(name: str, now: Any, likely: str,
     그럴듯한 설명, 그리고 **첫 홉 증거가 1발인지 다발인지**. 공급자 사유는
     고정 목록과 정확히 일치할 때만 덧붙인다.
 
-    `connecting` 을 "연결 끊김" 이라고 적지 않는다 — 공급자 자신은 다시 맺는
-    중이라고 말하고 있다. 판정 종류·등급은 그대로이고(보호 상실 판정과 조사
-    개시도 그대로), 바뀌는 것은 문장뿐이다.
+    `connecting` 을 "연결 끊김" 이라고 적지 않는다 — Warp 의 연결 단계나
+    Tailscale 의 Starting 처럼 다시 맺는 중인 상태가 `connecting` 으로 옮겨진다.
+    판정 종류·등급은 그대로이고(보호 상실 판정도 나고
+    조사 개시도 같다), 바뀌는 것은 문장뿐이다. 보안 축의 같은 규칙은
+    `_protection_summary`.
     """
     head = msg.VPN_RENEGOTIATING if now == "connecting" else msg.VPN_DISCONNECTED
     parts = [head % (name, likely), _probe_phrase(evidence)]
@@ -609,6 +614,25 @@ def _down_summary(name: str, now: Any, likely: str,
     if quotable:
         parts.append(msg.VPN_PROVIDER_REASON % quotable)
     return " ".join(p for p in parts if p)
+
+
+def _protection_summary(name: str, now: Any, body: str) -> str:
+    """보호 상실 판정의 요약문 — 공급자가 보고한 상태 + 이 네트워크의 노출 정도.
+
+    머리말은 `_down_summary` 와 같은 기준으로 가른다: `connecting` 이면 끊겼다고
+    적지 않는다. 재협상 동안 이 공급자가 주던 보호가 이어지는지는 공급자 보고만
+    으로는 알 수 없어서 그렇게 적는다. 본문은 암호화 방식으로 갈린다(호출하는 쪽).
+
+    **어느 쪽도 트래픽이나 터널 여부를 단정하지 않는다.** 이 판정이 읽는 것은
+    공급자의 연결 상태와 사유(사용자가 직접 끊었는지, `_user_action`), 그리고
+    이 네트워크의 암호화 방식(이번 주기에 못 읽었으면 같은 인터페이스의 직전
+    값, `_security_kind`)이다. 트래픽도 `vpn.<공급자>.tunnel` 도 읽지 않는다 —
+    `tunnel` 은 이 시점에 언제나 `None`(모름)이다. 공급자 구현이 연결 상태일
+    때만 모드를 조회한다(netmon/vpn/__init__.py 의 `Warp.status`).
+    """
+    head = (msg.VPN_PROTECTION_LOST_HEAD_RENEGOTIATING if now == "connecting"
+            else msg.VPN_PROTECTION_LOST_HEAD)
+    return "%s %s" % (head % name, body)
 
 
 def _no_link_summary(name: str, now: Any, cur_st: Dict[str, Any]) -> str:
@@ -863,24 +887,25 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                     attribution=attribution,
                 ))
 
-            # 보호가 사라진 것은 별개 사건이다. 사용자가 직접 끊었어도
-            # "지금 보호받고 있지 않다"는 사실은 남는다.
+            # 연결 상태를 벗어난 것은 보안 축에 따로 남긴다. 사용자가 직접
+            # 끊었어도 이 판정은 남는다.
             kind = _security_kind(cur, prev)
             if kind != wifi_security.PER_USER:
                 if kind in (wifi_security.OPEN, wifi_security.SHARED_PASSIVE):
-                    summary = msg.VPN_PROTECTION_LOST % name
+                    body = msg.VPN_PROTECTION_LOST
                     severity = LOW if user else MEDIUM
                 elif kind == wifi_security.SHARED_SAE:
                     # 조용히 읽히지는 않는다. 능동적 가로채기만 가능하므로
                     # 개방형·WPA2 때와 같은 등급으로 올리지 않는다.
-                    summary = msg.VPN_PROTECTION_LOST_SAE % name
+                    body = msg.VPN_PROTECTION_LOST_SAE
                     severity = LOW
                 else:
-                    summary = msg.VPN_PROTECTION_LOST_UNKNOWN % name
+                    body = msg.VPN_PROTECTION_LOST_UNKNOWN
                     severity = LOW
                 out.append(Finding(
                     axis=SECURITY, kind="VPN_PROTECTION_LOST",
-                    confidence=CONFIRMED, severity=severity, summary=summary,
+                    confidence=CONFIRMED, severity=severity,
+                    summary=_protection_summary(name, now, body),
                     evidence={"provider": name,
                               "wifi_security": (cur.get("wifi") or {}).get("security"),
                               "security_kind": kind,

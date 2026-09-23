@@ -121,7 +121,8 @@ class TestVpnDropWording(unittest.TestCase):
 
     def test_psk_drop_still_warns_about_reading(self):
         f = self._drop("WPA2_PSK")
-        self.assertEqual(f.summary, msg.VPN_PROTECTION_LOST % f.evidence["provider"])
+        self.assertEqual(f.summary, "%s %s" % (msg.VPN_PROTECTION_LOST_HEAD % f.evidence["provider"],
+                                               msg.VPN_PROTECTION_LOST))
         self.assertIs(f.evidence["passively_readable"], True)
 
     def test_sae_drop_is_lower_severity_than_psk_drop(self):
@@ -139,7 +140,8 @@ class TestVpnDropWording(unittest.TestCase):
 
     def test_unknown_security_drop_says_it_does_not_know(self):
         f = self._drop(None)
-        self.assertEqual(f.summary, msg.VPN_PROTECTION_LOST_UNKNOWN % f.evidence["provider"])
+        self.assertEqual(f.summary, "%s %s" % (msg.VPN_PROTECTION_LOST_HEAD % f.evidence["provider"],
+                                               msg.VPN_PROTECTION_LOST_UNKNOWN))
 
 
 if __name__ == "__main__":

@@ -110,10 +110,13 @@ MEASUREMENT_GAP = "Measurement stopped for %.0f seconds (sleep or a halted proce
 
 # ─────────────────────────────────────────── Findings: VPN
 VPN_DISCONNECTED = "%s disconnected. Most likely explanation: %s."
-# A transition the provider reported as connecting: not down, but being
-# re-established. (Protection loss is still reported as before - traffic
-# leaves outside the tunnel either way.)
-VPN_RENEGOTIATING = "%s is renegotiating its tunnel (provider state connecting). Most likely explanation: %s."
+# A transition to the provider state connecting. States being re-established,
+# such as WARP's connection stages or Tailscale's Starting, are mapped here.
+# It does not say "tunnel" - all the provider reports is the
+# state connecting. (Protection loss is still reported, with the same severity
+# and investigation trigger; its head says renegotiation by the same rule -
+# VPN_PROTECTION_LOST_HEAD_RENEGOTIATING.)
+VPN_RENEGOTIATING = "%s is renegotiating its connection (provider state connecting). Most likely explanation: %s."
 # A drop seen in a cycle with no primary interface. Same finding kind, but the
 # sentence says the link was absent - otherwise a drop that follows the link
 # down is filed next to a drop on a live link, and the two have different root
@@ -135,14 +138,20 @@ VPN_DISCONNECTED_NO_LINK = ("%s disconnected (provider state %s). There was no p
                             "so the cause is not narrowed.")
 # The same cycle, but the provider reported connecting: not called a drop
 # (AC-9), the same rule the full-cycle VPN_RENEGOTIATING follows.
-VPN_RENEGOTIATING_NO_LINK = ("%s is renegotiating its tunnel (provider state connecting). "
+VPN_RENEGOTIATING_NO_LINK = ("%s is renegotiating its connection (provider state connecting). "
                              "There was no primary interface in the same cycle - within a "
                              "single cycle the order of the link loss and the "
                              "renegotiation cannot be told, and this judgement reads "
                              "nothing but the state the provider reported, so the cause "
                              "is not narrowed.")
-VPN_TUNNEL_OFF = ("%s is connected but in a mode that builds no tunnel (%s). Traffic "
-                  "leaves outside the tunnel, and other devices on this L2 can read it.")
+# The modes that land here are the DNS-only ones (warp_tunnel_for in
+# netmon/vpn/__init__.py), and in them the provider still takes DNS
+# encrypted - so this does not say "not protected by this provider". What is
+# observed is that there is no tunnel (the mode name) and how exposed this
+# network is (its encryption).
+VPN_TUNNEL_OFF = ("%s is connected but in a mode that builds no tunnel (%s). This "
+                  "network is open to inspection by other devices on the same L2 "
+                  "segment (traffic itself is not observed).")
 VPN_TUNNEL_OFF_SAE = ("%s is connected but in a mode that builds no tunnel (%s). WPA3-SAE "
                       "blocks passive reading, but a device on the same L2 that hijacks "
                       "the path can still see it.")
@@ -150,9 +159,17 @@ VPN_TUNNEL_OFF_UNKNOWN = ("%s is connected but in a mode that builds no tunnel (
                           "encryption of this network could not be read, so exposure is "
                           "not judged.")
 VPN_TUNNEL_ON = "%s switched to a mode that builds a tunnel (%s)."
-VPN_PROTECTION_LOST = ("%s dropped, so traffic is leaving outside the tunnel. Other devices "
-                       "on this L2 segment can see it.")
-VPN_PROTECTION_LOST_UNKNOWN = "%s dropped. Whether this network can be trusted is undetermined."
+# The protection-loss summary is a head plus a body (`_protection_summary` in
+# netmon/detect/vpn.py): the head says what the provider reported, the body
+# how exposed this network is. See the note on the Korean catalogue.
+VPN_PROTECTION_LOST_HEAD = "%s dropped - the protection this provider gave has stopped."
+VPN_PROTECTION_LOST_HEAD_RENEGOTIATING = ("%s is renegotiating its connection (provider state "
+                                          "connecting) - whether the protection this "
+                                          "provider gave holds meanwhile cannot be told "
+                                          "from the provider's report.")
+VPN_PROTECTION_LOST = ("This network is open to inspection by other devices on the same "
+                       "L2 segment (traffic itself is not observed).")
+VPN_PROTECTION_LOST_UNKNOWN = "Whether this network can be trusted is undetermined."
 VPN_RECONNECTED = "%s reconnected%s."
 # The recovery of an outage that passed between two complete observations.
 # See the note on the Korean catalogue: the state the provider was in while
@@ -509,6 +526,8 @@ WHY_LINK_BACK = "the link had just come back"
 EXPOSURE_SHARED_SAE = ("WPA3-SAE Wi-Fi (%s): anyone who knows the password can join the same "
                        "L2 segment and forge ARP, DHCP and RA. Keys differ per session, "
                        "though, so knowing the password does not decrypt others' traffic.")
-VPN_PROTECTION_LOST_SAE = ("%s dropped, so traffic is leaving outside the tunnel. WPA3-SAE means "
-                           "it is not readable passively, but a device that joined the segment "
-                           "could still intercept the path and see it.")
+# Body of the protection-loss summary (the head is VPN_PROTECTION_LOST_HEAD*).
+VPN_PROTECTION_LOST_SAE = ("WPA3-SAE means what crosses this L2 segment is not readable "
+                           "passively, but a device that joined the segment could still "
+                           "intercept the path and read what goes over it (traffic itself "
+                           "is not observed).")

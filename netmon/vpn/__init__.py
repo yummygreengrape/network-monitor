@@ -91,10 +91,10 @@ def parse_warp_mode(text: str) -> Optional[str]:
 def warp_tunnel_for(mode: Optional[str]) -> Optional[bool]:
     """모드 이름이 터널을 세우는 모드인가.
 
-    **"연결됨" 이 "보호받는 중" 을 뜻하지 않는다.** DNS only 모드(DnsOverTls,
+    **"연결됨" 이 "터널이 있음" 을 뜻하지 않는다.** DNS only 모드(DnsOverTls,
     DnsOverHttps)에서도 warp-cli 는 `Status update: Connected` 를 돌려준다.
-    2026-09-21 실측에서 이 때문에 터널이 없는데도 연결로 기록됐고, 보호가
-    사라진 사실이 판정에 한 번도 잡히지 않았다.
+    2026-09-21 실측에서 이 때문에 터널이 없는데도 연결로 기록됐고, 터널의
+    보호가 사라진 사실이 판정에 한 번도 잡히지 않았다.
     """
     if not mode:
         return None

@@ -140,14 +140,16 @@ class TestDisconnect(unittest.TestCase):
         self.assertEqual(f.attribution, "user_action")
         self.assertEqual(f.severity, "info")
 
-    def test_manual_disconnect_still_records_that_protection_is_gone(self):
-        """직접 끊었어도 '지금 보호받지 않는다'는 사실은 남는다."""
+    def test_manual_disconnect_still_raises_protection_loss(self):
+        """직접 끊었어도 보호 상실 판정은 남는다. 억제 사유가 user_action 으로 붙고
+        등급은 low 로 내려간다."""
         prev = obs(vpn=vpn_state("connected"), security="WPA2_PSK")
         cur = obs(vpn=vpn_state("disconnected", reason="Manual_Disconnection"),
                   security="WPA2_PSK")
         f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
         self.assertIsNotNone(f)
         self.assertEqual(f.attribution, "user_action")
+        self.assertEqual(f.severity, "low")
 
     def test_sleep_attributes_quality_but_protection_loss_stands(self):
         prev = obs(ts="2026-01-01T00:00:00Z", vpn=vpn_state("connected"))
@@ -161,7 +163,8 @@ class TestDisconnect(unittest.TestCase):
         cur = obs(vpn=vpn_state("disconnected"), security="NONE")
         f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
         self.assertEqual(f.severity, "medium")
-        self.assertEqual(f.summary, msg.VPN_PROTECTION_LOST % "warp")
+        self.assertEqual(f.summary, "%s %s" % (msg.VPN_PROTECTION_LOST_HEAD % "warp",
+                                               msg.VPN_PROTECTION_LOST))
 
     def test_enterprise_network_does_not_claim_exposure(self):
         prev = obs(vpn=vpn_state("connected"), security="WPA2 Enterprise")
@@ -173,7 +176,8 @@ class TestDisconnect(unittest.TestCase):
         cur = obs(vpn=vpn_state("disconnected"), iface_kind="ethernet")
         f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
         self.assertIsNotNone(f)
-        self.assertEqual(f.summary, msg.VPN_PROTECTION_LOST_UNKNOWN % "warp")
+        self.assertEqual(f.summary, "%s %s" % (msg.VPN_PROTECTION_LOST_HEAD % "warp",
+                                               msg.VPN_PROTECTION_LOST_UNKNOWN))
         self.assertEqual(f.severity, "low")
 
 
@@ -296,8 +300,10 @@ class TestRenegotiationIsNotCalledADrop(unittest.TestCase):
     """공급자가 `connecting` 이라고 말한 것을 "연결 끊김" 으로 적지 않는다.
 
     2026-09-21 실측의 12건은 복구 직전 상태가 전부 `connecting` 이었다.
-    다시 맺는 중인 것과 끊어진 것은 다른 사실이다. **판정 종류·등급과
-    보호 상실 판정은 그대로 둔다** — 터널 밖으로 나간 사실은 같다.
+    다시 맺는 중인 것과 끊어진 것은 다른 사실이다. **판정 종류·등급·조사
+    개시는 그대로 둔다.** 보호 상실 판정도 두 상태에서 똑같이 나고, 그 요약문
+    머리말도 같은 기준으로 재협상을 구분한다(사용자 결정 2026-09-23 — 한 주기의
+    같은 관측값을 품질 축은 "재협상 중", 보안 축은 "끊김" 이라고 적고 있었다).
     """
 
     def _drop(self, state):
@@ -325,13 +331,30 @@ class TestRenegotiationIsNotCalledADrop(unittest.TestCase):
         self.assertEqual((a.axis, a.severity, a.confidence),
                          (b.axis, b.severity, b.confidence))
 
-    def test_protection_loss_is_reported_exactly_as_before(self):
+    def test_protection_loss_keeps_its_kind_severity_and_suppression(self):
         a = by_kind(self._drop("connecting"), "VPN_PROTECTION_LOST")
         b = by_kind(self._drop("disconnected"), "VPN_PROTECTION_LOST")
         self.assertIsNotNone(a)
         self.assertEqual(a.severity, "medium")
-        self.assertEqual((a.axis, a.severity, a.summary, a.attribution),
-                         (b.axis, b.severity, b.summary, b.attribution))
+        self.assertEqual((a.axis, a.severity, a.attribution, set(a.evidence)),
+                         (b.axis, b.severity, b.attribution, set(b.evidence)))
+
+    def test_protection_loss_head_says_renegotiation(self):
+        a = by_kind(self._drop("connecting"), "VPN_PROTECTION_LOST")
+        self.assertEqual(a.summary, "%s %s" % (
+            msg.VPN_PROTECTION_LOST_HEAD_RENEGOTIATING % "warp", msg.VPN_PROTECTION_LOST))
+        self.assertNotIn("끊김", messages.get("VPN_PROTECTION_LOST_HEAD_RENEGOTIATING", "ko"))
+        self.assertNotIn("dropped", messages.get("VPN_PROTECTION_LOST_HEAD_RENEGOTIATING", "en"))
+
+    def test_both_axes_name_the_reported_state_in_the_same_cycle(self):
+        """두 축이 같은 주기의 같은 값을 같게 적는다. 두 카탈로그 모두 공급자
+        상태 이름(connecting)을 그대로 인용하므로 활성 언어와 무관하게 본다."""
+        found = self._drop("connecting")
+        for kind in ("VPN_DISCONNECTED", "VPN_PROTECTION_LOST"):
+            self.assertIn("connecting", by_kind(found, kind).summary, kind)
+        for kind in ("VPN_DISCONNECTED", "VPN_PROTECTION_LOST"):
+            self.assertNotIn("connecting", by_kind(self._drop("disconnected"), kind).summary,
+                             kind)
 
 
 class TestProviderReasonInTheSummary(unittest.TestCase):
@@ -1080,7 +1103,8 @@ class TestWarpModeParsing(unittest.TestCase):
 
 class TestConnectedButNoTunnel(unittest.TestCase):
     """2026-09-21 실측: DNS only 모드에서도 warp-cli 는 "Connected" 를 돌려준다.
-    끊긴 적이 없으니 상태 전환 판정에 걸리지 않아, 보호가 사라진 채로 조용했다."""
+    끊긴 적이 없으니 상태 전환 판정에 걸리지 않아, 터널의 보호가 사라진 채로
+    조용했다."""
 
     def _pair(self, before, after, security="WPA2_PSK", **kw):
         prev = obs(vpn=before, security=security)
@@ -1627,7 +1651,7 @@ class TestDropWhileTheLinkIsAbsent(unittest.TestCase):
             f.summary,
             " ".join([msg.VPN_RENEGOTIATING_NO_LINK % "warp",
                       msg.VPN_PROVIDER_REASON % "No Network"]))
-        # "연결 끊김" 으로 적지 않는다 — 공급자 자신은 다시 맺는 중이라고 한다.
+        # "연결 끊김" 으로 적지 않는다 — 이 픽스처의 warp connecting 은 다시 맺는 중인 상태다.
         self.assertNotIn(msg.VPN_DISCONNECTED_NO_LINK % ("warp", "connecting"),
                          f.summary)
         for code in ("ko", "en"):
@@ -2102,6 +2126,127 @@ class TestTheEndOfAnOutageCompleteObservationsNeverSaw(unittest.TestCase):
         self.assertEqual(f.evidence["prev_state"], "disconnected")
         self.assertNotIn("link_absent", f.evidence)
 
+
+class TestSummariesDoNotClaimTrafficLeftTheTunnel(unittest.TestCase):
+    """요약문이 **관측하지 않은 트래픽 흐름**을 단정하지 않는다.
+
+    `VPN_PROTECTION_LOST`·`VPN_PROTECTION_LOST_SAE`·`VPN_TUNNEL_OFF` 는
+    "트래픽이 터널 밖으로 나감" 이라고 적고 있었다. 이 도구는 **사용자 트래픽**을
+    재지 않는다 — `netmon/collect/` 의 수집기 일곱(iface·arp·dhcp·route·dns·wifi·
+    link)이 읽는 것 중 바이트·흐름·연결 수는 없다. 세는 값이 있기는 하다 — 이
+    도구가 직접 쏜 ping 의 발 수(`netmon/collect/link.py`), 커널의 ARP 프레임
+    계수(`netmon/collect/arp.py` 의 `netstat -s -p arp`), 인터페이스별 경로 수
+    (`netmon/collect/route.py`) — 그러나 어느 것도 무엇이 어느 경로로 나갔는지는
+    말하지 못한다. 두 판정의 증거 필드에도 경로나 트래픽 값이 없다 —
+    `VPN_PROTECTION_LOST` 는 provider·wifi_security·security_kind·
+    passively_readable·user_action, `VPN_TUNNEL_OFF` 는 provider·mode·
+    wifi_security·security_kind·passively_readable.
+
+    2026-09-22 기록에서 그 단정이 관측과 어긋난 실례가 나왔다: 한 공급자에
+    대해 이 문장이 발행된 주기의 표본에서 **다른 공급자는 `connected` 이고
+    터널을 세우는 모드**였다. 판정은 공급자별로 돌며 다른 공급자의 터널
+    여부를 보지 않는다. 그 단정이 틀렸음을 증명하는 것은 아니고, 뒷받침하는
+    관측이 없다는 것을 보인다.
+
+    **보호 상실은 터널이 서 있는지도 말하지 않는다.** 그 값(`vpn.<공급자>.tunnel`)
+    은 이 판정이 읽지 않고, 판정 시점에는 언제나 `None` 이다 — 공급자 구현이
+    연결 상태일 때만 모드를 조회한다(`TestWarpStatusParsing.test_the_mode_is_
+    read_only_when_connected` 가 그 코드를 돌려 본다). 그 필드의 정의는 `None`
+    을 "모른다" 로 못박고 모르는 것을 보호 없음으로 적지 말라고 한다
+    (netmon/vpn/__init__.py 의 `VpnStatus`).
+
+    **터널 없는 모드는 "이 공급자의 보호가 없다" 고 말하지 않는다.** 그 판정이
+    나는 모드는 DNS only 모드이고(netmon/vpn/__init__.py 의 `warp_tunnel_for`),
+    그 모드에서 공급자는 DNS 를 암호화해 받는다.
+
+    말해도 되는 것은 남긴다: 공급자가 보고한 **연결** 상태, 터널 없는 모드라는
+    사실(모드 이름), 이 네트워크가 같은 L2 에서 수동으로 읽히는 곳인지
+    (`wifi.security` 분류).
+    """
+
+    # 흐름을 단정하지 않는 문구들. 보호 상실 요약문은 머리말 + 본문이다.
+    NAMES = ("VPN_PROTECTION_LOST_HEAD", "VPN_PROTECTION_LOST_HEAD_RENEGOTIATING",
+             "VPN_PROTECTION_LOST", "VPN_PROTECTION_LOST_SAE",
+             "VPN_PROTECTION_LOST_UNKNOWN", "VPN_TUNNEL_OFF")
+    FORBIDDEN = {"ko": ("터널 밖으로",), "en": ("outside the tunnel",)}
+    # 보호 상실은 머리말·본문 어디서도 터널을 말하지 않는다 — 공급자가 보고하는
+    # 것은 연결 상태뿐이다. `VPN_TUNNEL_OFF` 는 다르다 — 그 판정은 `tunnel is
+    # False` 를 읽고 난다.
+    LOST = ("VPN_PROTECTION_LOST_HEAD", "VPN_PROTECTION_LOST_HEAD_RENEGOTIATING",
+            "VPN_PROTECTION_LOST", "VPN_PROTECTION_LOST_SAE",
+            "VPN_PROTECTION_LOST_UNKNOWN")
+    TUNNEL_WORD = {"ko": "터널", "en": "tunnel"}
+    # 재협상 머리말은 세 축 자리 모두 "터널" 이라고 적지 않는다 — 공급자가 보고하는
+    # 것은 connecting 이라는 상태뿐이다.
+    RENEGOTIATION = ("VPN_RENEGOTIATING", "VPN_RENEGOTIATING_NO_LINK",
+                     "VPN_PROTECTION_LOST_HEAD_RENEGOTIATING")
+    PROTECT_WORD = {"ko": "보호", "en": "protect"}
+
+    def test_neither_catalogue_asserts_traffic_left_the_tunnel(self):
+        for lang, banned in self.FORBIDDEN.items():
+            for name in self.NAMES:
+                text = messages.get(name, lang)
+                for phrase in banned:
+                    self.assertNotIn(phrase, text, "%s/%s" % (lang, name))
+
+    def test_the_exposure_clause_survives(self):
+        """흐름 단정을 지우면서 노출 서술까지 지우지는 않는다."""
+        for lang in ("ko", "en"):
+            self.assertIn("L2", messages.get("VPN_PROTECTION_LOST", lang))
+            self.assertIn("L2", messages.get("VPN_TUNNEL_OFF", lang))
+            self.assertIn("WPA3-SAE", messages.get("VPN_PROTECTION_LOST_SAE", lang))
+
+    def test_protection_loss_does_not_claim_a_tunnel_state_it_never_read(self):
+        for lang, word in self.TUNNEL_WORD.items():
+            for name in self.LOST:
+                self.assertNotIn(word, messages.get(name, lang).lower(),
+                                 "%s/%s" % (lang, name))
+
+    def test_no_renegotiation_head_says_tunnel(self):
+        for lang, word in self.TUNNEL_WORD.items():
+            for name in self.RENEGOTIATION:
+                self.assertNotIn(word, messages.get(name, lang).lower(),
+                                 "%s/%s" % (lang, name))
+
+    def test_an_sae_drop_joins_the_head_and_the_sae_body(self):
+        prev = obs(vpn=vpn_state("connected"), security="WPA3_SAE")
+        cur = obs(vpn=vpn_state("disconnected"), security="WPA3_SAE")
+        f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
+        self.assertEqual(f.summary, "%s %s" % (msg.VPN_PROTECTION_LOST_HEAD % "warp",
+                                               msg.VPN_PROTECTION_LOST_SAE))
+
+    def test_tunnel_off_does_not_deny_the_provider_protects_anything(self):
+        for lang, word in self.PROTECT_WORD.items():
+            self.assertNotIn(word, messages.get("VPN_TUNNEL_OFF", lang).lower(), lang)
+
+    def test_a_real_drop_still_reports_the_catalogue_sentence(self):
+        prev = obs(vpn=vpn_state("connected"), security="NONE")
+        cur = obs(vpn=vpn_state("disconnected"), security="NONE")
+        f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
+        self.assertIsNotNone(f)
+        self.assertEqual(f.severity, "medium")
+        # 활성 언어가 무엇이든 카탈로그의 그 문구가 그대로 나간다. 그 문구가
+        # 무엇을 말해도 되는지는 위 검사들이 언어를 고정해 본다.
+        self.assertEqual(f.summary, "%s %s" % (msg.VPN_PROTECTION_LOST_HEAD % "warp",
+                                               msg.VPN_PROTECTION_LOST))
+        self.assertTrue(f.evidence["passively_readable"])
+
+    def test_the_evidence_carries_no_traffic_or_route_value(self):
+        """단정을 지운 근거 — 두 판정이 읽는 관측에 트래픽·경로가 없다."""
+        prev = obs(vpn=vpn_state("connected"), security="NONE")
+        cur = obs(vpn=vpn_state("disconnected"), security="NONE")
+        f = by_kind(judge(prev, cur), "VPN_PROTECTION_LOST")
+        self.assertEqual(set(f.evidence), {"provider", "wifi_security",
+                                           "security_kind", "passively_readable",
+                                           "user_action"})
+        prev = obs(vpn=vpn_state(mode="WarpWithDnsOverHttps", tunnel=True),
+                   security="WPA2_PSK")
+        cur = obs(ts="2026-01-01T00:00:05Z",
+                  vpn=vpn_state(mode="DnsOverTls", tunnel=False), security="WPA2_PSK")
+        f = by_kind(judge(prev, cur), "VPN_TUNNEL_OFF")
+        self.assertIsNotNone(f)
+        self.assertEqual(set(f.evidence), {"provider", "mode", "wifi_security",
+                                           "security_kind", "passively_readable"})
 
 if __name__ == "__main__":
     unittest.main()
