@@ -388,6 +388,26 @@ class TestAddressesInsideFreeText(unittest.TestCase):
         out = self.red({"reason": "via %s now" % self.V6})["reason"]
         self.assertEqual(out, "via %s now" % self.t6)
 
+    def test_a_bracketed_ipv4_with_a_port(self):
+        """원소 하나짜리 소켓 주소 목록 `[<IPv4>:<포트>]` — 데몬이 실제로 쓰는 모양이다.
+
+        대괄호 갈래가 괄호 전체를 먼저 먹고 IPv6 검증에 실패하면 안쪽을 다시 훑지
+        않아 주소가 그대로 나갔다(DEV-1 검수 지적 1).
+        """
+        for text, want in (("Unable to reach [%s:2408]" % ENDPOINT, "Unable to reach [%s:2408]" % self.t4),
+                           ("addrs=[%s:53]" % ENDPOINT, "addrs=[%s:53]" % self.t4),
+                           ("[%s]" % self.V6, "[%s]" % self.t6)):
+            self.assertEqual(self.red({"reason": text})["reason"], want)
+
+    def test_an_address_at_the_end_of_a_sentence_or_after_an_underscore(self):
+        """문장 끝 마침표·밑줄·한글 조사에 붙은 주소도 가린다(DEV-1 검수 지적 2)."""
+        for text, want in (("to %s." % ENDPOINT, "to %s." % self.t4),
+                           ("via %s." % self.V6, "via %s." % self.t6),
+                           ("ip_%s" % ENDPOINT, "ip_%s" % self.t4),
+                           ("ip_%s" % self.V6, "ip_%s" % self.t6),
+                           ("%s로 연결" % ENDPOINT, "%s로 연결" % self.t4)):
+            self.assertEqual(self.red({"reason": text})["reason"], want)
+
     def test_same_address_same_token_as_the_wrapped_value(self):
         d = {"reason": ENDPOINT_REASON, "tunnel_endpoint": ident("ipv4", ENDPOINT)}
         out = self.red(d)
@@ -409,7 +429,8 @@ class TestAddressesInsideFreeText(unittest.TestCase):
     def test_things_that_are_not_addresses_stay(self):
         """모듈 경로의 `::`, 시각, MAC 모양, 판 번호는 주소가 아니다 (ADV-4)."""
         text = ("2026-09-23T04:15:27.493Z WARN main_loop: warp::warp_service: at 12:34:56 "
-                "mac 00:00:5e:00:53:01 v1.2.3 ratio 3:1 ::")
+                "mac 00:00:5e:00:53:01 v1.2.3 ratio 3:1 :: handler::cafe build 192.0.2.1.5 "
+                "ver 2026.7.1376.0")
         self.assertEqual(self.red({"reason": text})["reason"], text)
 
     def test_the_kinds_filter_is_respected(self):
@@ -424,7 +445,8 @@ class TestAddressesInsideFreeText(unittest.TestCase):
     def test_adversarial_strings_finish_quickly(self):
         """콜론·점·16진이 끝없이 이어진 문자열에서도 멈추지 않는다 (ADV-4)."""
         import time
-        for text in ("1:" * 40000, "a:" * 40000, "1." * 40000, "f" * 80000 + ":", "[" * 40000):
+        for text in ("1:" * 40000, "a:" * 40000, "1." * 40000, "f" * 80000 + ":", "[" * 40000,
+                     "_1:" * 30000, "[1:" * 30000 + "]"):
             start = time.time()
             self.assertEqual(self.red({"reason": text})["reason"], text)
             self.assertLess(time.time() - start, 2.0, text[:8])

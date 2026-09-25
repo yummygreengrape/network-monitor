@@ -219,8 +219,8 @@ FIRST_HOP_EVIDENCE_BURST_TIMED_OUT = "첫 홉 증거는 동시 다발 ICMP — �
 FIRST_HOP_EVIDENCE_BURST_TIMED_OUT_NONE = "첫 홉 증거는 동시 다발 ICMP — 응답이 하나도 없고 제한 시간 안에 끝나지 못한 측정이 있어 나간 발이 있었는지 알 수 없음."
 
 # 공급자가 준 사유. **고정 목록과 정확히 일치할 때만** 요약문에 인용한다 —
-# 사유 문자열에는 공인 IP·포트가 들어 있고, 감싸지 않은 문자열은 내보낼 때도
-# 가려지지 않는다. 원문은 근거(provider_reason)에 그대로 남는다.
+# 사유 문자열에는 주소·포트가 들어 있고, 요약문은 내보낼 때 가리는 필드가 아니다.
+# 원문은 근거(provider_reason)에 남고, 그 안의 주소는 내보낼 때 가려진다(netmon/redact.py).
 VPN_PROVIDER_REASON = "공급자 사유: %s."
 
 # VPN 끊김의 "가장 유력한 설명"

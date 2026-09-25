@@ -231,9 +231,9 @@ FIRST_HOP_EVIDENCE_BURST_TIMED_OUT = "First-hop evidence is a concurrent ICMP bu
 FIRST_HOP_EVIDENCE_BURST_TIMED_OUT_NONE = "First-hop evidence is a concurrent ICMP burst - nothing answered and at least one probe did not finish inside the time limit, so whether any packet went out is unknown."
 
 # The reason string from the provider. Quoted in a summary only on an exact
-# match against a fixed list - these strings carry public addresses and ports,
-# and an unwrapped string is not masked on export. The raw text stays in
-# the evidence (provider_reason).
+# match against a fixed list - these strings carry addresses and ports, and a
+# summary is not a field that gets masked on export. The raw text stays in the
+# evidence (provider_reason), where addresses are masked on export (netmon/redact.py).
 VPN_PROVIDER_REASON = "Provider reason: %s."
 
 # Most likely explanation for a VPN drop

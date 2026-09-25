@@ -62,11 +62,15 @@ LINE_LIST_KEYS = frozenset(("lines", "daemon_lines", "daemon_transitions"))
 
 # 대괄호 IPv6 | IPv4 | 맨 IPv6. 후보는 ipaddress 로 한 번 더 검증한다 — 시각
 # (`12:34:56`)·MAC(`00:00:5e:00:53:01`)·모듈 경로의 `::` 는 주소가 아니다.
-# 앞뒤 둘러보기로 낱말 한가운데서 시작하지 않게 해 긴 입력에서도 선형으로 끝난다.
+# 앞뒤 둘러보기로 영숫자 한가운데서 시작하지 않게 해 긴 입력에서도 선형으로 끝난다.
+# 경계는 ASCII 영숫자·점(IPv6 은 콜론까지)만 본다 — 밑줄·한글 조사·문장 끝 마침표에
+# 붙은 주소도 가린다. 뒤의 점은 숫자(IPv6 은 영숫자)가 이어질 때만 막는다(`192.0.2.1.5`).
+# 이 경계 때문에 영숫자에 바로 붙은 주소(`ip192.0.2.1`)는 못 가린다.
 _ADDR = re.compile(
     r"\[(?P<b6>[0-9A-Fa-f:.]+(?:%[\w.]+)?)\]"
-    r"|(?<![\w.])(?P<v4>\d{1,3}(?:\.\d{1,3}){3})(?![\w.])"
-    r"|(?<![\w:.])(?P<v6>[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:%[\w.]+)?)(?![\w:.])")
+    r"|(?<![0-9A-Za-z.])(?P<v4>\d{1,3}(?:\.\d{1,3}){3})(?![0-9A-Za-z]|\.\d)"
+    r"|(?<![0-9A-Za-z:.])(?P<v6>[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:%\w+)?)"
+    r"(?![0-9A-Za-z:]|\.[0-9A-Za-z])")
 
 
 def _address_kind(text: str) -> Optional[str]:
@@ -95,6 +99,10 @@ def redact_text(text: str, salt: bytes, kinds: Optional[set] = None) -> str:
     def one(m: "re.Match[str]") -> str:
         value = m.group("b6") or m.group("v4") or m.group("v6")
         kind = _address_kind(value)
+        if kind is None and m.group("b6"):
+            # 대괄호 안이 IPv6 하나가 아니면(`[<IPv4>:<포트>]` 등) 안쪽을 다시 훑는다.
+            # 안쪽에는 대괄호가 없어 한 번으로 끝난다.
+            return "[%s]" % _ADDR.sub(one, value)
         if kind is None or kind not in active:
             return m.group(0)
         tok = token(salt, kind, value)
