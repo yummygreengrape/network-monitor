@@ -351,14 +351,19 @@ def read_warp_daemon(pos: Any, path: str = WARP_DAEMON_LOG,
         return [], p, info
     cur, size = _file_id(st), st.st_size
     before = _rotation_ids(path)
+    raced = {"read": "ok", "skipped_bytes": 0, "reset": p is None}
     try:
         result = _read_after(path, p, cur, size, cap, info)
-        if before[0] != cur or _rotation_ids(path) != before:
-            return [], p, {"read": "ok", "skipped_bytes": 0, "reset": p is None}
-        return result
     except OSError:
+        # 이름이 밀린 뒤 새 파일이 아직 없는 순간에 열면 여기로 온다. 회전이 끼었으면
+        # 실패가 아니라 경합이다 — 다음 주기에 다시 읽는다.
+        if before[0] != cur or _rotation_ids(path) != before:
+            return [], p, raced
         info["read"] = "unreadable"
         return [], p, info
+    if before[0] != cur or _rotation_ids(path) != before:
+        return [], p, raced
+    return result
 
 
 def _read_after(path: str, p: Optional[Dict[str, Any]], cur: str, size: int, cap: int,
@@ -392,7 +397,14 @@ def _read_after(path: str, p: Optional[Dict[str, Any]], cur: str, size: int, cap
         for j in range(found, 0, -1):
             rp = "%s.%d" % (path, j)
             rsize = os.stat(rp).st_size
-            segments.append((rp, min(p["offset"], rsize) if j == found else 0, rsize))
+            start = 0
+            if j == found:
+                if p["offset"] > rsize:
+                    # 같은 파일인데 저장 위치가 크기를 넘는다 — 잘림과 같게 처음부터 읽고 알린다.
+                    info["reset"] = True
+                else:
+                    start = p["offset"]
+            segments.append((rp, start, rsize))
         segments.append((path, 0, size))
 
     total = sum(e - s for _, s, e in segments)
@@ -400,13 +412,14 @@ def _read_after(path: str, p: Optional[Dict[str, Any]], cur: str, size: int, cap
         skip = total - cap
         info["skipped_bytes"], info["reset"] = skip, True
         kept: List[Tuple[str, int, int]] = []
-        # cap > 0 이므로 마지막(현재 파일) 조각은 적어도 일부가 남는다.
-        for fp, s, e in segments:
+        # 건너뛸 양이 남아 있을 때만 조각을 버린다. 마지막(현재 파일) 조각은 비어 있어도
+        # 남긴다 — 새 위치가 현재 파일 식별과 짝지어지는 기준이다(회전 직후 0바이트).
+        for k, (fp, s, e) in enumerate(segments):
             n = e - s
-            if skip >= n:
+            if skip and skip >= n and k < len(segments) - 1:
                 skip -= n
                 continue
-            kept.append((fp, s + skip, e))
+            kept.append((fp, s + min(skip, n), e))
             skip = 0
         segments = kept
 
@@ -420,7 +433,9 @@ def _read_after(path: str, p: Optional[Dict[str, Any]], cur: str, size: int, cap
     data += tail[:k + 1] if k >= 0 else b""
     new_off = s + (k + 1 if k >= 0 else 0)
     if info["skipped_bytes"]:
+        # 건너뛴 뒤의 첫 줄은 잘렸을 수 있어 버린다. 버린 바이트도 건너뛴 양에 센다.
         cut = data.find(b"\n")
+        info["skipped_bytes"] += (cut + 1) if cut >= 0 else len(data)
         data = data[cut + 1:] if cut >= 0 else b""
     lines = [ln.decode("utf-8", "replace") for ln in data.split(b"\n") if ln]
     last = None if info["reset"] else p["last_status"]

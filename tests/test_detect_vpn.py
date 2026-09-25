@@ -1104,14 +1104,96 @@ class TestWarpDaemonLogReading(unittest.TestCase):
         self.assertTrue(info["reset"])
 
     def test_over_the_cap_skips_the_front_and_the_cut_line(self):
+        """상한 95바이트는 줄 경계(10바이트)에 맞지 않는다 — 건너뛴 자리의 줄 조각을 버려야 한다."""
         self.write("a\n")
         _, pos, _ = self.read(None)
         self.write("".join("line %04d\n" % i for i in range(100)))
-        lines, _, info = self.read(pos, cap=100)
+        lines, _, info = self.read(pos, cap=95)
         self.assertTrue(info["reset"])
-        self.assertGreater(info["skipped_bytes"], 0)
+        self.assertEqual(lines[0], "line 0091")
         self.assertEqual(lines[-1], "line 0099")
-        self.assertTrue(all(l.startswith("line ") and len(l) == 9 for l in lines), lines[:2])
+        self.assertEqual(len(lines), 9)
+        # 건너뛴 905바이트 + 버린 조각 "0090\n" 5바이트
+        self.assertEqual(info["skipped_bytes"], 910)
+
+    def test_an_empty_current_file_after_rotation_keeps_its_own_position(self):
+        """상한을 넘었는데 현재 파일이 막 회전해 비어 있어도 새 위치는 현재 파일의 것이다."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("".join("line %04d\n" % i for i in range(100)))
+        self.rotate()
+        lines, pos, info = self.read(pos, cap=100)
+        self.assertEqual(lines[-1], "line 0099")
+        self.assertEqual((pos["file"], pos["offset"]), (vpnmod._file_id(os.stat(self.path)), 0))
+        self.write("c\n")
+        lines, _, info = self.read(pos)
+        self.assertEqual((lines, info["reset"]), (["c"], False))
+
+    def test_a_rotated_file_shorter_than_the_saved_offset_is_read_from_its_start(self):
+        """ADV-8: 회전본의 크기보다 큰 저장 위치는 잘림과 같게 다룬다(처음부터, reset)."""
+        self.write("a\nb\n")
+        _, pos, _ = self.read(None)
+        pos = dict(pos, offset=pos["offset"] + 999)
+        self.rotate()
+        self.write("c\n")
+        lines, _, info = self.read(pos)
+        self.assertEqual(lines, ["a", "b", "c"])
+        self.assertTrue(info["reset"])
+
+    def test_a_rotated_last_line_without_a_newline_is_still_a_line(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b")
+        self.rotate()
+        self.write("c\n")
+        lines, _, _ = self.read(pos)
+        self.assertEqual(lines, ["b", "c"])
+
+    def test_a_missing_file_in_the_middle_of_a_rotation_is_not_a_read_failure(self):
+        """이름이 밀린 뒤 새 파일이 아직 없는 순간에 열어도 실패로 적지 않고 다음 주기에 이어 읽는다."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\n")
+        real = vpnmod._read_range
+        calls = []
+
+        def rename_first(path, start, end):
+            if not calls:
+                os.replace(self.path, self.path + ".1")
+            calls.append(path)
+            return real(path, start, end)
+
+        with mock.patch.object(vpnmod, "_read_range", side_effect=rename_first):
+            lines, pos2, info = self.read(pos)
+        self.assertEqual((lines, info["read"], pos2), ([], "ok", pos))
+        self.write("c\n", mode="w")
+        lines, _, info = self.read(pos2)
+        self.assertEqual((lines, info["reset"]), (["b", "c"], False))
+
+    def test_the_comparison_state_is_cleared_only_when_continuity_breaks(self):
+        """`last_status` 는 이어 읽을 때만 넘어가고, 연속성이 끊기면 비운다(DEV-3 의 반복 방송 생략 기준)."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        pos = dict(pos, last_status="Connected")
+        self.write("b\n")
+        _, kept, _ = self.read(pos)
+        self.assertEqual(kept["last_status"], "Connected")
+        self.write("x\n", mode="w")                       # 잘림
+        _, cut, info = self.read(kept)
+        self.assertEqual((cut["last_status"], info["reset"]), (None, True))
+        self.write("".join("line %04d\n" % i for i in range(50)))
+        _, over, info = self.read(dict(cut, last_status="Connected"), cap=50)   # 상한 초과
+        self.assertEqual((over["last_status"], info["reset"]), (None, True))
+        for _ in range(4):
+            self.rotate()
+        _, gone, info = self.read(dict(over, last_status="Connected"))           # 회전본 밖
+        self.assertEqual((gone["last_status"], info["reset"]), (None, True))
+
+    def test_a_missing_log_keeps_the_saved_position(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        _, same, info = vpnmod.read_warp_daemon(pos, path=os.path.join(self.d, "gone"))
+        self.assertEqual((same, info["read"]), (pos, "missing"))
 
     def test_missing_and_unreadable_leave_no_message(self):
         lines, pos, info = vpnmod.read_warp_daemon(None, path=os.path.join(self.d, "nope"))
@@ -1132,6 +1214,19 @@ class TestWarpDaemonLogReading(unittest.TestCase):
             self.assertEqual(lines, [], bad)
             self.assertTrue(info["reset"], bad)
             self.assertIsInstance(pos["offset"], int)
+
+    def test_broken_values_next_to_the_real_file_id_are_treated_as_missing(self):
+        """ADV-6: 식별은 맞는데 값이 깨졌으면 검증에서 걸러 처음 켬과 같게 다룬다(예외도, 영구 실패도 없다)."""
+        self.write("a\nb\n")
+        _, good, _ = self.read(None)
+        fid = good["file"]
+        for bad in ({"file": fid, "offset": -5}, {"file": fid, "offset": "1"}, {"file": fid, "offset": True},
+                    {"file": fid, "offset": 1.5}, {"file": fid, "offset": None}, {"file": fid},
+                    {"file": fid, "offset": 0, "last_status": 7}, {"file": fid.replace(":", "-"), "offset": 0},
+                    {"file": " " + fid, "offset": 0}):
+            lines, pos, info = self.read(bad)
+            self.assertEqual((lines, info["read"], info["reset"]), ([], "ok", True), bad)
+            self.assertEqual(pos, dict(good), bad)
 
     def test_same_file_but_offset_past_the_end_is_truncation(self):
         """ADV-8: 다른 프로세스가 더 앞선 위치를 써 두었어도 잘림으로 다룬다."""
@@ -1203,6 +1298,87 @@ class TestWarpDaemonLogIsReadOnlyWhenAsked(unittest.TestCase):
         self.assertEqual(calls, [1])
         self.assertEqual(obs.data["warp_daemon"]["read"], "missing")
         self.assertEqual(obs.data["warp_daemon"]["lines"], [])
+
+
+class TestWarpDaemonLogInTheEngine(unittest.TestCase):
+    """엔진이 읽기를 어떻게 붙이는가 (DEV-2 — QA-2 재시작, AC-2 순서, QA-5 예외, K-6 `reset` 전달)."""
+
+    COLLECTORS = TestWarpDaemonLogIsReadOnlyWhenAsked.COLLECTORS
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.log = os.path.join(self.d, "cfwarp_service_log.txt")
+        with open(self.log, "w", encoding="utf-8") as fh:
+            fh.write("old\n")
+        self.calls = []
+
+    def engine(self):
+        from netmon.store import Store
+        eng = Engine(configmod.load(os.path.join(self.d, "no-config.json")), Store(self.d))
+        eng.cfg.set_feature("vpn.enabled", True)
+        eng.cfg.set_feature("vpn.providers", ["warp"])
+        return eng
+
+    def observe(self, eng, read=None):
+        from netmon import engine as enginemod
+        real = vpnmod.read_warp_daemon
+
+        def read_temp(pos, *a, **k):
+            self.calls.append("read")
+            return real(pos, path=self.log)
+
+        def collect(providers):
+            self.calls.append("collect")
+            return {"warp": {"provider": "warp", "state": "connected"}}
+        with mock.patch.multiple(enginemod, **{n: mock.Mock(collect=(lambda ctx: {}))
+                                               for n in self.COLLECTORS}), \
+                mock.patch.object(vpnmod, "read_warp_daemon", side_effect=read or read_temp), \
+                mock.patch.object(vpnmod, "collect", side_effect=collect), \
+                mock.patch.object(vpnmod, "resolve", side_effect=lambda names: [
+                    p for p in vpnmod.ALL if p.name in names]):
+            return eng.observe()
+
+    def append(self, text):
+        with open(self.log, "a", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_a_restart_continues_from_the_position_in_state_json(self):
+        eng = self.engine()
+        self.assertTrue(self.observe(eng).data["warp_daemon"]["reset"])     # 처음 켬
+        self.append("a\nb\n")
+        self.assertFalse(self.observe(eng).data["warp_daemon"]["reset"])
+        eng.store.save_state(eng.state)
+        self.append("c\n")
+        again = self.engine()                                             # 재시작
+        self.assertIn(enginemod_pos_key(), again.state)
+        wd = self.observe(again).data["warp_daemon"]
+        self.assertEqual((wd["read"], wd["reset"]), ("ok", False))
+        self.assertEqual(again.state[enginemod_pos_key()]["offset"], os.path.getsize(self.log))
+
+    def test_the_log_is_read_after_the_vpn_query(self):
+        self.observe(self.engine())
+        self.assertEqual(self.calls, ["collect", "read"])
+
+    def test_an_unexpected_exception_does_not_stop_the_cycle_and_leaves_no_message(self):
+        def boom(*a, **k):
+            raise RuntimeError("secret /opt/netmon-not-a-real-path/log")
+        obs = self.observe(self.engine(), read=boom)
+        self.assertEqual(obs.data["warp_daemon"]["read"], "unreadable")
+        self.assertNotIn("secret", json.dumps(obs.data))
+        self.assertIn("vpn", obs.data)
+
+    def test_the_reset_flag_reaches_the_sample(self):
+        for flag in (True, False):
+            obs = self.observe(self.engine(), read=lambda pos, *a, **k: (
+                [], {"file": "1:1", "offset": 0, "last_status": None},
+                {"read": "ok", "skipped_bytes": 7, "reset": flag}))
+            self.assertEqual((obs.data["warp_daemon"]["reset"], obs.data["warp_daemon"]["skipped_bytes"]), (flag, 7))
+
+
+def enginemod_pos_key():
+    from netmon import engine as enginemod
+    return enginemod.WARP_DAEMON_POS_KEY
 
 
 class TestWarpStatusParsing(unittest.TestCase):
