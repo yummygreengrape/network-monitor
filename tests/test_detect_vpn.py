@@ -1024,6 +1024,67 @@ class TestWarpDaemonLogReading(unittest.TestCase):
         self.assertEqual(lines, ["b", "c", "d"])
         self.assertFalse(info["reset"])
 
+    def test_a_rotation_in_the_middle_of_a_read_loses_and_repeats_nothing(self):
+        """ADV-5: 크기를 잰 뒤 파일을 여는 사이에 데몬이 회전해도 줄이 겹치거나 빠지지 않는다.
+
+        새 파일이 저장 위치보다 이미 길면, 옛 파일의 위치로 새 파일을 읽어 엉뚱한 줄을
+        돌려주고 그 위치를 옛 파일의 것으로 저장하게 된다. 그 주기는 읽지 않은 것으로 두고
+        다음 주기에 다시 읽어야 한다.
+        """
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\nc\n")
+        real = vpnmod._read_range
+        calls = []
+
+        def rotate_first(path, start, end):
+            if not calls:
+                self.rotate()
+                self.write("x1\nx2\nx3\n")
+            calls.append(path)
+            return real(path, start, end)
+
+        with mock.patch.object(vpnmod, "_read_range", side_effect=rotate_first):
+            first, pos, info = self.read(pos)
+        self.assertFalse(info["reset"])
+        second, _, info = self.read(pos)
+        self.assertEqual(first + second, ["b", "c", "x1", "x2", "x3"])
+        self.assertFalse(info["reset"])
+
+    def test_a_rotation_right_after_the_size_is_taken(self):
+        """크기를 잰 직후, 읽기 전 식별을 적기 전에 회전이 껴도 같다."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\nc\n")
+        real = vpnmod._rotation_ids
+        calls = []
+
+        def rotate_first(path):
+            if not calls:
+                self.rotate()
+                self.write("x1\nx2\nx3\n")
+            calls.append(path)
+            return real(path)
+
+        with mock.patch.object(vpnmod, "_rotation_ids", side_effect=rotate_first):
+            first, pos, _ = self.read(pos)
+        second, _, info = self.read(pos)
+        self.assertEqual(first + second, ["b", "c", "x1", "x2", "x3"])
+        self.assertFalse(info["reset"])
+
+    def test_a_rotation_in_the_middle_of_the_first_read_starts_over(self):
+        """처음 켤 때 끝을 찾는 사이 회전이 끼면 위치를 남기지 않고 다음 주기에 다시 끝에서 시작한다."""
+        self.write("old 1\nold 2\n")
+        real = vpnmod._read_range
+
+        def rotate_then_read(path, start, end):
+            self.rotate()
+            return real(path, start, end)
+
+        with mock.patch.object(vpnmod, "_read_range", side_effect=rotate_then_read):
+            lines, pos, info = self.read(None)
+        self.assertEqual((lines, pos, info["reset"]), ([], None, True))
+
     def test_rotated_out_of_reach_resets(self):
         self.write("a\n")
         _, pos, _ = self.read(None)

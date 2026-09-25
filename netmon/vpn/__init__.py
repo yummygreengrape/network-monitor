@@ -295,6 +295,17 @@ def _valid_daemon_pos(pos: Any) -> Optional[Dict[str, Any]]:
     return {"file": f, "offset": off, "last_status": last}
 
 
+def _rotation_ids(path: str) -> Tuple[Optional[str], ...]:
+    """현재 파일과 회전본들의 식별. 읽기 전후로 비교해 읽는 사이 회전이 끼었는지 본다."""
+    out: List[Optional[str]] = []
+    for p in [path] + ["%s.%d" % (path, i) for i in range(1, WARP_DAEMON_ROTATIONS + 1)]:
+        try:
+            out.append(_file_id(os.stat(p)))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
 def _read_range(path: str, start: int, end: int) -> bytes:
     with open(path, "rb") as fh:
         fh.seek(start)
@@ -322,6 +333,8 @@ def read_warp_daemon(pos: Any, path: str = WARP_DAEMON_LOG,
     - 같은 파일인데 저장 위치보다 작아졌으면(잘림) 처음부터 읽는다.
     - 읽을 양이 `cap` 을 넘으면 앞쪽을 건너뛰고, 잘렸을 첫 줄은 버린다.
     - 연속성이 끊긴 경우(처음 켬·위치가 깨짐·회전본을 못 찾음·잘림·상한 초과)는 `reset`.
+    - 크기를 잰 뒤 파일을 여는 사이 회전이 끼었으면(읽기 전후 식별이 다름) 그 주기는
+      읽지 않은 것으로 두고 저장 위치를 그대로 돌려준다 — 다음 주기에 다시 읽는다.
 
     읽기 정보는 `{"read": "ok"|"missing"|"unreadable", "skipped_bytes", "reset"}` 이고
     **예외 메시지나 경로를 담지 않는다**(SPEC AC-5).
@@ -337,70 +350,81 @@ def read_warp_daemon(pos: Any, path: str = WARP_DAEMON_LOG,
         info["read"] = "unreadable"
         return [], p, info
     cur, size = _file_id(st), st.st_size
+    before = _rotation_ids(path)
     try:
-        if p is None:
-            info["reset"] = True
-            return [], {"file": cur, "offset": _line_start_near_end(path, size),
-                        "last_status": None}, info
-        segments: List[Tuple[str, int, int]] = []
-        if p["file"] == cur:
-            if size < p["offset"]:
-                info["reset"] = True
-                segments = [(path, 0, size)]
-            else:
-                segments = [(path, p["offset"], size)]
-        else:
-            found = None
-            for i in range(1, WARP_DAEMON_ROTATIONS + 1):
-                try:
-                    if _file_id(os.stat("%s.%d" % (path, i))) == p["file"]:
-                        found = i
-                        break
-                except OSError:
-                    continue
-            if found is None:
-                info["reset"] = True
-                return [], {"file": cur, "offset": _line_start_near_end(path, size),
-                            "last_status": None}, info
-            for j in range(found, 0, -1):
-                rp = "%s.%d" % (path, j)
-                rsize = os.stat(rp).st_size
-                segments.append((rp, min(p["offset"], rsize) if j == found else 0, rsize))
-            segments.append((path, 0, size))
-
-        total = sum(e - s for _, s, e in segments)
-        if total > cap:
-            skip = total - cap
-            info["skipped_bytes"], info["reset"] = skip, True
-            kept: List[Tuple[str, int, int]] = []
-            # cap > 0 이므로 마지막(현재 파일) 조각은 적어도 일부가 남는다.
-            for fp, s, e in segments:
-                n = e - s
-                if skip >= n:
-                    skip -= n
-                    continue
-                kept.append((fp, s + skip, e))
-                skip = 0
-            segments = kept
-
-        data = b""
-        for fp, s, e in segments[:-1]:
-            chunk = _read_range(fp, s, e)
-            data += chunk if (not chunk or chunk.endswith(b"\n")) else chunk + b"\n"
-        fp, s, e = segments[-1]
-        tail = _read_range(fp, s, e)
-        k = tail.rfind(b"\n")
-        data += tail[:k + 1] if k >= 0 else b""
-        new_off = s + (k + 1 if k >= 0 else 0)
-        if info["skipped_bytes"]:
-            cut = data.find(b"\n")
-            data = data[cut + 1:] if cut >= 0 else b""
-        lines = [ln.decode("utf-8", "replace") for ln in data.split(b"\n") if ln]
-        last = None if info["reset"] else p["last_status"]
-        return lines, {"file": cur, "offset": new_off, "last_status": last}, info
+        result = _read_after(path, p, cur, size, cap, info)
+        if before[0] != cur or _rotation_ids(path) != before:
+            return [], p, {"read": "ok", "skipped_bytes": 0, "reset": p is None}
+        return result
     except OSError:
         info["read"] = "unreadable"
         return [], p, info
+
+
+def _read_after(path: str, p: Optional[Dict[str, Any]], cur: str, size: int, cap: int,
+                info: Dict[str, Any]
+                ) -> Tuple[List[str], Optional[Dict[str, Any]], Dict[str, Any]]:
+    """`read_warp_daemon` 의 본체. 파일 식별·크기는 호출자가 잰 값이다."""
+    if p is None:
+        info["reset"] = True
+        return [], {"file": cur, "offset": _line_start_near_end(path, size),
+                    "last_status": None}, info
+    segments: List[Tuple[str, int, int]] = []
+    if p["file"] == cur:
+        if size < p["offset"]:
+            info["reset"] = True
+            segments = [(path, 0, size)]
+        else:
+            segments = [(path, p["offset"], size)]
+    else:
+        found = None
+        for i in range(1, WARP_DAEMON_ROTATIONS + 1):
+            try:
+                if _file_id(os.stat("%s.%d" % (path, i))) == p["file"]:
+                    found = i
+                    break
+            except OSError:
+                continue
+        if found is None:
+            info["reset"] = True
+            return [], {"file": cur, "offset": _line_start_near_end(path, size),
+                        "last_status": None}, info
+        for j in range(found, 0, -1):
+            rp = "%s.%d" % (path, j)
+            rsize = os.stat(rp).st_size
+            segments.append((rp, min(p["offset"], rsize) if j == found else 0, rsize))
+        segments.append((path, 0, size))
+
+    total = sum(e - s for _, s, e in segments)
+    if total > cap:
+        skip = total - cap
+        info["skipped_bytes"], info["reset"] = skip, True
+        kept: List[Tuple[str, int, int]] = []
+        # cap > 0 이므로 마지막(현재 파일) 조각은 적어도 일부가 남는다.
+        for fp, s, e in segments:
+            n = e - s
+            if skip >= n:
+                skip -= n
+                continue
+            kept.append((fp, s + skip, e))
+            skip = 0
+        segments = kept
+
+    data = b""
+    for fp, s, e in segments[:-1]:
+        chunk = _read_range(fp, s, e)
+        data += chunk if (not chunk or chunk.endswith(b"\n")) else chunk + b"\n"
+    fp, s, e = segments[-1]
+    tail = _read_range(fp, s, e)
+    k = tail.rfind(b"\n")
+    data += tail[:k + 1] if k >= 0 else b""
+    new_off = s + (k + 1 if k >= 0 else 0)
+    if info["skipped_bytes"]:
+        cut = data.find(b"\n")
+        data = data[cut + 1:] if cut >= 0 else b""
+    lines = [ln.decode("utf-8", "replace") for ln in data.split(b"\n") if ln]
+    last = None if info["reset"] else p["last_status"]
+    return lines, {"file": cur, "offset": new_off, "last_status": last}, info
 
 
 def installed_providers() -> List[Provider]:
