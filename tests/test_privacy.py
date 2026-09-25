@@ -502,7 +502,12 @@ class TestACollectorFailureCarriesNoPath(unittest.TestCase):
                    for name in self.COLLECTORS}), \
              mock.patch.object(enginemod.vpn, "resolve",
                                return_value=["warp"]), \
-             mock.patch.object(enginemod.vpn, "collect", self._explode):
+             mock.patch.object(enginemod.vpn, "collect", self._explode), \
+             mock.patch.object(enginemod.vpn, "read_warp_daemon",
+                               return_value=([], None, {"read": "missing",
+                                                        "skipped_bytes": 0,
+                                                        "reset": True})):
+            # warp 가 공급자면 데몬 로그도 읽는다 — 이 기계의 실제 파일에 닿지 않게 막는다.
             o = eng.observe()
         self.assertEqual(o.errors, {"vpn": "OSError"})
         text = json.dumps(redactmod.redact(o.as_dict(), self.salt),

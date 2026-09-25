@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import os
+
 import ipaddress
 import re
 import time
@@ -260,6 +262,145 @@ class MacOSNative(Provider):
 
 
 ALL: List[Provider] = [Warp(), Tailscale(), WireGuard(), MacOSNative()]
+
+
+# ─── WARP 데몬 로그 (작업 2026-09-23-warp-daemon-log) ─────────────────────────
+# 조회 간격보다 짧은 끊김과 그 원인은 warp-cli 조회에는 남지 않고 데몬 로그에만 남는다.
+# `root:wheel 0644` 라 sudo 없이 읽힌다. 약 10MiB 마다 `.1`~`.3` 으로 이름이 밀리고
+# (이름 바꾸기 방식) 자정에도 새 파일로 넘어간다. 여기서는 **읽기**만 한다 — 어떤 줄을
+# 쓰고 무엇을 도려내는지는 다음 단계(표본 저장)가 정한다.
+WARP_DAEMON_LOG = "/Library/Application Support/Cloudflare/cfwarp_service_log.txt"
+WARP_DAEMON_ROTATIONS = 3
+# 한 주기 읽기 상한. 보존본 평균 약 47.8KB/분 기준 약 85분치(잠자기 뒤 몰림 대비).
+WARP_DAEMON_READ_CAP = 4 * 1024 * 1024
+# 처음 켤 때 파일 끝에서 줄 경계를 찾는 범위.
+_WARP_DAEMON_END_SCAN = 64 * 1024
+
+
+def _file_id(st: os.stat_result) -> str:
+    return "%d:%d" % (st.st_dev, st.st_ino)
+
+
+def _valid_daemon_pos(pos: Any) -> Optional[Dict[str, Any]]:
+    """state.json 에서 읽은 위치. 모양이 틀리면(다른 판·깨짐·다른 프로세스) 없는 것으로 본다."""
+    if not isinstance(pos, dict):
+        return None
+    f, off, last = pos.get("file"), pos.get("offset"), pos.get("last_status")
+    if not isinstance(f, str) or not re.fullmatch(r"\d+:\d+", f):
+        return None
+    if not isinstance(off, int) or isinstance(off, bool) or off < 0:
+        return None
+    if last is not None and not isinstance(last, str):
+        return None
+    return {"file": f, "offset": off, "last_status": last}
+
+
+def _read_range(path: str, start: int, end: int) -> bytes:
+    with open(path, "rb") as fh:
+        fh.seek(start)
+        return fh.read(max(0, end - start))
+
+
+def _line_start_near_end(path: str, size: int) -> int:
+    """끝에서 시작할 때의 오프셋 — 마지막 개행 바로 뒤. 쓰이는 중인 마지막 줄은 다음에 온전히 읽는다."""
+    if size <= 0:
+        return 0
+    start = max(0, size - _WARP_DAEMON_END_SCAN)
+    i = _read_range(path, start, size).rfind(b"\n")
+    if i >= 0:
+        return start + i + 1
+    return 0 if start == 0 else size
+
+
+def read_warp_daemon(pos: Any, path: str = WARP_DAEMON_LOG,
+                     cap: int = WARP_DAEMON_READ_CAP
+                     ) -> Tuple[List[str], Optional[Dict[str, Any]], Dict[str, Any]]:
+    """직전 위치 뒤에 붙은 **완결된 줄**을 읽는다. (줄 목록, 새 위치, 읽기 정보).
+
+    - 개행 없는 마지막 줄은 데몬이 아직 쓰는 중일 수 있어 읽지 않은 것으로 둔다.
+    - 저장한 파일이 회전됐으면 `.1`~`.3` 에서 같은 파일을 찾아 남은 부분부터 새 파일 쪽으로 읽는다.
+    - 같은 파일인데 저장 위치보다 작아졌으면(잘림) 처음부터 읽는다.
+    - 읽을 양이 `cap` 을 넘으면 앞쪽을 건너뛰고, 잘렸을 첫 줄은 버린다.
+    - 연속성이 끊긴 경우(처음 켬·위치가 깨짐·회전본을 못 찾음·잘림·상한 초과)는 `reset`.
+
+    읽기 정보는 `{"read": "ok"|"missing"|"unreadable", "skipped_bytes", "reset"}` 이고
+    **예외 메시지나 경로를 담지 않는다**(SPEC AC-5).
+    """
+    info: Dict[str, Any] = {"read": "ok", "skipped_bytes": 0, "reset": False}
+    p = _valid_daemon_pos(pos)
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        info["read"] = "missing"
+        return [], p, info
+    except OSError:
+        info["read"] = "unreadable"
+        return [], p, info
+    cur, size = _file_id(st), st.st_size
+    try:
+        if p is None:
+            info["reset"] = True
+            return [], {"file": cur, "offset": _line_start_near_end(path, size),
+                        "last_status": None}, info
+        segments: List[Tuple[str, int, int]] = []
+        if p["file"] == cur:
+            if size < p["offset"]:
+                info["reset"] = True
+                segments = [(path, 0, size)]
+            else:
+                segments = [(path, p["offset"], size)]
+        else:
+            found = None
+            for i in range(1, WARP_DAEMON_ROTATIONS + 1):
+                try:
+                    if _file_id(os.stat("%s.%d" % (path, i))) == p["file"]:
+                        found = i
+                        break
+                except OSError:
+                    continue
+            if found is None:
+                info["reset"] = True
+                return [], {"file": cur, "offset": _line_start_near_end(path, size),
+                            "last_status": None}, info
+            for j in range(found, 0, -1):
+                rp = "%s.%d" % (path, j)
+                rsize = os.stat(rp).st_size
+                segments.append((rp, min(p["offset"], rsize) if j == found else 0, rsize))
+            segments.append((path, 0, size))
+
+        total = sum(e - s for _, s, e in segments)
+        if total > cap:
+            skip = total - cap
+            info["skipped_bytes"], info["reset"] = skip, True
+            kept: List[Tuple[str, int, int]] = []
+            # cap > 0 이므로 마지막(현재 파일) 조각은 적어도 일부가 남는다.
+            for fp, s, e in segments:
+                n = e - s
+                if skip >= n:
+                    skip -= n
+                    continue
+                kept.append((fp, s + skip, e))
+                skip = 0
+            segments = kept
+
+        data = b""
+        for fp, s, e in segments[:-1]:
+            chunk = _read_range(fp, s, e)
+            data += chunk if (not chunk or chunk.endswith(b"\n")) else chunk + b"\n"
+        fp, s, e = segments[-1]
+        tail = _read_range(fp, s, e)
+        k = tail.rfind(b"\n")
+        data += tail[:k + 1] if k >= 0 else b""
+        new_off = s + (k + 1 if k >= 0 else 0)
+        if info["skipped_bytes"]:
+            cut = data.find(b"\n")
+            data = data[cut + 1:] if cut >= 0 else b""
+        lines = [ln.decode("utf-8", "replace") for ln in data.split(b"\n") if ln]
+        last = None if info["reset"] else p["last_status"]
+        return lines, {"file": cur, "offset": new_off, "last_status": last}, info
+    except OSError:
+        info["read"] = "unreadable"
+        return [], p, info
 
 
 def installed_providers() -> List[Provider]:

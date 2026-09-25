@@ -70,6 +70,8 @@ BASELINE_SAVE_SECONDS = 60.0
 # 이름은 `netmon/vpn` 것을 그대로 쓴다. 여기서 쓰고 복구 판정이 읽으므로
 # (netmon/detect/vpn.py `_endpoint_probe_record`) 한 곳에서 와야 한다.
 ENDPOINT_PROBES_KEY = vpn.ENDPOINT_PROBES_KEY
+# WARP 데몬 로그의 읽기 위치(수집 쪽 소유). 재시작해도 이어 읽는다.
+WARP_DAEMON_POS_KEY = "warp_daemon_pos"
 
 # 커널 ARP 로그를 읽는 간격과 조회 창. `log show` 는 고정 1초쯤 들고 창이
 # 커지면 더 든다(1시간치 8.9초). 간격보다 창을 넉넉히 잡아 빈틈을 막는다.
@@ -230,6 +232,11 @@ class Engine:
                 # 공급자 조회도 외부 명령을 쓴다. 위 `step` 과 같은 이유로
                 # 종류 이름까지만 남긴다.
                 obs.errors["vpn"] = _collect_error(exc)
+            # WARP 데몬 로그는 VPN 조회 **뒤에** 읽는다 — 이 주기의 창(새로 읽은 줄)이
+            # 이 주기 조회까지의 데몬 기록을 담게 하려는 것이다. warp 가 공급자일 때만
+            # 읽고, 아니면 파일을 열지도 않는다(작업 2026-09-23-warp-daemon-log AC-1).
+            if any(getattr(p, "name", p) == "warp" for p in providers):
+                obs.data["warp_daemon"] = self._read_warp_daemon()
 
         self._remember_for_burst(obs)
         return obs
@@ -327,6 +334,25 @@ class Engine:
         발 수가 어긋나고, 상한의 정확성이 그 일치에 기대고 있다.
         """
         return link.packets_per_command(self.cfg.data.get("ping_count", 1))
+
+    def _read_warp_daemon(self) -> Dict[str, Any]:
+        """데몬 로그의 새 줄을 읽어 관측에 남길 모양으로. 위치는 `state.json` 으로 이어 간다.
+
+        줄 **내용**은 아직 싣지 않는다 — 어떤 줄을 쓰고 무엇을 도려내는지 정하는 단계가
+        들어오기 전에 원문을 표본에 남기면 설정·주소가 그대로 쌓인다. 실패는 종류와
+        개수만 남긴다(메시지·줄 내용 없음).
+        """
+        try:
+            _lines, pos, info = vpn.read_warp_daemon(self.state.get(WARP_DAEMON_POS_KEY))
+        except Exception:
+            info, pos = {"read": "unreadable", "skipped_bytes": 0, "reset": True}, None
+        if pos is None:
+            self.state.pop(WARP_DAEMON_POS_KEY, None)
+        else:
+            self.state[WARP_DAEMON_POS_KEY] = pos
+        return {"read": info["read"], "lines": [], "state": None,
+                "skipped_bytes": info["skipped_bytes"], "unparsed": 0,
+                "reset": info["reset"]}
 
     def _remember_for_burst(self, obs: Observation) -> None:
         """다음 주기의 다발 측정 판단에 쓸, 직전 두 주기의 상태를 남긴다.

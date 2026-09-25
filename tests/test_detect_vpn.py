@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -931,6 +932,216 @@ class TestProviderDedup(unittest.TestCase):
         self.assertNotIn("회사이름", repr(row))
 
 
+
+
+class TestWarpDaemonLogReading(unittest.TestCase):
+    """WARP 데몬 로그를 이어 읽는다 (DEV-2 — QA-1, QA-2, QA-5, ADV-5, ADV-6, ADV-8).
+
+    읽는 쪽의 약속: 직전 주기 뒤에 붙은 **완결된 줄**만 돌려준다. 개행 없는 마지막 줄은
+    데몬이 아직 쓰는 중일 수 있어 다음 주기로 미룬다. 회전(이름 바꾸기)과 두 번 회전,
+    잘림, 한 주기 상한을 넘는 경우에도 줄이 겹치거나 빠지지 않는다 — 빠질 수밖에 없을
+    때(상한 초과, 회전본을 못 찾음)는 `reset` 으로 알린다.
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.path = os.path.join(self.d, "cfwarp_service_log.txt")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def write(self, text, path=None, mode="a"):
+        with open(path or self.path, mode, encoding="utf-8") as fh:
+            fh.write(text)
+
+    def rotate(self):
+        """데몬처럼 이름을 밀어낸다: .2→.3, .1→.2, 현재→.1, 새 현재."""
+        for i in (2, 1):
+            src = "%s.%d" % (self.path, i)
+            if os.path.exists(src):
+                os.replace(src, "%s.%d" % (self.path, i + 1))
+        os.replace(self.path, self.path + ".1")
+        self.write("", mode="w")
+
+    def read(self, pos, cap=vpnmod.WARP_DAEMON_READ_CAP):
+        return vpnmod.read_warp_daemon(pos, path=self.path, cap=cap)
+
+    def test_first_start_begins_at_the_end(self):
+        self.write("old 1\nold 2\n")
+        lines, pos, info = self.read(None)
+        self.assertEqual(lines, [])
+        self.assertEqual(info["read"], "ok")
+        self.write("new 1\n")
+        lines, pos, info = self.read(pos)
+        self.assertEqual(lines, ["new 1"])
+
+    def test_first_start_waits_for_a_half_written_last_line(self):
+        self.write("old 1\nhalf")
+        lines, pos, _ = self.read(None)
+        self.write(" done\n")
+        lines, _, _ = self.read(pos)
+        self.assertEqual(lines, ["half done"])
+
+    def test_only_new_complete_lines(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\nc\npartial")
+        lines, pos, info = self.read(pos)
+        self.assertEqual(lines, ["b", "c"])
+        self.assertFalse(info["reset"])
+        self.write(" line\n")
+        lines, pos, _ = self.read(pos)
+        self.assertEqual(lines, ["partial line"])
+
+    def test_a_restart_resumes_from_the_saved_position(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\n")
+        saved = json.loads(json.dumps(pos))          # state.json 을 거친 것처럼
+        lines, _, info = self.read(saved)
+        self.assertEqual(lines, ["b"])
+        self.assertFalse(info["reset"])
+
+    def test_single_rotation_keeps_the_tail_of_the_old_file(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\n")
+        self.rotate()
+        self.write("c\n")
+        lines, _, info = self.read(pos)
+        self.assertEqual(lines, ["b", "c"])
+        self.assertFalse(info["reset"])
+
+    def test_double_rotation(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\n")
+        self.rotate()
+        self.write("c\n")
+        self.rotate()
+        self.write("d\n")
+        lines, _, info = self.read(pos)
+        self.assertEqual(lines, ["b", "c", "d"])
+        self.assertFalse(info["reset"])
+
+    def test_rotated_out_of_reach_resets(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        for _ in range(4):
+            self.rotate()
+            self.write("x\n")
+        lines, _, info = self.read(pos)
+        self.assertTrue(info["reset"])
+        self.assertEqual(lines, [])
+
+    def test_truncation_reads_from_the_start_and_resets(self):
+        self.write("a much longer first line\n")
+        _, pos, _ = self.read(None)
+        self.write("short\n", mode="w")              # 같은 파일, 크기가 줄었다
+        lines, _, info = self.read(pos)
+        self.assertEqual(lines, ["short"])
+        self.assertTrue(info["reset"])
+
+    def test_over_the_cap_skips_the_front_and_the_cut_line(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("".join("line %04d\n" % i for i in range(100)))
+        lines, _, info = self.read(pos, cap=100)
+        self.assertTrue(info["reset"])
+        self.assertGreater(info["skipped_bytes"], 0)
+        self.assertEqual(lines[-1], "line 0099")
+        self.assertTrue(all(l.startswith("line ") and len(l) == 9 for l in lines), lines[:2])
+
+    def test_missing_and_unreadable_leave_no_message(self):
+        lines, pos, info = vpnmod.read_warp_daemon(None, path=os.path.join(self.d, "nope"))
+        self.assertEqual((lines, info["read"]), ([], "missing"))
+        self.write("a\n")
+        with mock.patch("builtins.open", side_effect=PermissionError("secret /opt/netmon-not-a-real-path/log")):
+            lines, pos2, info = self.read({"file": "1:1", "offset": 0, "last_status": None})
+        self.assertEqual((lines, info["read"]), ([], "unreadable"))
+        self.assertNotIn("secret", json.dumps(info))
+
+    def test_broken_saved_positions_are_treated_as_missing(self):
+        """ADV-6·ADV-8: 깨졌거나 다른 프로세스가 덮어쓴 위치에서 예외가 나지 않는다."""
+        self.write("a\nb\n")
+        for bad in ("x", 3, [], {"file": 1, "offset": 0}, {"file": "1:2", "offset": -5},
+                    {"file": "1:2", "offset": "10"}, {"file": "9:9", "offset": 10 ** 12},
+                    {"offset": 0}, {"file": "1:2", "offset": 0, "last_status": 7}):
+            lines, pos, info = self.read(bad)
+            self.assertEqual(lines, [], bad)
+            self.assertTrue(info["reset"], bad)
+            self.assertIsInstance(pos["offset"], int)
+
+    def test_same_file_but_offset_past_the_end_is_truncation(self):
+        """ADV-8: 다른 프로세스가 더 앞선 위치를 써 두었어도 잘림으로 다룬다."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        pos = dict(pos, offset=pos["offset"] + 999)
+        lines, _, info = self.read(pos)
+        self.assertEqual(lines, ["a"])
+        self.assertTrue(info["reset"])
+
+    def test_invalid_utf8_does_not_stop_reading(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        with open(self.path, "ab") as fh:
+            fh.write(b"bad \xff\xfe bytes\nok\n")
+        lines, _, _ = self.read(pos)
+        self.assertEqual(lines[-1], "ok")
+        self.assertEqual(len(lines), 2)
+
+
+class TestWarpDaemonLogIsReadOnlyWhenAsked(unittest.TestCase):
+    """AC-1(QA-1): VPN 감시가 켜져 있고 warp 가 공급자일 때만 읽는다. 아니면 열지도 않는다."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    COLLECTORS = ("iface", "arp", "dhcp", "dns", "route", "wifi", "link")
+
+    def engine(self, vpn_enabled, providers):
+        from netmon.store import Store
+        eng = Engine(configmod.load(os.path.join(self.d, "no-config.json")), Store(self.d))
+        eng.cfg.set_feature("vpn.enabled", vpn_enabled)
+        eng.cfg.set_feature("vpn.providers", providers)
+        return eng
+
+    def run_observe(self, eng):
+        from netmon import engine as enginemod
+        calls = []
+
+        def spy(*a, **k):
+            calls.append(1)
+            return [], {"file": "1:1", "offset": 0, "last_status": None}, \
+                {"read": "missing", "skipped_bytes": 0, "reset": True}
+        with mock.patch.multiple(enginemod, **{n: mock.Mock(collect=(lambda ctx: {}))
+                                               for n in self.COLLECTORS}), \
+                mock.patch.object(vpnmod, "read_warp_daemon", side_effect=spy), \
+                mock.patch.object(vpnmod, "collect", return_value={}), \
+                mock.patch.object(vpnmod, "resolve",
+                                  side_effect=lambda names: [p for p in vpnmod.ALL
+                                                             if "auto" in names or p.name in names]):
+            obs = eng.observe()
+        return obs, calls
+
+    def test_vpn_off_never_opens_the_log(self):
+        obs, calls = self.run_observe(self.engine(False, ["warp"]))
+        self.assertEqual(calls, [])
+        self.assertNotIn("warp_daemon", obs.data)
+
+    def test_warp_not_selected_never_opens_the_log(self):
+        obs, calls = self.run_observe(self.engine(True, ["tailscale"]))
+        self.assertEqual(calls, [])
+        self.assertNotIn("warp_daemon", obs.data)
+
+    def test_warp_selected_reads_and_records_no_line_text_yet(self):
+        obs, calls = self.run_observe(self.engine(True, ["warp"]))
+        self.assertEqual(calls, [1])
+        self.assertEqual(obs.data["warp_daemon"]["read"], "missing")
+        self.assertEqual(obs.data["warp_daemon"]["lines"], [])
 
 
 class TestWarpStatusParsing(unittest.TestCase):
