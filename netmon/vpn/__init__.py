@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..redact import replace_addresses
 from ..util import OK, UNSUPPORTED, Capability, find_tool, first_line, have, run
 
 # 공통 상태
@@ -440,6 +441,92 @@ def _read_after(path: str, p: Optional[Dict[str, Any]], cur: str, size: int, cap
     lines = [ln.decode("utf-8", "replace") for ln in data.split(b"\n") if ln]
     last = None if info["reset"] else p["last_status"]
     return lines, {"file": cur, "offset": new_off, "last_status": last}, info
+
+
+# ─── 데몬 로그에서 쓰는 줄 (SPEC AC-3·AC-4, TODO K-5) ──────────────────────────
+# 줄 **맨 앞**의 시각·수준·모듈 경로·고정 문구가 모두 맞아야 한다. 다른 줄 안에 같은
+# 문구가 들어 있어도(예: 네트워크 이름에 섞인 문구) 매칭하지 않는다. 분류 줄의 모듈
+# 경로는 관측된 두 모양뿐이다 — `[^ ]*` 처럼 넓히면 span 의 따옴표 값 안 글이 통과한다.
+# 타임스탬프 없는 연속 줄은 어느 것에도 맞지 않아 그냥 버려진다(해석 실패로 세지 않음).
+_WARP_TS = r"^(?P<ts>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)"
+_RX_WARP_STATUS = re.compile(_WARP_TS + r" +DEBUG +actor_ipc::logging: Ipc Broadcast ResponseStatus: ")
+_RX_WARP_DISCONNECT = re.compile(
+    _WARP_TS + r" +(?:INFO|WARN) +main_loop(?::handle_update\{update=[A-Za-z]+\(\.\.\)\})?: "
+    r"warp::warp_service: Disconnecting due to ")
+_RX_WARP_ERROR = re.compile(
+    _WARP_TS + r" +WARN +main_loop: warp::warp_service: Connection experienced runtime error error=")
+
+# 상태 이름. 첫 글자가 영문자이고 64자까지(관측 최장 29자). 이름 바로 뒤가 아래 글자나
+# 줄끝일 때만 이름이다 — `fe80::1` 의 `fe80`, `host.example` 의 `host` 가 이름으로 새지 않게.
+_WARP_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+_WARP_NAME_END = frozenset(("(", ")", "{", " ", ",", ""))
+# 괄호 안으로 들어가는 깊이(관측 최대 3단계 `Unable(ConnectivityCheckFailed(Unknown))`).
+WARP_STATUS_DEPTH = 4
+# 분류·오류 줄 꼬리의 저장 상한. 도려내기는 앞쪽 이만큼에만 한다(긴 줄에서도 일이 묶인다).
+WARP_DAEMON_TEXT_CAP = 300
+_WARP_SCRUB_WINDOW = 4096
+_ADDR_PORT = re.compile(r"(<addr>\]?):\d{1,5}(?!\d)")
+_HEX_LONG = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16,}(?![0-9A-Fa-f])")
+
+
+def warp_status_name(rest: str) -> Optional[str]:
+    """상태 방송 뒤의 글에서 이름만 남긴다(SPEC AC-4). 맨 앞에 이름이 없으면 None(해석 실패).
+
+    바깥부터 한 단계씩, 괄호 안이 이름으로 **시작**하면 그 이름을 남기고 한 단계 더 들어간다.
+    이름으로 시작하지 않는 괄호(숫자·주소·따옴표 등)와 중괄호는 통째로 버린다.
+    되부르지 않고 `WARP_STATUS_DEPTH` 단계에서 멈춘다.
+    """
+    names: List[str] = []
+    s = rest
+    while len(names) < WARP_STATUS_DEPTH:
+        m = _WARP_NAME.match(s)
+        after = s[m.end():m.end() + 1] if m else None
+        if not m or after not in _WARP_NAME_END:
+            break
+        names.append(m.group(0))
+        if after != "(":
+            break
+        s = s[m.end() + 1:]
+    if not names:
+        return None
+    return "(".join(names) + ")" * (len(names) - 1)
+
+
+def scrub_daemon_text(text: str) -> str:
+    """분류·오류 줄 꼬리에서 IPv4·IPv6 주소(포트 포함)와 16자 이상 16진 값을 도려내고 줄인다."""
+    t = replace_addresses(text[:_WARP_SCRUB_WINDOW], lambda kind, value: "<addr>")
+    t = _ADDR_PORT.sub(r"\1", t)
+    t = _HEX_LONG.sub("<hex>", t)
+    return t[:WARP_DAEMON_TEXT_CAP]
+
+
+def parse_warp_daemon(lines: List[str], last_status: Optional[str]
+                      ) -> Tuple[List[Dict[str, str]], Optional[str], int]:
+    """읽은 줄에서 저장할 것만 `{ts, kind, text}` 로. (저장할 줄, 마지막 상태, 해석 실패 수).
+
+    - 상태 방송은 이름만. 도려낸 이름이 `last_status` 와 같으면(반복 방송) 저장하지 않는다.
+    - 분류(`disconnect`)·오류 원인(`error`) 줄은 꼬리를 `scrub_daemon_text` 로 도려낸다.
+    - 매칭 접두는 맞는데 상태 이름을 뽑지 못하면 세기만 한다(내용은 남기지 않음 — SPEC AC-5).
+    - 그 밖의 줄은 저장하지 않는다.
+    """
+    kept: List[Dict[str, str]] = []
+    unparsed = 0
+    for ln in lines:
+        m = _RX_WARP_STATUS.match(ln)
+        if m:
+            name = warp_status_name(ln[m.end():])
+            if name is None:
+                unparsed += 1
+            elif name != last_status:
+                kept.append({"ts": m.group("ts"), "kind": "status", "text": name})
+                last_status = name
+            continue
+        for kind, rx in (("disconnect", _RX_WARP_DISCONNECT), ("error", _RX_WARP_ERROR)):
+            m = rx.match(ln)
+            if m:
+                kept.append({"ts": m.group("ts"), "kind": kind, "text": scrub_daemon_text(ln[m.end():])})
+                break
+    return kept, last_status, unparsed
 
 
 def installed_providers() -> List[Provider]:

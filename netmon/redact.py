@@ -21,7 +21,7 @@ import os
 import re
 import secrets
 import stat
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .model import ID_KINDS
 
@@ -91,13 +91,12 @@ def _address_kind(text: str) -> Optional[str]:
         return None
 
 
-def redact_text(text: str, salt: bytes, kinds: Optional[set] = None) -> str:
-    """자유 문자열 속 IPv4·IPv6 주소를 토큰으로 바꾼다. 포트·나머지 글자는 그대로 둔다.
+def replace_addresses(text: str, fn: Callable[[str, str], Optional[str]]) -> str:
+    """자유 문자열 속 IPv4·IPv6 주소마다 `fn(종류, 값)` 으로 바꾼다. None 이면 그대로 둔다.
 
-    같은 주소는 `ident()` 로 감싼 값과 같은 토큰이 된다(`token` 이 종류와 값만 본다).
+    대괄호 IPv6 는 괄호를 남기고 안쪽만 바꾼다. 포트·나머지 글자는 건드리지 않는다.
+    내보낼 때의 가림(`redact_text`)과 WARP 데몬 줄 도려내기(netmon/vpn)가 같은 판별을 쓴다.
     """
-    active = kinds if kinds is not None else set(ID_KINDS)
-
     def one(m: "re.Match[str]") -> str:
         value = m.group("b6") or m.group("v4") or m.group("v6")
         kind = _address_kind(value)
@@ -105,12 +104,22 @@ def redact_text(text: str, salt: bytes, kinds: Optional[set] = None) -> str:
             # 대괄호 안이 IPv6 하나가 아니면(`[<IPv4>:<포트>]` 등) 안쪽을 다시 훑는다.
             # 안쪽에는 대괄호가 없어 한 번으로 끝난다.
             return "[%s]" % _ADDR.sub(one, value)
-        if kind is None or kind not in active:
+        rep = fn(kind, value) if kind is not None else None
+        if rep is None:
             return m.group(0)
-        tok = token(salt, kind, value)
-        return "[%s]" % tok if m.group("b6") else tok
+        return "[%s]" % rep if m.group("b6") else rep
 
     return _ADDR.sub(one, text)
+
+
+def redact_text(text: str, salt: bytes, kinds: Optional[set] = None) -> str:
+    """자유 문자열 속 IPv4·IPv6 주소를 토큰으로 바꾼다. 포트·나머지 글자는 그대로 둔다.
+
+    같은 주소는 `ident()` 로 감싼 값과 같은 토큰이 된다(`token` 이 종류와 값만 본다).
+    """
+    active = kinds if kinds is not None else set(ID_KINDS)
+    return replace_addresses(
+        text, lambda kind, value: token(salt, kind, value) if kind in active else None)
 
 
 def redact(obj: Any, salt: bytes, kinds: Optional[set] = None) -> Any:

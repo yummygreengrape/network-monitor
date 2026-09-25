@@ -336,22 +336,27 @@ class Engine:
         return link.packets_per_command(self.cfg.data.get("ping_count", 1))
 
     def _read_warp_daemon(self) -> Dict[str, Any]:
-        """데몬 로그의 새 줄을 읽어 관측에 남길 모양으로. 위치는 `state.json` 으로 이어 간다.
+        """데몬 로그의 새 줄을 읽어 **도려낸 줄만** 관측에 남긴다. 위치는 `state.json` 으로 이어 간다.
 
-        줄 **내용**은 아직 싣지 않는다 — 어떤 줄을 쓰고 무엇을 도려내는지 정하는 단계가
-        들어오기 전에 원문을 표본에 남기면 설정·주소가 그대로 쌓인다. 실패는 종류와
-        개수만 남긴다(메시지·줄 내용 없음).
+        쓰는 줄·도려내는 규칙은 `vpn.parse_warp_daemon`(SPEC AC-3·AC-4). 반복 방송 비교의
+        기준 상태(`last_status`)는 위치와 함께 수집 쪽이 가진다 — 회전·잘림·상한 초과로
+        연속성이 끊기면 읽기가 그 값을 비운다. 실패는 종류와 개수만 남긴다(메시지·줄 내용 없음).
         """
         try:
-            _lines, pos, info = vpn.read_warp_daemon(self.state.get(WARP_DAEMON_POS_KEY))
+            lines, pos, info = vpn.read_warp_daemon(self.state.get(WARP_DAEMON_POS_KEY))
+            last = pos.get("last_status") if pos else None
+            kept, last, unparsed = vpn.parse_warp_daemon(lines, last)
+            if pos is not None:
+                pos["last_status"] = last
         except Exception:
             info, pos = {"read": "unreadable", "skipped_bytes": 0, "reset": True}, None
+            kept, last, unparsed = [], None, 0
         if pos is None:
             self.state.pop(WARP_DAEMON_POS_KEY, None)
         else:
             self.state[WARP_DAEMON_POS_KEY] = pos
-        return {"read": info["read"], "lines": [], "state": None,
-                "skipped_bytes": info["skipped_bytes"], "unparsed": 0,
+        return {"read": info["read"], "lines": kept, "state": last,
+                "skipped_bytes": info["skipped_bytes"], "unparsed": unparsed,
                 "reset": info["reset"]}
 
     def _remember_for_burst(self, obs: Observation) -> None:

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -1293,7 +1294,7 @@ class TestWarpDaemonLogIsReadOnlyWhenAsked(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertNotIn("warp_daemon", obs.data)
 
-    def test_warp_selected_reads_and_records_no_line_text_yet(self):
+    def test_warp_selected_reads_the_log(self):
         obs, calls = self.run_observe(self.engine(True, ["warp"]))
         self.assertEqual(calls, [1])
         self.assertEqual(obs.data["warp_daemon"]["read"], "missing")
@@ -1379,6 +1380,246 @@ class TestWarpDaemonLogInTheEngine(unittest.TestCase):
 def enginemod_pos_key():
     from netmon import engine as enginemod
     return enginemod.WARP_DAEMON_POS_KEY
+
+
+T0 = "2026-01-01T00:00:00.000Z"
+
+
+def daemon_status(rest, ts=T0, pad=" "):
+    return "%s%sDEBUG actor_ipc::logging: Ipc Broadcast ResponseStatus: %s" % (ts, pad, rest)
+
+
+def daemon_disconnect(rest, ts=T0, level="WARN", module="main_loop", pad=" "):
+    return "%s%s%s %s: warp::warp_service: Disconnecting due to %s" % (ts, pad, level, module, rest)
+
+
+def daemon_error(rest, ts=T0, pad=" "):
+    return ("%s%sWARN main_loop: warp::warp_service: Connection experienced runtime error error=%s"
+            % (ts, pad, rest))
+
+
+class TestWarpDaemonLineParsing(unittest.TestCase):
+    """데몬 로그에서 쓰는 줄과 저장하는 모양 (DEV-3 — QA-3, QA-4, QA-5, ADV-1, ADV-2, ADV-3).
+
+    쓰는 줄은 세 종류뿐이다: 상태 방송, 끊김 분류, 오류 원인. 줄 **맨 앞**의 시각·수준·모듈 경로·
+    고정 문구가 모두 맞아야 한다. 상태는 이름만, 분류·오류는 주소·긴 16진을 도려내고 300자까지.
+    같은 상태의 반복 방송은 저장하지 않는다(도려낸 뒤의 이름으로 비교).
+    """
+
+    def parse(self, lines, last=None):
+        return vpnmod.parse_warp_daemon(lines, last)
+
+    def kinds(self, lines):
+        return [(k["kind"], k["text"]) for k in self.parse(lines)[0]]
+
+    # QA-3 ────────────────────────────────────────────────────────────────
+    def test_three_kinds_with_level_padding_and_both_module_shapes(self):
+        lines = [daemon_status("Connected {x}"),
+                 daemon_status("Disconnected(InternalTunnelError)", pad="  "),
+                 daemon_disconnect("runtime connection failure failure=Tunnel", pad="  "),
+                 daemon_disconnect("settings change", level="INFO",
+                                   module="main_loop:handle_update{update=SettingsChanged(..)}"),
+                 daemon_error("TunnelError(SocketRecv(BrokenPipe))", pad="  ")]
+        self.assertEqual(self.kinds(lines), [
+            ("status", "Connected"), ("status", "Disconnected(InternalTunnelError)"),
+            ("disconnect", "runtime connection failure failure=Tunnel"),
+            ("disconnect", "settings change"),
+            ("error", "TunnelError(SocketRecv(BrokenPipe))")])
+
+    def test_continuation_lines_are_ignored_and_not_counted_as_failures(self):
+        kept, last, unparsed = self.parse(["fl=abc", " changes=[x]", "", ") })}: captive_portal"])
+        self.assertEqual((kept, last, unparsed), ([], None, 0))
+
+    def test_other_timestamped_lines_are_not_stored(self):
+        lines = [T0 + " DEBUG actor_ipc::dispatch: Ipc request: 00000000-0000-0000-0000-000000000000; GetDaemonStatus",
+                 T0 + "  INFO main_loop: warp::warp_service: Disconnecting, but reason is unknown",
+                 T0 + "  INFO main_loop{update=NetworkInfoChanged(..)}: warp::warp_service: Disconnecting due to x"]
+        self.assertEqual(self.parse(lines), ([], None, 0))
+
+    # QA-4 ────────────────────────────────────────────────────────────────
+    def test_the_four_examples_of_the_spec(self):
+        cases = [
+            ("Connected {edge: 198.51.100.7:2408, source: Some(192.0.2.10)}", "Connected"),
+            ('Disconnected(SettingsChanged { organization: "x", auth_client_secret: "y" })',
+             "Disconnected(SettingsChanged)"),
+            ("Connecting(PerformingHappyEyeballs(198.51.100.7:2408, [2001:db8::7]:2408))",
+             "Connecting(PerformingHappyEyeballs)"),
+            ("Unable(ConnectivityCheckFailed(Unknown))", "Unable(ConnectivityCheckFailed(Unknown))"),
+        ]
+        for rest, want in cases:
+            self.assertEqual(self.kinds([daemon_status(rest)]), [("status", want)], rest)
+
+    def test_a_name_followed_by_a_colon_or_a_dot_is_not_a_name(self):
+        self.assertEqual(self.kinds([daemon_status("Connecting(fe80::1)")]), [("status", "Connecting")])
+        self.assertEqual(self.kinds([daemon_status("Connecting(a.example)")]), [("status", "Connecting")])
+        kept, _, unparsed = self.parse([daemon_status("fe80::1"), daemon_status("host.example")])
+        self.assertEqual((kept, unparsed), ([], 2))
+
+    def test_addresses_long_hex_and_length_are_cut_from_cause_lines(self):
+        tail = ("failure to 198.51.100.7:2408 via [2001:db8::7]:443 and [192.0.2.1:53] key "
+                "0123456789abcdef0123 " + "x" * 500)
+        for line in (daemon_disconnect(tail), daemon_error(tail)):
+            text = self.parse([line])[0][0]["text"]
+            for leak in ("198.51.100", "2001:db8", "192.0.2.1", "0123456789abcdef", ":2408", ":443", ":53"):
+                self.assertNotIn(leak, text)
+            self.assertIn("<addr>", text)
+            self.assertIn("<hex>", text)
+            self.assertLessEqual(len(text), vpnmod.WARP_DAEMON_TEXT_CAP)
+
+    def test_repeated_broadcasts_are_not_stored_even_across_cycles(self):
+        kept, last, _ = self.parse([daemon_status("Connected {a}"), daemon_status("Connected {b}"),
+                                    daemon_status("Connecting(CheckingNetwork)"),
+                                    daemon_status("Connecting(CheckingNetwork)")])
+        self.assertEqual([k["text"] for k in kept], ["Connected", "Connecting(CheckingNetwork)"])
+        kept, last, _ = self.parse([daemon_status("Connecting(CheckingNetwork {c})")], last)
+        self.assertEqual((kept, last), ([], "Connecting(CheckingNetwork)"))
+
+    def test_the_daemon_timestamp_is_kept_as_it_is(self):
+        kept = self.parse([daemon_status("Connected", ts="2026-09-23T04:15:32.004Z")])[0]
+        self.assertEqual(kept, [{"ts": "2026-09-23T04:15:32.004Z", "kind": "status", "text": "Connected"}])
+
+    # QA-5 ────────────────────────────────────────────────────────────────
+    def test_a_status_without_a_name_is_counted_and_nothing_is_kept(self):
+        kept, last, unparsed = self.parse([daemon_status("{secret: 1}"), daemon_status(""),
+                                           daemon_status("123"), daemon_status("[2001:db8::7]")])
+        self.assertEqual((kept, last, unparsed), ([], None, 4))
+
+    # ADV-1 ───────────────────────────────────────────────────────────────
+    def test_the_phrases_in_the_middle_of_another_line_do_not_match(self):
+        fake = "Ipc Broadcast ResponseStatus: Disconnected(Manual)"
+        lines = [T0 + ' DEBUG warp::net: {"ssid":"x %s"}' % fake,
+                 T0 + ' DEBUG warp::net: {"ssid":"a\\n%s"}' % daemon_status("Disconnected(Manual)"),
+                 T0 + " INFO some::module: Disconnecting due to settings change",
+                 T0 + " WARN other: Connection experienced runtime error error=x"]
+        self.assertEqual(self.parse(lines), ([], None, 0))
+
+    def test_a_forged_prefix_shorter_than_the_real_one_does_not_match(self):
+        """SSID(최대 32옥텟)가 날 개행 뒤에 줄 맨 앞으로 와도 81바이트 고정 접두를 채울 수 없다."""
+        for full in (daemon_status("Disconnected(Manual)"), daemon_disconnect("manual"),
+                     daemon_error("x")):
+            head = full[:full.index(":", 30) + 1]
+            for n in range(len(head)):
+                self.assertEqual(self.parse([head[:n]]), ([], None, 0), head[:n])
+
+    def test_a_quoted_span_value_in_the_module_path_does_not_match(self):
+        for module in ('main_loop:handle_update{update="manual user"}', "main_loop{reason=manual}",
+                       "main_loop:handle_update{update=SettingsChanged(..)} user",
+                       "main_loop:x"):
+            line = daemon_disconnect("manual", level="INFO", module=module)
+            self.assertEqual(self.parse([line]), ([], None, 0), module)
+
+    # ADV-2 ───────────────────────────────────────────────────────────────
+    def test_brackets_that_do_not_start_with_a_name_are_dropped(self):
+        for rest in ("Connecting(123abc)", "Connecting(198.51.100.7:2408)", "Connecting([2001:db8::7]:2408)",
+                     "Connecting(fe80::1)", "Connecting(a.example)", "Connecting(abc:def)",
+                     'Connecting("quoted")', "Connected {Disconnected(Manual)}"):
+            want = "Connected" if rest.startswith("Connected") else "Connecting"
+            self.assertEqual(self.kinds([daemon_status(rest)]), [("status", want)], rest)
+        self.assertEqual(self.kinds([daemon_status("Connecting(Performing(fe80::1))")]),
+                         [("status", "Connecting(Performing)")])
+
+    def test_a_half_written_last_line_never_becomes_a_state(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "log")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        _, pos, _ = vpnmod.read_warp_daemon(None, path=path)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(daemon_status("Connected") + "\n" + daemon_status("Conn"))
+        lines, pos, _ = vpnmod.read_warp_daemon(pos, path=path)
+        self.assertEqual(self.kinds(lines), [("status", "Connected")])
+
+    # ADV-3 ───────────────────────────────────────────────────────────────
+    def test_huge_and_broken_lines_finish_quickly_and_keep_nothing_extra(self):
+        import time
+        config = "Disconnected(SettingsChanged { " + 'organization: "x", ' * 1500 + "})"
+        cases = [
+            (daemon_status(config), [("status", "Disconnected(SettingsChanged)")], 0),
+            (daemon_status("A" * (1 << 20)), [], 1),
+            (daemon_status("A(" * 5000), None, 0),
+            (daemon_disconnect("1:" * (1 << 19)), None, 0),
+            (daemon_error("[" * (1 << 20)), None, 0),
+            (daemon_status("Connected��"), [], 1),
+            (daemon_status("Conn�ected"), [], 1),
+        ]
+        for line, want, unparsed in cases:
+            start = time.time()
+            kept, _, n = self.parse([line])
+            self.assertLess(time.time() - start, 2.0, line[:60])
+            self.assertEqual(n, unparsed, line[:60])
+            for k in kept:
+                self.assertLessEqual(len(k["text"]), vpnmod.WARP_DAEMON_TEXT_CAP)
+            if want is not None:
+                self.assertEqual([(k["kind"], k["text"]) for k in kept], want, line[:60])
+
+    def test_nesting_is_bounded(self):
+        kept = self.parse([daemon_status("A(" * 5000)])[0]
+        self.assertEqual(kept[0]["text"].count("("), vpnmod.WARP_STATUS_DEPTH - 1)
+
+
+class TestWarpDaemonLinesInTheSample(unittest.TestCase):
+    """엔진이 표본 `data.warp_daemon` 에 도려낸 줄만 싣는다 (DEV-3 — QA-4, QA-5, QA-10)."""
+
+    COLLECTORS = TestWarpDaemonLogIsReadOnlyWhenAsked.COLLECTORS
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        from netmon.store import Store
+        self.eng = Engine(configmod.load(os.path.join(self.d, "no-config.json")), Store(self.d))
+        self.eng.cfg.set_feature("vpn.enabled", True)
+        self.eng.cfg.set_feature("vpn.providers", ["warp"])
+
+    def observe(self, lines, parse=None):
+        from netmon import engine as enginemod
+
+        def read(pos, *a, **k):
+            last = pos.get("last_status") if isinstance(pos, dict) else None
+            return list(lines), {"file": "1:1", "offset": 10, "last_status": last}, \
+                {"read": "ok", "skipped_bytes": 0, "reset": False}
+        patches = [mock.patch.multiple(enginemod, **{n: mock.Mock(collect=(lambda ctx: {}))
+                                                     for n in self.COLLECTORS}),
+                   mock.patch.object(vpnmod, "read_warp_daemon", side_effect=read),
+                   mock.patch.object(vpnmod, "collect",
+                                     return_value={"warp": {"provider": "warp", "state": "connected"}}),
+                   mock.patch.object(vpnmod, "resolve", side_effect=lambda names: [
+                       p for p in vpnmod.ALL if p.name in names])]
+        if parse is not None:
+            patches.append(mock.patch.object(vpnmod, "parse_warp_daemon", side_effect=parse))
+        with contextlib.ExitStack() as st:
+            for p in patches:
+                st.enter_context(p)
+            return self.eng.observe()
+
+    def test_kept_lines_state_and_counts(self):
+        obs = self.observe([daemon_status("Connected {edge: 198.51.100.7:2408}"),
+                            daemon_status("Disconnected(InternalTunnelError)", ts="2026-01-01T00:00:01.000Z"),
+                            daemon_status("123")])
+        wd = obs.data["warp_daemon"]
+        self.assertEqual(wd["lines"], [
+            {"ts": T0, "kind": "status", "text": "Connected"},
+            {"ts": "2026-01-01T00:00:01.000Z", "kind": "status", "text": "Disconnected(InternalTunnelError)"}])
+        self.assertEqual((wd["state"], wd["unparsed"], wd["read"]), ("Disconnected(InternalTunnelError)", 1, "ok"))
+        self.assertNotIn("198.51.100", json.dumps(obs.data))
+
+    def test_the_comparison_state_is_kept_with_the_position(self):
+        self.observe([daemon_status("Connected")])
+        self.assertEqual(self.eng.state[enginemod_pos_key()]["last_status"], "Connected")
+        obs = self.observe([daemon_status("Connected {again}")])
+        self.assertEqual((obs.data["warp_daemon"]["lines"], obs.data["warp_daemon"]["state"]), ([], "Connected"))
+
+    def test_the_lines_do_not_go_into_the_provider_dict(self):
+        obs = self.observe([daemon_status("Disconnected(Manual)")])
+        self.assertEqual(set(obs.data["vpn"]["warp"]), {"provider", "state"})
+
+    def test_a_parse_exception_leaves_no_message_and_does_not_stop_the_cycle(self):
+        def boom(*a, **k):
+            raise ValueError("secret /opt/netmon-not-a-real-path/log")
+        obs = self.observe([daemon_status("Connected")], parse=boom)
+        wd = obs.data["warp_daemon"]
+        self.assertEqual((wd["read"], wd["lines"]), ("unreadable", []))
+        self.assertNotIn("secret", json.dumps(obs.data))
 
 
 class TestWarpStatusParsing(unittest.TestCase):
