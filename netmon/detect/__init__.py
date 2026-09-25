@@ -25,7 +25,7 @@ from ..model import Finding, Observation, unwrap
 from ..util import subnet_of
 from . import dhcp, dns, l2, quality, route, vpn, wifi  # noqa: F401
 
-REGISTRY = [l2, dhcp, dns, route, wifi, quality, vpn]
+REGISTRY = [l2, dhcp, dns, route, wifi, quality, vpn, vpn.DaemonPath]
 
 # 억제 사유
 NETWORK_CHANGE = "network_change"
@@ -46,6 +46,8 @@ class Context:
     state: Dict[str, Any] = field(default_factory=dict)
     attributions: List[str] = field(default_factory=list)
     network: Optional[str] = None
+    # 이번 판정 주기의 WARP 데몬 로그 창(netmon/detect/vpn.py `warp_daemon_window`). 없으면 None.
+    warp_daemon: Optional[Dict[str, Any]] = None
 
     def enabled(self, feature: str) -> bool:
         return bool(self.features.get(feature, True))

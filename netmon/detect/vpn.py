@@ -21,6 +21,7 @@ SLEEP / ARP_ANOMALY). 여기서는 고르지 않는다. 대신 한 번의 끊김
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import messages as msg
@@ -453,6 +454,42 @@ def _tunnel_off_findings(name: str, prev_st: Dict[str, Any], cur_st: Dict[str, A
 
 
 TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _protection_lost(name: str, now: Any, cur: Observation, prev: Optional[Observation],
+                     user: bool, extra: Optional[Dict[str, Any]] = None) -> List[Finding]:
+    """공급자가 연결 상태를 벗어난 것을 보안 축에 남긴다. 조회 경로와 데몬 로그 경로가 같이 쓴다.
+
+    등급은 이 네트워크의 암호화 방식으로 갈린다. 개인별 키(PER_USER)면 내지 않는다.
+    """
+    kind = _security_kind(cur, prev)
+    if kind == wifi_security.PER_USER:
+        return []
+    if kind in (wifi_security.OPEN, wifi_security.SHARED_PASSIVE):
+        body = msg.VPN_PROTECTION_LOST
+        severity = LOW if user else MEDIUM
+    elif kind == wifi_security.SHARED_SAE:
+        # 조용히 읽히지는 않는다. 능동적 가로채기만 가능하므로
+        # 개방형·WPA2 때와 같은 등급으로 올리지 않는다.
+        body = msg.VPN_PROTECTION_LOST_SAE
+        severity = LOW
+    else:
+        body = msg.VPN_PROTECTION_LOST_UNKNOWN
+        severity = LOW
+    evidence = {"provider": name,
+                "wifi_security": (cur.get("wifi") or {}).get("security"),
+                "security_kind": kind,
+                "passively_readable":
+                    kind in (wifi_security.OPEN, wifi_security.SHARED_PASSIVE),
+                "user_action": user}
+    evidence.update(extra or {})
+    return [Finding(
+        axis=SECURITY, kind="VPN_PROTECTION_LOST",
+        confidence=CONFIRMED, severity=severity,
+        summary=_protection_summary(name, now, body),
+        evidence=evidence,
+        attribution="user_action" if user else None,
+    )]
 
 
 def _down_record(state: Any, name: str):
@@ -890,31 +927,7 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
 
             # 연결 상태를 벗어난 것은 보안 축에 따로 남긴다. 사용자가 직접
             # 끊었어도 이 판정은 남는다.
-            kind = _security_kind(cur, prev)
-            if kind != wifi_security.PER_USER:
-                if kind in (wifi_security.OPEN, wifi_security.SHARED_PASSIVE):
-                    body = msg.VPN_PROTECTION_LOST
-                    severity = LOW if user else MEDIUM
-                elif kind == wifi_security.SHARED_SAE:
-                    # 조용히 읽히지는 않는다. 능동적 가로채기만 가능하므로
-                    # 개방형·WPA2 때와 같은 등급으로 올리지 않는다.
-                    body = msg.VPN_PROTECTION_LOST_SAE
-                    severity = LOW
-                else:
-                    body = msg.VPN_PROTECTION_LOST_UNKNOWN
-                    severity = LOW
-                out.append(Finding(
-                    axis=SECURITY, kind="VPN_PROTECTION_LOST",
-                    confidence=CONFIRMED, severity=severity,
-                    summary=_protection_summary(name, now, body),
-                    evidence={"provider": name,
-                              "wifi_security": (cur.get("wifi") or {}).get("security"),
-                              "security_kind": kind,
-                              "passively_readable":
-                                  kind in (wifi_security.OPEN, wifi_security.SHARED_PASSIVE),
-                              "user_action": user},
-                    attribution="user_action" if user else None,
-                ))
+            out.extend(_protection_lost(name, now, cur, prev, user))
 
         elif was != CONNECTED and now == CONNECTED:
             since, acc = _down_record(ctx.state, name)
@@ -941,4 +954,308 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                 evidence={"provider": name, "prev": was, "cur": now},
             ))
 
+    return out
+
+
+# ─── WARP 데몬 로그로 본 짧은 끊김 (작업 2026-09-23-warp-daemon-log, SPEC AC-6) ─────
+#
+# 조회(warp-cli status)는 주기에 한 번이라, 두 조회 사이에 시작해서 끝난 끊김은 조회에
+# 남지 않는다(2026-09-23 실측 두 건, 각 4~5초). 데몬 로그에는 상태 방송이 남는다.
+# 여기서는 수집이 표본에 실은 도려낸 줄(`data.warp_daemon.lines`)과 `state.json` 만
+# 읽는다 — 수집을 거치지 않는 `replay` 도 같은 판정을 내게 하려는 것이다(TODO K-6).
+#
+# "끊김" 은 데몬 상태가 `Connected` 를 벗어난 방송부터 `Connected` 로 돌아온 방송까지다.
+# 새 판정은 **직전 판정 주기의 조회와 그 뒤의 모든 조회가 `connected`** 일 때만 낸다 —
+# 하나라도 아니면 그 끊김은 조회 경로가 다룬다(TODO K-3). 데몬 문구로 "사용자가 직접
+# 끊음" 을 판단하지 않는다(사용자 결정 2026-09-26): 관측한 `Disconnected(Manual)` 은 모두 데몬이
+# "사유 모름" 을 적은 뒤였고(사용자가 직접 끊을 때의 방송은 관측되지 않음), 줄 맨 앞 위조
+# 가능성이 남은 경로가 있다(작업 증거 POC-1 (c), 위험 감수).
+DAEMON_STATE_KEY = "warp_daemon_state"
+DAEMON_CARRY_KEY = "warp_daemon_carry"
+DAEMON_CARRY_GAP_KEY = "warp_daemon_carry_gap"
+DAEMON_POLLS_KEY = "warp_daemon_polls"
+# 링크 없는 주기에서 넘어온 창의 줄 수 상한. 넘으면 앞쪽을 버리고 상태를 "모름" 으로.
+DAEMON_CARRY_MAX = 200
+# 끊김 하나에 모으는 줄 수 상한(보존본 끊김 15건의 저장 대상 10~23줄). 대기 줄도 같은 수로 묶는다.
+DAEMON_OPEN_MAX = 20
+DAEMON_PENDING_MAX = 20
+DAEMON_POLLS_MAX = 200
+# 원인 줄은 끊김 방송보다 0~5ms 앞선다(보존본 26건). 이보다 멀면 그 끊김의 원인으로 붙이지 않는다.
+DAEMON_PENDING_SECONDS = 10.0
+_DAEMON_KINDS = ("status", "disconnect", "error")
+_DAEMON_TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+_DAEMON_TEXT_MAX = 300
+
+
+def _daemon_time(ts: Any) -> Optional[datetime.datetime]:
+    if not isinstance(ts, str) or not _DAEMON_TS.match(ts):
+        return None
+    try:
+        return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        return None
+
+
+def _daemon_line(item: Any) -> Optional[Dict[str, str]]:
+    """저장된 줄 하나. 모양이 틀리면(시각 아님, 모르는 종류, 너무 긴 글) 버린다."""
+    if not isinstance(item, dict):
+        return None
+    ts, kind, text = item.get("ts"), item.get("kind"), item.get("text")
+    if _daemon_time(ts) is None or kind not in _DAEMON_KINDS:
+        return None
+    if not isinstance(text, str) or len(text) > _DAEMON_TEXT_MAX:
+        return None
+    return {"ts": ts, "kind": kind, "text": text}
+
+
+def _daemon_lines(items: Any, cap: int) -> List[Dict[str, str]]:
+    """저장된 줄 목록. 리스트가 아니면 빈 목록, 모양이 틀린 줄은 빼고 뒤쪽 `cap` 개만."""
+    if not isinstance(items, list):
+        return []
+    out = [ln for ln in (_daemon_line(x) for x in items[-cap * 4:]) if ln is not None]
+    return out[-cap:]
+
+
+def _is_connected(name: Any) -> bool:
+    return isinstance(name, str) and name.split("(", 1)[0] == "Connected"
+
+
+def _as_provider_state(name: str) -> str:
+    """데몬 상태 이름을 warp-cli 파서와 같은 규칙으로 옮긴다(netmon/vpn/__init__.py `Warp.status`)."""
+    low = name.split("(", 1)[0].lower()
+    if low.startswith("connected"):
+        return CONNECTED
+    if low.startswith("disconnected"):
+        return "disconnected"
+    if "connect" in low:
+        return "connecting"
+    return "disconnected"
+
+
+def _unknown_daemon_state() -> Dict[str, Any]:
+    return {"state": None, "pending": [], "open_since": None, "open_lines": [], "open_dropped": 0}
+
+
+def _load_daemon_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """판정 쪽 데몬 상태. 없거나 깨졌으면 "모름" 에서 다시 시작한다(예외를 내지 않는다)."""
+    raw = state.get(DAEMON_STATE_KEY)
+    if not isinstance(raw, dict):
+        return _unknown_daemon_state()
+    name = raw.get("state")
+    if not isinstance(name, str) or not re.match(r"^[A-Za-z][A-Za-z0-9_()]{0,300}$", name):
+        return _unknown_daemon_state()
+    dropped = raw.get("open_dropped")
+    ds = {"state": name,
+          "pending": _daemon_lines(raw.get("pending"), DAEMON_PENDING_MAX),
+          "open_since": raw.get("open_since") if _daemon_time(raw.get("open_since")) else None,
+          "open_lines": _daemon_lines(raw.get("open_lines"), DAEMON_OPEN_MAX),
+          "open_dropped": dropped if isinstance(dropped, int) and not isinstance(dropped, bool)
+          and 0 <= dropped < 10 ** 9 else 0}
+    if _is_connected(name):
+        ds.update(open_since=None, open_lines=[], open_dropped=0)
+    return ds
+
+
+def _cap_open(lines: List[Dict[str, str]], dropped: int) -> Tuple[List[Dict[str, str]], int]:
+    """끊김당 줄 상한(TODO K-1). 분류·오류 원인 줄과 첫·마지막 상태 줄은 남기고, 가운데의
+    연결 단계 상태 줄부터(오래된 것부터) 버린다. 그래도 넘치면 오래된 원인 줄을 버린다."""
+    while len(lines) > DAEMON_OPEN_MAX:
+        status = [i for i, ln in enumerate(lines) if ln["kind"] == "status"]
+        middle = status[1:-1]
+        if middle:
+            del lines[middle[0]]
+        else:
+            keep = {status[0], status[-1]} if status else set()
+            victim = next(i for i in range(len(lines)) if i not in keep)
+            del lines[victim]
+        dropped += 1
+    return lines, dropped
+
+
+def _advance(ds: Dict[str, Any], lines: List[Dict[str, str]]
+             ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    """줄을 차례로 먹여 데몬 상태를 옮긴다. (닫힌 끊김 목록, 연결↔비연결 전환 줄 목록).
+
+    닫힌 끊김: `{"since": 시작 시각|None, "until": 복귀 시각, "lines": [...], "dropped": n}`.
+    `since` 가 None 이면 시작을 모르는 끊김이다(처음 상태를 모를 때 이미 끊겨 있었음).
+    """
+    closed: List[Dict[str, Any]] = []
+    transitions: List[Dict[str, str]] = []
+    for ln in lines:
+        name, was = ln["text"], ds["state"]
+        if ln["kind"] != "status":
+            if was is None or _is_connected(was):
+                ds["pending"] = (ds["pending"] + [ln])[-DAEMON_PENDING_MAX:]
+            else:
+                ds["open_lines"], ds["open_dropped"] = _cap_open(
+                    ds["open_lines"] + [ln], ds["open_dropped"])
+            continue
+        if _is_connected(name):
+            if was is not None and not _is_connected(was):
+                done, dropped = _cap_open(ds["open_lines"] + [ln], ds["open_dropped"])
+                closed.append({"since": ds["open_since"], "until": ln["ts"],
+                               "lines": done, "dropped": dropped})
+                transitions.append(ln)
+            ds.update(state=name, pending=[], open_since=None, open_lines=[], open_dropped=0)
+            continue
+        if was is not None and not _is_connected(was):
+            ds["open_lines"], ds["open_dropped"] = _cap_open(
+                ds["open_lines"] + [ln], ds["open_dropped"])
+            ds["state"] = name
+            continue
+        # Connected(또는 모름)에서 벗어났다 — 끊김이 열린다. 대기 줄은 10초 안의 것만 붙인다.
+        at = _daemon_time(ln["ts"])
+        cause = [p for p in ds["pending"]
+                 if at is not None and _daemon_time(p["ts"]) is not None
+                 and abs((at - _daemon_time(p["ts"])).total_seconds()) <= DAEMON_PENDING_SECONDS]
+        opened, dropped = _cap_open(cause + [ln], 0)
+        ds.update(state=name, pending=[], open_lines=opened, open_dropped=dropped,
+                  open_since=ln["ts"] if was is not None else None)
+        if was is not None:
+            transitions.append(ln)
+    return closed, transitions
+
+
+def _window_lines(obs: Observation) -> Optional[Dict[str, Any]]:
+    wd = obs.data.get("warp_daemon")
+    return wd if isinstance(wd, dict) else None
+
+
+def _polls(state: Dict[str, Any]) -> List[Any]:
+    raw = state.get(DAEMON_POLLS_KEY)
+    return list(raw[-DAEMON_POLLS_MAX:]) if isinstance(raw, list) else []
+
+
+def _poll_of(obs: Observation) -> Any:
+    warp = (obs.get("vpn") or {}).get("warp")
+    return warp.get("state") if isinstance(warp, dict) else None
+
+
+def _forget_daemon(state: Dict[str, Any]) -> None:
+    for key in (DAEMON_STATE_KEY, DAEMON_CARRY_KEY, DAEMON_CARRY_GAP_KEY, DAEMON_POLLS_KEY):
+        state.pop(key, None)
+
+
+def carry_warp_daemon(state: Dict[str, Any], obs: Observation, gap: bool) -> Dict[str, Any]:
+    """판정하지 않는 주기(주 인터페이스 없음)의 창을 다음 판정 주기로 넘긴다(SPEC AC-2).
+
+    줄은 `warp_daemon_carry` 에 모으고(상한 초과면 앞쪽을 버리고 상태를 "모름" 으로),
+    이 주기의 조회는 `warp_daemon_polls` 에, 측정 공백이었으면 `warp_daemon_carry_gap` 에 남긴다.
+    연속성이 끊긴 주기(`reset`)면 모아 둔 줄을 버리고 상태를 "모름" 으로 되돌린다.
+    """
+    wd = _window_lines(obs)
+    if wd is None:
+        _forget_daemon(state)
+        return state
+    carry = _daemon_lines(state.get(DAEMON_CARRY_KEY), DAEMON_CARRY_MAX)
+    if wd.get("reset") is True:
+        carry = []
+        state[DAEMON_STATE_KEY] = _unknown_daemon_state()
+    lines = wd.get("lines") if isinstance(wd.get("lines"), list) else []
+    carry += [ln for ln in (_daemon_line(x) for x in lines) if ln is not None]
+    if len(carry) > DAEMON_CARRY_MAX:
+        carry = carry[-DAEMON_CARRY_MAX:]
+        state[DAEMON_STATE_KEY] = _unknown_daemon_state()
+    state[DAEMON_CARRY_KEY] = carry
+    if gap:
+        state[DAEMON_CARRY_GAP_KEY] = True
+    state[DAEMON_POLLS_KEY] = (_polls(state) + [_poll_of(obs)])[-DAEMON_POLLS_MAX:]
+    return state
+
+
+def warp_daemon_window(state: Dict[str, Any], obs: Observation, suppress: bool) -> Dict[str, Any]:
+    """판정 주기의 창을 처리한다. 판정기(`daemon_findings`)가 읽을 결과를 돌려준다.
+
+    `suppress` 는 측정 공백 주기와 프로세스 재시작 뒤 첫 판정 주기다(TODO K-3·K-8) —
+    상태는 옮기되 새 판정은 내지 않는다.
+    """
+    wd = _window_lines(obs)
+    if wd is None:
+        _forget_daemon(state)
+        return {"read": "absent", "eligible": False, "closed": [], "transitions": []}
+    ds = _load_daemon_state(state)
+    closed, transitions = _advance(ds, _daemon_lines(state.get(DAEMON_CARRY_KEY), DAEMON_CARRY_MAX))
+    if wd.get("reset") is True:
+        ds = _unknown_daemon_state()
+    lines = wd.get("lines")
+    more_closed, more_trans = _advance(ds, [ln for ln in (_daemon_line(x) for x in lines) if ln]
+                                       if isinstance(lines, list) else [])
+    closed += more_closed
+    transitions += more_trans
+    polls = _polls(state) + [_poll_of(obs)]
+    eligible = (not suppress and state.get(DAEMON_CARRY_GAP_KEY) is not True
+                and len(polls) >= 2 and all(p == CONNECTED for p in polls))
+    state[DAEMON_STATE_KEY] = ds
+    state[DAEMON_POLLS_KEY] = [_poll_of(obs)]
+    state.pop(DAEMON_CARRY_KEY, None)
+    state.pop(DAEMON_CARRY_GAP_KEY, None)
+    read = wd.get("read") if wd.get("read") in ("ok", "missing", "unreadable") else "unreadable"
+    return {"read": read, "eligible": eligible, "closed": closed, "transitions": transitions}
+
+
+class DaemonPath:
+    """데몬 로그 경로를 `run_all` 에 판정기 하나로 따로 등록한다(netmon/detect/__init__.py REGISTRY).
+
+    `detect` 안에서 부르면 이 경로의 버그가 같은 주기의 조회 경로 판정까지 지운다 —
+    `run_all` 은 예외가 난 판정기의 결과를 통째로 버리기 때문이다. 기능 스위치는 같다.
+    """
+    FEATURE = FEATURE
+
+    @staticmethod
+    def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
+        return daemon_findings(cur, prev, ctx)
+
+
+def _down_between_polls_summary(name: str, now: str, down_s: float) -> str:
+    template = (msg.VPN_RENEGOTIATING_BETWEEN_POLLS if now == "connecting"
+                else msg.VPN_DISCONNECTED_BETWEEN_POLLS)
+    return template % (name, _duration(down_s))
+
+
+def daemon_findings(cur: Observation, prev: Optional[Observation], ctx) -> List[Finding]:
+    """조회 사이에 끝난 WARP 끊김마다 끊김 → 보호 상실 → 복구 판정(SPEC AC-6, TODO K-3).
+
+    순서가 중요하다: 열린 `vpn_drop` 조사는 판정 목록을 차례로 읽어 `still_down` 을 켜고
+    끈다(netmon/investigate/playbooks.py) — 복구가 앞에 오면 조사가 "끊긴 채" 로 남는다.
+    """
+    window = getattr(ctx, "warp_daemon", None)
+    if not isinstance(window, dict) or not window.get("eligible"):
+        return []
+    out: List[Finding] = []
+    name = "warp"
+    for drop in window.get("closed") or []:
+        since, until = drop.get("since"), drop.get("until")
+        t0, t1 = _daemon_time(since), _daemon_time(until)
+        if t0 is None or t1 is None:
+            continue                     # 시작을 모르는 끊김은 조회 경로의 몫이다
+        lines = drop.get("lines") or []
+        down = [ln["text"] for ln in lines if ln["kind"] == "status" and not _is_connected(ln["text"])]
+        if not down:
+            continue
+        first_state, last_state = _as_provider_state(down[0]), _as_provider_state(down[-1])
+        reason = next((ln["text"] for ln in lines if ln["kind"] == "disconnect"), None)
+        down_s = max(0.0, (t1 - t0).total_seconds())
+        daemon = {"timing_source": "daemon", "daemon_down_at": since, "daemon_up_at": until,
+                  "daemon_read": window.get("read"), "daemon_lines": [dict(ln) for ln in lines]}
+        evidence = {"provider": name, "provider_state": first_state, "provider_reason": reason,
+                    "attributions": list(ctx.attributions)}
+        evidence.update(daemon)
+        out.append(Finding(
+            axis=QUALITY, kind="VPN_DISCONNECTED", confidence=CONFIRMED, severity=MEDIUM,
+            summary=_down_between_polls_summary(name, first_state, down_s),
+            evidence=evidence,
+            # 조회 경로는 같은 주기의 vpn_change 가 연 안정화 창 때문에 사실상 늘 귀속된다.
+            # 이 경로는 안정화 창을 열지 않으므로 판정 자신의 귀속을 vpn_change 로 맞춘다.
+            attribution=ctx.quality_attribution() or "vpn_change",
+        ))
+        out.extend(_protection_lost(name, first_state, cur, prev, False,
+                                    {"timing_source": "daemon"}))
+        down_since = since[:19] + "Z"
+        out.append(Finding(
+            axis=QUALITY, kind="VPN_RECONNECTED", confidence=CONFIRMED, severity=INFO_SEV,
+            summary=msg.VPN_RECONNECTED % (name, _down_phrase(down_since, down_s, 0.0)),
+            evidence={"provider": name, "down_since": down_since, "down_seconds": down_s,
+                      "unmeasured_seconds": 0.0, "prev_state": last_state, **daemon},
+            attribution=ctx.quality_attribution(),
+        ))
     return out

@@ -115,6 +115,9 @@ class Engine:
         self.investigator = investigate.Investigator(cfg.data.get("investigate"))
         # 조사가 요청한 측정 변화. 다음 주기에 반영된다.
         self.needs: Dict[str, Any] = {}
+        # 이 프로세스에서 판정한 주기가 있었는가. 재시작 뒤 첫 판정 주기에는 데몬 로그의
+        # 새 판정을 내지 않는다 — 꺼져 있던 동안의 끊김은 조회 경로가 다룬다(TODO K-8).
+        self._warp_daemon_judged = False
 
     # --- 재시작을 건너뛰는 비교 기준 ---
     def _restore_baseline(self) -> None:
@@ -439,6 +442,9 @@ class Engine:
                 found, self.state = vpn_detect.without_link(
                     prev_vpn, obs, self.state, self.state.get("network"))
                 out.extend(found)
+            # 이 주기의 데몬 로그 창은 판정하지 않고 다음 판정 주기로 넘긴다(SPEC AC-2).
+            self.state = vpn_detect.carry_warp_daemon(
+                self.state, obs, gap_exceeded(elapsed, interval))
             return out
 
         link_gap = self.link_gap
@@ -459,6 +465,12 @@ class Engine:
                                               elapsed, interval,
                                               disrupted="link_restart" if link_gap else None)
 
+        # 데몬 로그 창은 판정기보다 먼저 처리한다 — VPN 판정과 (다음 단계의) 리졸버·경로
+        # 판정이 같은 창을 본다. 측정 공백 주기와 재시작 뒤 첫 판정 주기에는 새 판정이 없다.
+        daemon = vpn_detect.warp_daemon_window(
+            self.state, obs,
+            suppress=gap_exceeded(elapsed, interval) or not getattr(self, "_warp_daemon_judged", False))
+        self._warp_daemon_judged = True
         ctx = Context(
             elapsed=elapsed,
             interval=interval,
@@ -466,6 +478,7 @@ class Engine:
             state=self.state,
             attributions=attributions,
             network=network_key(obs),
+            warp_daemon=daemon,
         )
         findings = run_all(self.prev, obs, ctx)
 
@@ -527,6 +540,7 @@ def replay(cfg: Config, observations: List[Observation]) -> List[Tuple[Observati
     eng.state = {}
     eng.investigator = investigate.Investigator(cfg.data.get("investigate"))
     eng.needs = {}
+    eng._warp_daemon_judged = False
 
     out = []
     for obs in observations:

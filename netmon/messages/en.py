@@ -171,6 +171,14 @@ VPN_PROTECTION_LOST = ("This network is open to inspection by other devices on t
                        "L2 segment (traffic itself is not observed).")
 VPN_PROTECTION_LOST_UNKNOWN = "Whether this network can be trusted is undetermined."
 VPN_RECONNECTED = "%s reconnected%s."
+# A drop that started and ended between two polls (WARP daemon log). Unlike a drop the poll
+# caught, no "most likely explanation" is picked - the first-hop measurement it would rest on
+# may not overlap the drop.
+VPN_DISCONNECTED_BETWEEN_POLLS = ("%s disconnected - a short drop that ended between polls (daemon log: %s). "
+                                  "The first-hop measurement may not overlap it, so the cause is not narrowed down.")
+VPN_RENEGOTIATING_BETWEEN_POLLS = ("%s renegotiated its connection (provider state connecting) - it ended "
+                                   "between polls (daemon log: %s). The first-hop measurement may not overlap "
+                                   "it, so the cause is not narrowed down.")
 # The recovery of an outage that passed between two complete observations.
 # See the note on the Korean catalogue: the state the provider was in while
 # it lasted never reaches this judgement, so the sentence does not name it.
