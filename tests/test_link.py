@@ -1480,7 +1480,8 @@ class TestTheFutureBranchCarriesNoPathOrAddress(unittest.TestCase):
     그 밖의 OSError(예: `Exec format error`)는 `ping()` 을 뚫고 올라와 이
     갈래에 잡히는데, 그 메시지에는 **실행 파일 경로**가 들어 있다. 감싸지
     않은 문자열은 `redact` 가 바꾸지 않으므로(netmon/redact.py 는 ident 로
-    감싼 값만 바꾼다) 내보낼 때도 그대로 나간다.
+    감싼 값과 공급자·데몬 자유 문자열 필드만 바꾸고, 경로는 주소도 아니다)
+    내보낼 때도 그대로 나간다.
     """
 
     # 합성 경로다. 실제 홈 경로를 적으면 공개 저장소에 그대로 남는다

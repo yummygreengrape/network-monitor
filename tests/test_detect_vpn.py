@@ -361,7 +361,8 @@ class TestProviderReasonInTheSummary(unittest.TestCase):
     """사유는 고정 목록과 **정확히 일치할 때만** 요약문에 인용한다.
 
     사유 문자열에는 터널 엔드포인트의 공인 IP·포트가 들어 있고, 요약문은
-    가리지 않은 채로 보고서에 나간다(redact 는 감싼 값만 바꾼다).
+    가리지 않은 채로 보고서에 나간다(redact 는 요약문을 바꾸지 않는다 —
+    netmon/redact.py 의 자유 문자열 필드에 요약문은 없다).
     """
 
     def _drop(self, reason):

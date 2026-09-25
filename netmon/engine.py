@@ -39,8 +39,8 @@ def _collect_error(exc: Exception) -> str:
 
     `str(exc)` 를 싣지 않는다. `Observation.errors` 는 그대로 직렬화되고
     (netmon/model.py 의 `as_dict`), `capture` 는 그 결과를 파일로 내보낸다.
-    `--redact` 는 `ident()` 로 감싼 값만 바꾸므로(netmon/redact.py) 감싸지
-    않은 문장은 내보낼 때도 가려지지 않는다. 그런데 subprocess 는 실행 실패
+    `--redact` 는 `ident()` 로 감싼 값과 공급자·데몬 자유 문자열 필드만 바꾸므로
+    (netmon/redact.py) 이 필드의 감싸지 않은 문장은 내보낼 때도 가려지지 않는다. 그런데 subprocess 는 실행 실패
     예외에 **실행 파일 경로**를 담는다(CPython subprocess.py 의
     `err_filename = orig_executable`; 실측 `[Errno 8] Exec format error:
     '<경로>/netmon-not-a-binary'`). `util.run` 이 잡는 것은 FileNotFoundError·

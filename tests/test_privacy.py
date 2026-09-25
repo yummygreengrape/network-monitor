@@ -52,10 +52,11 @@ class TestRedaction(unittest.TestCase):
         self.assertNotEqual(a, b)
 
     def test_untagged_values_are_left_alone(self):
-        """감싸지 않은 값을 문자열 추측으로 가리지 않는다.
+        """감싸지 않은 값을 문자열 추측으로 가리지 않는다 — 정해진 자유 문자열 필드 밖에서는.
 
         추측해서 가리면 반쯤 가려진 로그가 조용히 만들어진다. 감싸야 할 값을
-        감싸지 않은 것은 스키마 버그이고, 버그로 드러나는 편이 낫다.
+        감싸지 않은 것은 스키마 버그이고, 버그로 드러나는 편이 낫다. 예외는
+        공급자·데몬이 준 자유 문자열 필드뿐이다(`TestAddressesInsideFreeText`).
         """
         d = {"note": "gateway is 192.0.2.1", "mac": ident("mac", GW_MAC)}
         red = redactmod.redact(d, self.salt)
@@ -331,16 +332,24 @@ class TestTunnelEndpointIsWrapped(unittest.TestCase):
         self.assertNotIn(ENDPOINT, link)
         self.assertIn("ipv4:", link)
 
-    def test_the_provider_reason_stays_as_it_is(self):
-        """로컬 기록에는 원문을 남긴다 — 이 저장소의 공개된 설계 그대로다.
+    def test_the_local_record_keeps_the_provider_reason_as_it_is(self):
+        """로컬 기록에는 원문을 남긴다 — 사용자 결정(2026-09-21) "기록 시점에 가리지 않는다".
+        그 결정의 나머지 반쪽 "내보낼 때 가림" 은 아래 시험이 본다."""
+        o = endpoint_probe(obs(vpn=vpn_state("disconnected", reason=ENDPOINT_REASON)))
+        self.assertEqual(o.as_dict()["data"]["vpn"]["warp"]["reason"], ENDPOINT_REASON)
 
-        감싸지 않은 문자열은 내보낼 때도 바뀌지 않는다(redact 는 감싼 값만
-        바꾼다). 그래서 사유에 적힌 주소는 내보낸 기록에도 남는다. 이 갈래를
-        이 필드에서만 뒤집지 않기로 했으므로(AC-5), 그 사실을 못 박아 둔다.
+    def test_the_provider_reason_is_redacted_when_exported(self):
+        """내보낼 때는 사유 속 주소가 토큰이 된다(사용자 결정 2026-09-21 "내보낼 때 가림").
+
+        앞선 작업은 이 필드가 내보낼 때도 그대로 남는다고 시험으로 고정했는데,
+        결정 기록은 기록 시점만 가리지 않기로 했다 — 내보낸 기록에 주소가 남으면
+        README "개인정보" 의 약속과 어긋난다.
         """
         o = endpoint_probe(obs(vpn=vpn_state("disconnected", reason=ENDPOINT_REASON)))
         red = redactmod.redact(o.as_dict(), self.salt)
-        self.assertEqual(red["data"]["vpn"]["warp"]["reason"], ENDPOINT_REASON)
+        reason = red["data"]["vpn"]["warp"]["reason"]
+        self.assertNotIn(ENDPOINT, reason)
+        self.assertIn(redactmod.token(self.salt, "ipv4", ENDPOINT), reason)
 
     def test_the_evidence_field_is_redactable(self):
         """끊김 증거에 실린 주소도 같은 방식으로 가려진다."""
@@ -351,12 +360,83 @@ class TestTunnelEndpointIsWrapped(unittest.TestCase):
         self.assertEqual(red["tunnel_endpoint"]["id"], "ipv4")
 
 
+class TestAddressesInsideFreeText(unittest.TestCase):
+    """공급자·데몬이 준 자유 문자열 속 주소도 내보낼 때 가린다 (QA-11, ADV-4).
+
+    대상 필드는 정해져 있다: 공급자 사유(`reason`, 판정 증거의 `provider_reason`)와
+    WARP 데몬 줄(`warp_daemon.lines`, 증거의 `daemon_lines`·`daemon_transitions` 의
+    `text`). 주소만 토큰으로 바꾸고 포트는 남긴다. 같은 주소는 감싼 값과 같은 토큰이
+    되어 "사유의 주소 = 측정한 엔드포인트" 같은 관계가 가린 뒤에도 보인다.
+    """
+
+    V6 = "2001:db8::7"
+
+    def setUp(self):
+        self.salt = b"test-salt-not-a-real-one"
+        self.t4 = redactmod.token(self.salt, "ipv4", ENDPOINT)
+        self.t6 = redactmod.token(self.salt, "ipv6", self.V6)
+
+    def red(self, obj, kinds=None):
+        return redactmod.redact(obj, self.salt, kinds)
+
+    def test_ipv4_and_bracketed_ipv6_with_ports(self):
+        reason = "Performing happy eyeballs to %s:2408 and [%s]:2408" % (ENDPOINT, self.V6)
+        out = self.red({"vpn": {"warp": {"reason": reason}}})["vpn"]["warp"]["reason"]
+        self.assertEqual(out, "Performing happy eyeballs to %s:2408 and [%s]:2408" % (self.t4, self.t6))
+
+    def test_bare_ipv6(self):
+        out = self.red({"reason": "via %s now" % self.V6})["reason"]
+        self.assertEqual(out, "via %s now" % self.t6)
+
+    def test_same_address_same_token_as_the_wrapped_value(self):
+        d = {"reason": ENDPOINT_REASON, "tunnel_endpoint": ident("ipv4", ENDPOINT)}
+        out = self.red(d)
+        self.assertIn(out["tunnel_endpoint"]["v"], out["reason"])
+
+    def test_evidence_provider_reason(self):
+        out = self.red({"evidence": {"provider_reason": ENDPOINT_REASON}})
+        self.assertNotIn(ENDPOINT, json.dumps(out))
+
+    def test_daemon_lines_everywhere_they_are_kept(self):
+        line = {"ts": "2026-01-01T00:00:00.000Z", "kind": "error",
+                "text": "SocketRecv to %s:443 failed" % ENDPOINT}
+        d = {"data": {"warp_daemon": {"lines": [dict(line)]}},
+             "evidence": {"daemon_lines": [dict(line)], "daemon_transitions": [dict(line)]}}
+        out = json.dumps(self.red(d))
+        self.assertNotIn(ENDPOINT, out)
+        self.assertEqual(out.count(self.t4), 3)
+
+    def test_things_that_are_not_addresses_stay(self):
+        """모듈 경로의 `::`, 시각, MAC 모양, 판 번호는 주소가 아니다 (ADV-4)."""
+        text = ("2026-09-23T04:15:27.493Z WARN main_loop: warp::warp_service: at 12:34:56 "
+                "mac 00:00:5e:00:53:01 v1.2.3 ratio 3:1 ::")
+        self.assertEqual(self.red({"reason": text})["reason"], text)
+
+    def test_the_kinds_filter_is_respected(self):
+        out = self.red({"reason": ENDPOINT_REASON}, kinds={"mac"})
+        self.assertEqual(out["reason"], ENDPOINT_REASON)
+
+    def test_other_untagged_fields_are_still_left_alone(self):
+        out = self.red({"note": ENDPOINT_REASON, "text": ENDPOINT_REASON})
+        self.assertEqual(out["note"], ENDPOINT_REASON)
+        self.assertEqual(out["text"], ENDPOINT_REASON)
+
+    def test_adversarial_strings_finish_quickly(self):
+        """콜론·점·16진이 끝없이 이어진 문자열에서도 멈추지 않는다 (ADV-4)."""
+        import time
+        for text in ("1:" * 40000, "a:" * 40000, "1." * 40000, "f" * 80000 + ":", "[" * 40000):
+            start = time.time()
+            self.assertEqual(self.red({"reason": text})["reason"], text)
+            self.assertLess(time.time() - start, 2.0, text[:8])
+
+
 class TestACollectorFailureCarriesNoPath(unittest.TestCase):
     """수집기가 던진 예외의 **메시지**는 관측에 실리지 않는다 (DEV-15, AC-5).
 
     `Observation.errors` 는 `as_dict` 에 그대로 실리고(netmon/model.py),
     `capture` 는 그 결과를 파일로 내보낸다. `--redact` 는 `ident()` 로 감싼
-    값만 바꾸므로(netmon/redact.py) 감싸지 않은 문장은 가려지지 않는다.
+    값과 공급자·데몬 자유 문자열 필드만 바꾸므로(netmon/redact.py) 이 필드의
+    감싸지 않은 문장은 가려지지 않는다.
     그런데 subprocess 는 실행 실패 예외에 **실행 파일 경로**를 담는다.
 
     **문자열을 손으로 만들어 넣지 않는다** — 실제로 실행 실패를 일으켜

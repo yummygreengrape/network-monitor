@@ -292,7 +292,8 @@ def _error_note(exc: Exception) -> str:
        `[Errno 8] Exec format error: '/…/ping'`)가 여기까지 올라오면 그
        문자열이 관측을 거쳐 이벤트 증거(`first_hop_errors`)에 그대로 들어간다.
        감싸지 않은 문자열은 내보낼 때도 가려지지 않아(netmon/redact.py 는
-       ident 로 감싼 값만 바꾼다) `capture --redact` 에도 살아남는다.
+       ident 로 감싼 값과 공급자·데몬 자유 문자열 필드만 바꾸고, 이 필드는 그
+       밖이다) `capture --redact` 에도 살아남는다.
 
     잃는 것은 예외 메시지의 진단 정보다. 흔한 실패(명령 없음·권한·제한 시간)는
     `util.run` 이 이미 잡아 `ping()` 이 고정 낱말로 적으므로, 여기 오는 것은
