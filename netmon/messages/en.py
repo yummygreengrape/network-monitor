@@ -176,6 +176,9 @@ VPN_RECONNECTED = "%s reconnected%s."
 # may not overlap the drop.
 VPN_DISCONNECTED_BETWEEN_POLLS = ("%s disconnected - a short drop that ended between polls (daemon log: %s). "
                                   "The first-hop measurement may not overlap it, so the cause is not narrowed down.")
+# The daemon's reason, quoted only on an exact match against a fixed list
+# (netmon/detect/vpn.py QUOTABLE_DAEMON_REASONS).
+VPN_DAEMON_REASON = "Daemon reason: %s."
 VPN_RENEGOTIATING_BETWEEN_POLLS = ("%s renegotiated its connection (provider state connecting) - it ended "
                                    "between polls (daemon log: %s). The first-hop measurement may not overlap "
                                    "it, so the cause is not narrowed down.")

@@ -158,6 +158,8 @@ VPN_RECONNECTED = "%s 재연결됨%s."
 # 설명" 을 고르지 않는다 — 그 설명의 근거인 첫 홉 측정이 이 끊김과 겹쳤는지 모른다.
 VPN_DISCONNECTED_BETWEEN_POLLS = ("%s 연결 끊김 — 조회 사이에 끝난 짧은 끊김(데몬 기록 %s). "
                                   "첫 홉 측정은 이 끊김과 겹치지 않을 수 있어 원인을 좁히지 않음.")
+# 데몬 사유 인용. 고정 목록(netmon/detect/vpn.py QUOTABLE_DAEMON_REASONS)과 정확히 일치할 때만.
+VPN_DAEMON_REASON = "데몬 사유: %s."
 VPN_RENEGOTIATING_BETWEEN_POLLS = ("%s 연결 재협상(공급자 상태 connecting) — 조회 사이에 끝남(데몬 기록 %s). "
                                    "첫 홉 측정은 이 구간과 겹치지 않을 수 있어 원인을 좁히지 않음.")
 # 완전한 관측 사이에서 지나간 끊김의 복구. 끊겨 있던 주기에 주 인터페이스가
