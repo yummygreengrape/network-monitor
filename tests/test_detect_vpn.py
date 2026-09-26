@@ -1013,6 +1013,47 @@ class TestWarpDaemonLogReading(unittest.TestCase):
         self.assertEqual(lines, ["b", "c"])
         self.assertFalse(info["reset"])
 
+    def test_a_rotated_file_that_ends_mid_line_does_not_make_a_line(self):
+        """회전본이 개행 없이 끝나면 그 꼬리는 완결 줄이 아니다 — 버리고 연속성이 끊긴 것으로 알린다(TODO K-4, DEV-8).
+        완결 줄로 치면 쓰이다 만 `…ResponseStatus: Conn` 이 가짜 상태가 되어 Connected→비연결→Connected 모양이 된다."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write(daemon_status("Connected") + "\n" + daemon_status("Conn"))      # 쓰이다 만 줄에서 회전
+        self.rotate()
+        self.write(daemon_status("Connected") + "\n")
+        lines, pos, info = self.read(pos)
+        self.assertEqual(lines, [daemon_status("Connected"), daemon_status("Connected")])
+        self.assertTrue(info["reset"])
+        kept, _, _, _ = vpnmod.parse_warp_daemon(lines, None)
+        self.assertEqual([k["text"] for k in kept], ["Connected"])
+        self.write("b\n")
+        lines, _, info = self.read(pos)
+        self.assertEqual((lines, info["reset"]), (["b"], False))
+
+    def test_an_older_rotated_file_that_ends_mid_line_or_has_no_newline(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\nhal")                  # 두 번 회전하는 동안 .2 가 될 파일
+        self.rotate()
+        self.write("no newline at all")       # .1 이 될 파일 — 줄 끝이 하나도 없다
+        self.rotate()
+        self.write("c\n")
+        lines, _, info = self.read(pos)
+        self.assertEqual(lines, ["b", "c"])
+        self.assertTrue(info["reset"])
+
+    def test_a_skip_that_starts_inside_a_rotated_file_without_a_newline_loses_no_complete_line(self):
+        """상한 초과로 건너뛴 자리가 줄 끝 없는 회전본 안이면, 그 조각이 "건너뛴 뒤의 첫 줄" 이다 — 다음 파일의 완결 줄을 버리지 않는다."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("x" * 100)
+        self.rotate()
+        self.write("c\nd\n")
+        lines, _, info = self.read(pos, cap=50)
+        self.assertEqual(lines, ["c", "d"])
+        self.assertTrue(info["reset"])
+        self.assertGreater(info["skipped_bytes"], 0)
+
     def test_double_rotation(self):
         self.write("a\n")
         _, pos, _ = self.read(None)
@@ -1178,14 +1219,16 @@ class TestWarpDaemonLogReading(unittest.TestCase):
         self.assertEqual(lines, ["a", "b", "c"])
         self.assertTrue(info["reset"])
 
-    def test_a_rotated_last_line_without_a_newline_is_still_a_line(self):
+    def test_a_rotated_last_line_without_a_newline_is_dropped_and_reset(self):
+        """(DEV-8 에서 바뀜 — 옛 판은 완결 줄로 쳤다. TODO K-4: 쓰이다 만 줄일 수 있어 버리고 reset.)"""
         self.write("a\n")
         _, pos, _ = self.read(None)
         self.write("b")
         self.rotate()
         self.write("c\n")
-        lines, _, _ = self.read(pos)
-        self.assertEqual(lines, ["b", "c"])
+        lines, _, info = self.read(pos)
+        self.assertEqual(lines, ["c"])
+        self.assertTrue(info["reset"])
 
     def test_a_missing_file_in_the_middle_of_a_rotation_is_not_a_read_failure(self):
         """이름이 밀린 뒤 새 파일이 아직 없는 순간에 열어도 실패로 적지 않고 다음 주기에 이어 읽는다."""

@@ -430,7 +430,18 @@ def _read_after(path: str, p: Optional[Dict[str, Any]], cur: str, size: int, cap
     data = b""
     for fp, s, e in segments[:-1]:
         chunk = _read_range(fp, s, e)
-        data += chunk if (not chunk or chunk.endswith(b"\n")) else chunk + b"\n"
+        k = chunk.rfind(b"\n")
+        if k + 1 == len(chunk):
+            data += chunk
+        elif k < 0 and not data and info["skipped_bytes"]:
+            # 건너뛴 자리에서 시작해 줄 끝이 없는 조각 — 아래 "건너뛴 뒤의 첫 줄" 로 통째 버린다.
+            data += chunk + b"\n"
+        else:
+            # 회전본이 개행 없이 끝났다 — 그 꼬리는 쓰이다 만 줄이라 완결 줄로 치지 않는다(TODO K-4). 완결 줄로
+            # 치면 `…ResponseStatus: Conn` 이 가짜 상태가 된다. 버린 자리는 연속성이 끊긴 것으로 알린다.
+            # 회전본에 데몬이 더 쓰지 않는다는 것은 POC-1 (f) 의 추론이다 — 버리는 쪽은 어느 쪽이든 보수적이다.
+            data += chunk[:k + 1]
+            info["reset"] = True
     fp, s, e = segments[-1]
     tail = _read_range(fp, s, e)
     k = tail.rfind(b"\n")
