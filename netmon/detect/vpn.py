@@ -1110,8 +1110,9 @@ def _load_daemon_state(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _cap_open(lines: List[Dict[str, str]], dropped: int) -> Tuple[List[Dict[str, str]], int]:
-    """끊김당 줄 상한(TODO K-1). 분류·오류 원인 줄과 첫·마지막 상태 줄은 남기고, 가운데의
-    연결 단계 상태 줄부터(오래된 것부터) 버린다. 그래도 넘치면 오래된 원인 줄을 버린다."""
+    """끊김당 줄 상한(TODO K-1). 분류·오류 원인 줄과 첫·마지막 상태 줄은 남기고, 그 사이의 상태 줄을
+    종류와 무관하게(연결 단계뿐 아니라 중간의 `Disconnected(…)`·`Unable(…)` 도) 오래된 것부터 버린다.
+    그래도 넘치면 오래된 원인 줄을 버린다."""
     while len(lines) > DAEMON_OPEN_MAX:
         status = [i for i, ln in enumerate(lines) if ln["kind"] == "status"]
         middle = status[1:-1]
