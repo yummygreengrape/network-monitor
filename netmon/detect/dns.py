@@ -11,6 +11,7 @@ from .. import messages as msg
 from ..model import (CONFIRMED, HIGH, INFO, MEDIUM, SECURITY, SUSPECT,
                      Finding, Observation, unwrap)
 from ..util import is_loopback
+from .vpn import daemon_transitions
 
 FEATURE = "detect.dns"
 
@@ -18,6 +19,15 @@ FEATURE = "detect.dns"
 INTERCEPT_KEYS = ("HTTPEnable", "HTTPSEnable", "SOCKSEnable",
                   "ProxyAutoConfigEnable", "ProxyAutoDiscoveryEnable")
 
+
+
+def _with_transitions(ctx, evidence):
+    """이번·직전 창에 WARP 데몬 상태 전환이 있었으면 그 줄을 증거에 더한다(작업 2026-09-23-warp-daemon-log AC-8).
+    등급·귀속은 바꾸지 않는다."""
+    trans = daemon_transitions(ctx)
+    if trans:
+        evidence["daemon_transitions"] = trans
+    return evidence
 
 def explained_by_vpn(prev: Optional[Observation], cur: Observation, ctx) -> bool:
     """리졸버 변화가 VPN 오르내림으로 설명되는가.
@@ -66,8 +76,9 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             confidence=CONFIRMED,
             severity="low" if attribution else HIGH,
             summary=msg.RESOLVER_CHANGED,
-            evidence={"prev": prev.get("dns", "resolvers"), "cur": cur.get("dns", "resolvers"),
-                      "source": "scutil --dns"},
+            evidence=_with_transitions(ctx, {"prev": prev.get("dns", "resolvers"),
+                                             "cur": cur.get("dns", "resolvers"),
+                                             "source": "scutil --dns"}),
             attribution=attribution,
         ))
 
@@ -80,8 +91,9 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             axis=SECURITY, kind="DNS_LOCAL_PROXY_CHANGED",
             confidence=SUSPECT, severity=MEDIUM,
             summary=(msg.DNS_LOCAL_PROXY_ON if c_lb else msg.DNS_LOCAL_PROXY_OFF),
-            evidence={"prev_via_loopback": p_lb, "cur_via_loopback": c_lb,
-                      "resolvers": cur.get("dns", "resolvers"), "source": "scutil --dns"},
+            evidence=_with_transitions(ctx, {"prev_via_loopback": p_lb, "cur_via_loopback": c_lb,
+                                             "resolvers": cur.get("dns", "resolvers"),
+                                             "source": "scutil --dns"}),
             attribution=attribution,
         ))
 

@@ -11,9 +11,19 @@ from typing import Any, Dict, List, Optional, Set
 from .. import messages as msg
 from ..model import (CONFIRMED, HIGH, INFO, LOW, MEDIUM, SECURITY, SUSPECT,
                      Finding, Observation, unwrap)
+from .vpn import daemon_transitions
 
 FEATURE = "detect.route"
 
+
+
+def _with_transitions(ctx, evidence):
+    """이번·직전 창에 WARP 데몬 상태 전환이 있었으면 그 줄을 증거에 더한다(작업 2026-09-23-warp-daemon-log AC-8).
+    등급·귀속은 바꾸지 않는다."""
+    trans = daemon_transitions(ctx)
+    if trans:
+        evidence["daemon_transitions"] = trans
+    return evidence
 
 def _routes(obs: Optional[Observation], key: str) -> Set[str]:
     if obs is None:
@@ -67,7 +77,8 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
             confidence=CONFIRMED,
             severity=LOW if route_attribution else HIGH,
             summary=msg.DEFAULT_ROUTE_CHANGED,
-            evidence={"prev": sorted(p4), "cur": sorted(c4), "source": "netstat -rn -f inet"},
+            evidence=_with_transitions(ctx, {"prev": sorted(p4), "cur": sorted(c4),
+                                             "source": "netstat -rn -f inet"}),
             attribution=route_attribution,
         ))
 
@@ -138,8 +149,8 @@ def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
                 confidence=CONFIRMED,
                 severity=LOW if attribution else MEDIUM,
                 summary=msg.ROUTES_OUTSIDE_TUNNEL % (added, ", ".join(sorted(grew))),
-                evidence={"grew": {i: {"prev": p, "cur": n} for i, (p, n) in grew.items()},
-                          "tunnel_default": tun, "source": "netstat -rn -f inet"},
+                evidence=_with_transitions(ctx, {"grew": {i: {"prev": p, "cur": n} for i, (p, n) in grew.items()},
+                                                 "tunnel_default": tun, "source": "netstat -rn -f inet"}),
                 attribution=attribution,
             ))
 

@@ -1752,8 +1752,9 @@ class _DaemonSequence:
         self.addCleanup(shutil.rmtree, self.d, True)
         self.cfg = configmod.load(os.path.join(self.d, "config.json"))
 
-    def o(self, sec, lines=(), state="connected", reset=False, link=True, read="ok"):
-        ob = obs(ts="2026-01-01T00:%02d:%02dZ" % divmod(sec, 60), vpn=vpn_state(state), security="WPA2_PSK")
+    def o(self, sec, lines=(), state="connected", reset=False, link=True, read="ok", **kw):
+        kw.setdefault("security", "WPA2_PSK")
+        ob = obs(ts="2026-01-01T00:%02d:%02dZ" % divmod(sec, 60), vpn=vpn_state(state), **kw)
         if not link:
             ob.data["iface"]["primary"] = None
         ob.data["warp_daemon"] = {"read": read, "lines": [dict(x) for x in lines], "state": None,
@@ -2198,6 +2199,57 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
         res = self.run_seq(self.start() + [self.o(10, self.DROP[:3], state="disconnected")])
         d = self.poll(res, 2, "VPN_DISCONNECTED")[0]
         self.assertNotIn(msg.VPN_DAEMON_REASON.split("%")[0].strip(), d.summary)
+
+
+class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
+    """이번 또는 직전 창의 WARP 연결↔비연결 전환이 리졸버·로컬 프록시·기본 경로·터널 밖 경로 판정의 증거로 붙는다.
+    등급·귀속은 그대로다 (DEV-6 — QA-8)."""
+
+    BASE = dict(tunnel_default=("utun3",), route_counts={"en0": 1, "utun3": 1})
+    CHANGES = {"RESOLVER_CHANGED": dict(resolvers=("198.51.100.53",)),
+               "DNS_LOCAL_PROXY_CHANGED": dict(via_loopback=True),
+               "DEFAULT_ROUTE_CHANGED": dict(gateway="192.0.2.254"),
+               "ROUTES_OUTSIDE_TUNNEL": dict(route_counts={"en0": 5, "utun3": 1})}
+
+    def seq_for(self, kind, change_at, drop_at=10, lines=None):
+        seq = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE), self.o(5, **self.BASE)]
+        for sec in range(10, change_at + 1, 5):
+            kw = dict(self.BASE)
+            if sec >= change_at:
+                kw.update(self.CHANGES[kind])
+            seq.append(self.o(sec, (lines if lines is not None else self.DROP) if sec == drop_at else (), **kw))
+        return seq
+
+    def finding(self, res, kind):
+        return [f for f in res[-1][1] if f.kind == kind][0]
+
+    def test_a_transition_in_this_window_is_attached_and_nothing_else_changes(self):
+        for kind in self.CHANGES:
+            seq = self.seq_for(kind, change_at=10)
+            f = self.finding(self.run_seq(seq), kind)
+            self.assertEqual([x["text"] for x in f.evidence["daemon_transitions"]],
+                             ["Disconnected(InternalTunnelError)", "Connected"], kind)
+            for o in seq:
+                del o.data["warp_daemon"]
+            plain = self.finding(self.run_seq(seq), kind)
+            self.assertNotIn("daemon_transitions", plain.evidence, kind)
+            self.assertEqual((f.severity, f.attribution, f.confidence, f.summary),
+                             (plain.severity, plain.attribution, plain.confidence, plain.summary), kind)
+            self.assertEqual({k: v for k, v in f.evidence.items() if k != "daemon_transitions"}, plain.evidence, kind)
+
+    def test_a_transition_in_the_previous_window_is_attached_but_not_two_windows_ago(self):
+        for kind in self.CHANGES:
+            f = self.finding(self.run_seq(self.seq_for(kind, change_at=15)), kind)
+            self.assertEqual(len(f.evidence["daemon_transitions"]), 2, kind)
+            f = self.finding(self.run_seq(self.seq_for(kind, change_at=20)), kind)
+            self.assertNotIn("daemon_transitions", f.evidence, kind)
+
+    def test_phase_changes_inside_an_open_drop_are_not_transitions(self):
+        # 창 10 에서 끊김이 열리고(전환), 창 15 는 연결 단계만 바뀌고(전환 아님), 변화는 창 20 — 직전 창(15)에 전환 없음
+        seq = self.seq_for("RESOLVER_CHANGED", change_at=20, drop_at=10, lines=self.DROP[2:3])
+        seq[-2].data["warp_daemon"]["lines"] = [dl("12.000", "status", "Connecting(CheckingNetwork)")]
+        f = self.finding(self.run_seq(seq), "RESOLVER_CHANGED")
+        self.assertNotIn("daemon_transitions", f.evidence)
 
 
 def enginemod_replay(cfg, seq):

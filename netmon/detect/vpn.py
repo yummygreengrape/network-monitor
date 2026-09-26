@@ -989,6 +989,9 @@ DAEMON_POLLS_KEY = "warp_daemon_polls"
 # 닫힐 때 복구 판정에도").
 DAEMON_PREV_CLOSED_KEY = "warp_daemon_prev_closed"
 DAEMON_PREV_CLOSED_MAX = 40
+# 직전 판정 창의 연결↔비연결 전환 방송 줄(TODO K-2). 리졸버·경로 판정이 "이번 또는 직전 창" 을 본다.
+DAEMON_PREV_TRANSITIONS_KEY = "warp_daemon_prev_transitions"
+DAEMON_TRANSITIONS_MAX = 20
 # 링크 없는 주기에서 넘어온 창의 줄 수 상한. 넘으면 앞쪽을 버리고 상태를 "모름" 으로.
 DAEMON_CARRY_MAX = 200
 # 끊김 하나에 모으는 줄 수 상한(보존본 끊김 15건의 저장 대상 10~23줄). 대기 줄도 같은 수로 묶는다.
@@ -1181,7 +1184,7 @@ def _poll_of(obs: Observation) -> Any:
 
 def _forget_daemon(state: Dict[str, Any]) -> None:
     for key in (DAEMON_STATE_KEY, DAEMON_CARRY_KEY, DAEMON_CARRY_GAP_KEY, DAEMON_POLLS_KEY,
-                DAEMON_PREV_CLOSED_KEY):
+                DAEMON_PREV_CLOSED_KEY, DAEMON_PREV_TRANSITIONS_KEY):
         state.pop(key, None)
 
 
@@ -1220,8 +1223,9 @@ def warp_daemon_window(state: Dict[str, Any], obs: Observation, suppress: bool) 
     if wd is None:
         _forget_daemon(state)
         return {"read": "absent", "eligible": False, "closed": [], "transitions": [],
-                "open": [], "unused": [], "prev_unused": []}
+                "prev_transitions": [], "open": [], "unused": [], "prev_unused": []}
     ds = _load_daemon_state(state)
+    prev_transitions = _daemon_lines(state.get(DAEMON_PREV_TRANSITIONS_KEY), DAEMON_TRANSITIONS_MAX)
     prev_unused = _daemon_lines(state.get(DAEMON_PREV_CLOSED_KEY), DAEMON_PREV_CLOSED_MAX)
     lines = wd.get("lines") if isinstance(wd.get("lines"), list) else []
     items = (_carry_items(state.get(DAEMON_CARRY_KEY))
@@ -1240,12 +1244,27 @@ def warp_daemon_window(state: Dict[str, Any], obs: Observation, suppress: bool) 
     # 판정에도 속하지 않는다(K-3 "없으면 표본에만"). 넘기면 다음 복구 판정에 다른 끊김의 줄이 붙는다.
     state[DAEMON_PREV_CLOSED_KEY] = (unused[-DAEMON_PREV_CLOSED_MAX:]
                                      if _poll_of(obs) != CONNECTED else [])
+    state[DAEMON_PREV_TRANSITIONS_KEY] = transitions[-DAEMON_TRANSITIONS_MAX:]
     state.pop(DAEMON_CARRY_KEY, None)
     state.pop(DAEMON_CARRY_GAP_KEY, None)
     read = wd.get("read") if wd.get("read") in ("ok", "missing", "unreadable") else "unreadable"
-    return {"read": read, "eligible": eligible, "closed": closed, "transitions": transitions,
+    return {"read": read, "eligible": eligible, "closed": closed,
+            "transitions": transitions[-DAEMON_TRANSITIONS_MAX:], "prev_transitions": prev_transitions,
             "open": [dict(ln) for ln in ds["open_lines"]] if not _is_connected(ds["state"]) else [],
             "unused": unused, "prev_unused": prev_unused}
+
+
+def daemon_transitions(ctx) -> List[Dict[str, str]]:
+    """이번 창 또는 직전 판정 창에 있었던 WARP 의 연결↔비연결 전환 방송 줄(SPEC AC-8, TODO K-2).
+
+    리졸버·로컬 프록시·기본 경로·터널 밖 경로 판정의 증거로만 쓴다 — 그 판정들의 등급·귀속·조사
+    개시는 바꾸지 않는다(사용자 결정). 없으면 빈 목록(판정에 키를 더하지 않는다).
+    """
+    window = getattr(ctx, "warp_daemon", None)
+    if not isinstance(window, dict):
+        return []
+    lines = list(window.get("prev_transitions") or []) + list(window.get("transitions") or [])
+    return [dict(ln) for ln in lines]
 
 
 def daemon_evidence(ctx, kind: str) -> Dict[str, Any]:
