@@ -288,7 +288,7 @@ def _valid_daemon_pos(pos: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(pos, dict):
         return None
     f, off, last = pos.get("file"), pos.get("offset"), pos.get("last_status")
-    if not isinstance(f, str) or not re.fullmatch(r"\d+:\d+", f):
+    if not isinstance(f, str) or not re.fullmatch(r"\d+:\d+", f, re.ASCII):
         return None
     if not isinstance(off, int) or isinstance(off, bool) or off < 0:
         return None

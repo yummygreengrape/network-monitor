@@ -1078,6 +1078,20 @@ class TestWarpDaemonLogReading(unittest.TestCase):
         self.assertEqual(lines, ["ok", "c"])
         self.assertTrue(info["reset"])
 
+    def test_a_truncated_then_rotated_file_without_a_newline_is_a_tail_not_a_line(self):
+        """DEV-14 (DEV-8 2회차 [낮음] M12·M13): 저장 위치가 회전본 크기보다 커 잘림으로 처리되고(건너뜀 없음) 그 회전본에 개행이
+        하나도 없으면, 그 조각은 건너뛴 자리의 조각이 아니라 쓰이다 만 꼬리다 — 버린다."""
+        self.write("a\n" * 200)                               # 저장 위치 400 > 아래 쓰다 만 줄의 길이
+        _, pos, _ = self.read(None)
+        self.write(daemon_status("Conn"), mode="w")          # 같은 파일을 잘라 쓰다 만 줄 하나
+        self.assertLess(len(daemon_status("Conn")), pos["offset"])
+        self.rotate()
+        self.write(daemon_status("Connected") + "\n")
+        lines, _, info = self.read(pos)
+        self.assertEqual(lines, [daemon_status("Connected")])
+        self.assertTrue(info["reset"])
+        self.assertEqual(info["skipped_bytes"], 0)
+
     def test_double_rotation(self):
         self.write("a\n")
         _, pos, _ = self.read(None)
@@ -1879,6 +1893,15 @@ class TestWarpDaemonLinesInTheSample(unittest.TestCase):
         self.assertEqual([x["kind"] for x in obs.data["warp_daemon"]["lines"]], ["disconnect"])
         self.assertEqual(self.held(), [])
 
+    def test_cause_lines_seen_while_the_state_is_unknown_are_held_too(self):
+        """DEV-14: 기준 상태를 모를 때(처음 켬·연속성이 끊긴 뒤)도 원인 줄은 보류한다(TODO K-1 — 연결과 같게)."""
+        kept, last, _, held = vpnmod.parse_warp_daemon([daemon_disconnect("settings change", ts=self.at("01.000"))], None)
+        self.assertEqual((kept, last), ([], None))
+        self.assertEqual([x["text"] for x in held], ["settings change"])
+        kept, last, _, held = vpnmod.parse_warp_daemon([daemon_status("Connected", ts=self.at("01.001"))], None, held)
+        self.assertEqual([x["kind"] for x in kept], ["disconnect", "status"])      # 모름 → Connected 는 바뀐 방송
+        self.assertEqual(held, [])
+
     def test_the_hold_is_capped(self):
         self.observe([daemon_status("Connected", ts=self.at("00.000"))])
         self.observe([daemon_error("e%d" % i, ts=self.at("01.%03d" % i)) for i in range(50)])
@@ -2142,6 +2165,31 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         self.assertIsNone(vpn_rules._daemon_time("2026-01-01T00:00:01.000Z\n"))
         # strptime 은 전각 숫자를 받는다 — 시각 모양은 ASCII 숫자로만(수집 쪽 정규식과 같게)
         self.assertIsNone(vpn_rules._daemon_time("\uff12\uff10\uff12\uff16-01-01T00:00:01.000Z"))
+
+    def test_the_judge_side_rechecks_what_the_collector_would_have_stored(self):
+        """DEV-14: 상태 파일·표본의 줄 글과 상태 이름을 수집 쪽 규칙으로 다시 본다 — 상태 줄·상태 이름은 이름 문법 왕복,
+        원인 줄은 도려내기를 거친 글. 아니면 버린다(사람이 고친 파일의 날 개행·조작 문자·주소가 증거로 가지 않게)."""
+        ts = "2026-01-01T00:00:01.000Z"
+        for text in ("Connected\n", "Connected)", "A)((", "Connecting(k0123456789abcdef0123)", "Disconnected {x}"):
+            self.assertIsNone(vpn_rules._daemon_line({"ts": ts, "kind": "status", "text": text}), text)
+        for text in ("to 192.0.2.1 x", "a\nb", "a\u202eb", "key 0123456789abcdef0123"):
+            self.assertIsNone(vpn_rules._daemon_line({"ts": ts, "kind": "error", "text": text}), text)
+        self.assertEqual(vpn_rules._daemon_line({"ts": ts, "kind": "status", "text": "Unable(NoNetwork)"})["text"], "Unable(NoNetwork)")
+        self.assertEqual(vpn_rules._daemon_line({"ts": ts, "kind": "disconnect", "text": "to <addr> x"})["text"], "to <addr> x")
+        for name in ("Connected)", "A)((", "Connected {x}"):
+            st = vpn_rules._load_daemon_state({vpn_rules.DAEMON_STATE_KEY: {"state": name, "pending": [], "open_since": None,
+                                                                           "open_lines": [], "open_dropped": 0}})
+            self.assertIsNone(st["state"], name)
+        st = vpn_rules._load_daemon_state({vpn_rules.DAEMON_STATE_KEY: {"state": "Unable(NoNetwork)", "pending": [],
+                                                                       "open_since": None, "open_lines": [], "open_dropped": 0}})
+        self.assertEqual(st["state"], "Unable(NoNetwork)")
+
+    def test_a_tampered_sample_line_does_not_reach_the_evidence(self):
+        bad = [dl("07.490", "error", "to 192.0.2.1 x"), dl("07.491", "disconnect", "a\nb")]
+        res = self.run_seq(self.start() + [self.o(10, bad + self.DROP[2:])])
+        d = [f for f in res[2][1] if f.kind == "VPN_DISCONNECTED"][0]
+        self.assertNotIn("192.0.2.1", json.dumps(d.evidence))
+        self.assertEqual([x["kind"] for x in d.evidence["daemon_lines"]], ["status", "status", "status"])
 
     # ADV-6 (판정 쪽 키) ─────────────────────────────────────────────────────
     def test_broken_state_keys_restart_from_unknown_without_an_exception(self):
@@ -2596,7 +2644,8 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
             self.assertEqual([f for f in out if f.kind == "DETECTOR_ERROR"], [], repr(bad)[:40])
             r = [f for f in out if f.kind == "VPN_RECONNECTED"]
             self.assertEqual(len(r), 1, repr(bad)[:40])
-            self.assertIsInstance(r[0].evidence["daemon_lines"], list)
+            # 깨진 항목은 버리고 이 끊김의 다섯 줄만(DEV-14 — 단언 강화)
+            self.assertEqual([x["text"] for x in r[0].evidence["daemon_lines"]], [x["text"] for x in self.DROP], repr(bad)[:40])
 
 
     # DEV-12 잘림 표시와 조회 경로 상한 ────────────────────────────────────────
@@ -2947,6 +2996,25 @@ class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
         f = [f for f in self.run_seq(seq)[-1][1] if f.kind == "RESOLVER_CHANGED"][0]
         self.assertEqual(len(f.evidence["daemon_transitions"]), vpn_rules.DAEMON_TRANSITIONS_MAX)
         self.assertEqual(f.evidence["daemon_transitions_dropped"], 40 - vpn_rules.DAEMON_TRANSITIONS_MAX)
+
+    def test_a_read_failure_or_a_reset_keeps_the_previous_window_and_forgets_older(self):
+        """DEV-14 (DEV-6 3회차 [낮음] J·N·L): 이번 창이 읽기 실패·reset 이어도 직전 판정 창의 전환은 붙고, 그다음 주기에는 두 창 전이라 붙지 않는다."""
+        want = ["Disconnected(InternalTunnelError)", "Connected"]
+        base = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE), self.o(5, **self.BASE),
+                self.o(10, self.DROP, **self.BASE)]
+        for label, extra in (("읽기 실패", dict(read="unreadable")), ("없음", dict(read="missing")), ("reset", dict(reset=True))):
+            seq = base + [self.change(15, n=1, **extra), self.change(20, n=2)]
+            res = self.run_seq(seq)
+            self.assertEqual(self.texts_at(res, 3), want, label)
+            self.assertEqual(self.texts_at(res, 4), [], label)
+
+    def test_transitions_before_a_reset_in_a_carried_window_are_kept(self):
+        """DEV-14 (D): 넘어온 창 가운데 reset 이 있어도 그 앞의 전환은 이번 창의 전환이다."""
+        seq = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE), self.o(5, **self.BASE),
+               self.o(10, self.DROP, link=False, **self.BASE), self.o(15, link=False, reset=True, **self.BASE),
+               self.change(20, n=1)]
+        res = self.run_seq(seq)
+        self.assertEqual(self.texts_at(res, 4), ["Disconnected(InternalTunnelError)", "Connected"])
 
     def test_a_truncated_window_of_transitions_says_how_many_were_dropped(self):
         lines = []

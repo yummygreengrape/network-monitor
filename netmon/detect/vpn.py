@@ -30,7 +30,7 @@ from ..baseline import VPN_REPORTED_KEY, reported_map
 from ..liveness import ICMP, evaluate, method_label
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, PROBE_TIMED_OUT,
                      QUALITY, SECURITY, Finding, Observation)
-from ..vpn import ENDPOINT_PROBES_KEY
+from ..vpn import ENDPOINT_PROBES_KEY, scrub_daemon_text, warp_status_name
 
 FEATURE = "detect.vpn"
 
@@ -1033,6 +1033,13 @@ def _daemon_line(item: Any) -> Optional[Dict[str, str]]:
         return None
     if not isinstance(text, str) or len(text) > _DAEMON_TEXT_MAX:
         return None
+    # 수집 쪽이 저장했을 글인지 다시 본다(DEV-14) — 상태 줄은 이름 문법 왕복, 원인 줄은 도려내기를 거친 글.
+    # 사람이 고친 state.json·표본의 날 개행·조작 문자·주소가 판정과 증거로 가지 않게 한다.
+    if kind == "status":
+        if warp_status_name(text) != text:
+            return None
+    elif scrub_daemon_text(text) != text:
+        return None
     return {"ts": ts, "kind": kind, "text": text}
 
 
@@ -1084,7 +1091,7 @@ def _load_daemon_state(state: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         return _unknown_daemon_state()
     name = raw.get("state")
-    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_()]{0,300}", name, re.ASCII):
+    if not isinstance(name, str) or warp_status_name(name) != name:          # 수집 쪽 이름 문법 왕복(DEV-14)
         return _unknown_daemon_state()
     dropped = raw.get("open_dropped")
     ds = {"state": name,
