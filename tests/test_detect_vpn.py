@@ -1856,6 +1856,25 @@ class _DaemonSequence:
     def daemon_kinds(self, results, i):
         return [f.kind for f in results[i][1] if f.evidence.get("timing_source") == "daemon"]
 
+    def engine(self, state):
+        """새 엔진 인스턴스(재시작). 재시작 뒤 첫 판정 주기의 억제는 표본의 `process_start` 로 준다(`o(start=True)`)."""
+        from netmon import investigate
+        eng = Engine.__new__(Engine)
+        eng.cfg, eng.state, eng.store = self.cfg, state, None
+        eng.prev = eng.anchor = eng.prev_wall = None
+        eng.link_gap = False
+        eng._baseline_saved_at = eng._arp_log_read_at = None
+        eng.investigator = investigate.Investigator(None)
+        eng.needs = {}
+        return eng
+
+    def judge_seq(self, eng, seq):
+        out = []
+        for ob in seq:
+            out.append(eng.judge(ob, 5.0))
+            eng.prev = ob
+        return out
+
 
 class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
     """조회 사이에 끝난 WARP 끊김을 데몬 로그로 판정한다 (DEV-4 — QA-6, QA-14, QA-10, ADV-6, ADV-7).
@@ -1968,24 +1987,6 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         d = [f for f in res[2][1] if f.kind == "VPN_DISCONNECTED"][0]
         self.assertIsNone(d.evidence["provider_reason"])
 
-    def engine(self, state):
-        """새 엔진 인스턴스(재시작). 재시작 뒤 첫 판정 주기의 억제는 표본의 `process_start` 로 준다(`o(start=True)`)."""
-        from netmon import investigate
-        eng = Engine.__new__(Engine)
-        eng.cfg, eng.state, eng.store = self.cfg, state, None
-        eng.prev = eng.anchor = eng.prev_wall = None
-        eng.link_gap = False
-        eng._baseline_saved_at = eng._arp_log_read_at = None
-        eng.investigator = investigate.Investigator(None)
-        eng.needs = {}
-        return eng
-
-    def judge_seq(self, eng, seq):
-        out = []
-        for ob in seq:
-            out.append(eng.judge(ob, 5.0))
-            eng.prev = ob
-        return out
 
     def test_a_pending_cause_line_survives_a_window_and_a_restart(self):
         first = self.engine({})
@@ -2468,6 +2469,121 @@ class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
         seq[-2].data["warp_daemon"]["lines"] = [dl("12.000", "status", "Connecting(CheckingNetwork)")]
         f = self.finding(self.run_seq(seq), "RESOLVER_CHANGED")
         self.assertNotIn("daemon_transitions", f.evidence)
+
+
+    # DEV-6 2회차 (검수 1회차 지적) ─────────────────────────────────────────
+    def polled_seq(self, kind, lines=True):
+        """조회로 잡힌 끊김: 10초 조회 disconnected(창에 Disconnected), 15초 조회 connected(창에 Connected)와 그 주기의 변화."""
+        seq = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE), self.o(5, **self.BASE)]
+        up = dict(self.BASE)
+        if kind != "DEFAULT_ROUTE_CHANGED":
+            up.update(self.CHANGES[kind])
+        seq.append(self.o(10, [dl("07.493", "status", "Disconnected(InternalTunnelError)")], state="disconnected",
+                          **self.BASE))
+        seq.append(self.o(15, [dl("12.000", "status", "Connected")], **up))
+        if kind == "DEFAULT_ROUTE_CHANGED":
+            # 터널 기본 경로만 빠졌다 돌아옴 — VPN 오르내림으로 설명되는 모양(route.py 의 vpn_change 귀속)
+            for i, ob in enumerate(seq):
+                if i != 2:
+                    ob.data["route"]["default4"].append(
+                        {"gateway": {"id": "ipv4", "v": "192.0.2.2"}, "iface": "utun3", "flags": "UGScg"})
+        return seq
+
+    def same_but_the_evidence(self, seq, kind):
+        f = self.finding(self.run_seq(seq), kind)
+        for o in seq:
+            del o.data["warp_daemon"]
+        plain = self.finding(self.run_seq(seq), kind)
+        self.assertEqual((f.severity, f.attribution, f.confidence, f.summary),
+                         (plain.severity, plain.attribution, plain.confidence, plain.summary), kind)
+        self.assertEqual({k: v for k, v in f.evidence.items() if k != "daemon_transitions"}, plain.evidence, kind)
+        return f
+
+    def test_a_poll_caught_drop_keeps_the_attribution_and_gets_the_transitions(self):
+        attributed = []
+        for kind in self.CHANGES:
+            f = self.same_but_the_evidence(self.polled_seq(kind), kind)
+            self.assertEqual([x["text"] for x in f.evidence["daemon_transitions"]],
+                             ["Disconnected(InternalTunnelError)", "Connected"], kind)
+            if f.attribution:
+                attributed.append(kind)
+        # 귀속이 붙는 판정이 실제로 있어야 이 시험이 "귀속 보존" 을 본다(dns·route 두 판정기 모두)
+        for kind in ("DNS_LOCAL_PROXY_CHANGED", "DEFAULT_ROUTE_CHANGED", "ROUTES_OUTSIDE_TUNNEL"):
+            self.assertIn(kind, attributed)
+
+    def test_a_gap_or_a_restart_cycle_keeps_the_finding_and_gets_the_transitions(self):
+        for kind in self.CHANGES:
+            for label, extra in (("공백", dict(sec=100)), ("재시작", dict(sec=10, start=True))):
+                seq = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE), self.o(5, **self.BASE)]
+                kw = dict(self.BASE)
+                kw.update(self.CHANGES[kind])
+                seq.append(self.o(extra["sec"], self.DROP, start=extra.get("start", False), **kw))
+                f = self.same_but_the_evidence(seq, kind)
+                self.assertEqual(len(f.evidence["daemon_transitions"]), 2, (kind, label))
+
+    def test_broken_new_state_keys_never_cost_the_findings_of_the_cycle(self):
+        """ADV-6: 깨진 `warp_daemon_prev_transitions`·`warp_daemon_prev_closed` 로도 리졸버·경로 판정이 사라지지 않는다."""
+        bad_values = ["abc", [5], 5, None, {"x": 1}, [{"ts": "x"}] * 1000, [[1, 2]], ["x" * 10 ** 6],
+                     [{"ts": "2026-01-01T00:00:01.000Z", "kind": "status", "text": "x" * 10 ** 6}]]
+        for kind in self.CHANGES:
+            for bad in bad_values:
+                eng = self.engine({vpn_rules.DAEMON_STATE_KEY: {"state": "Connected", "pending": [], "open_since": None,
+                                                                "open_lines": [], "open_dropped": 0},
+                                   vpn_rules.DAEMON_POLLS_KEY: ["connected"],
+                                   vpn_rules.DAEMON_PREV_TRANSITIONS_KEY: bad,
+                                   vpn_rules.DAEMON_PREV_CLOSED_KEY: bad})
+                eng.prev = self.o(5, **self.BASE)
+                kw = dict(self.BASE)
+                kw.update(self.CHANGES[kind])
+                out = eng.judge(self.o(10, **kw), 5.0)
+                self.assertEqual([f for f in out if f.kind == "DETECTOR_ERROR"], [], (kind, repr(bad)[:40]))
+                self.assertIn(kind, [f.kind for f in out], (kind, repr(bad)[:40]))
+                json.dumps(eng.state)
+
+    def test_a_malformed_window_gives_no_transitions_and_no_exception(self):
+        import types
+        for window in ({"prev_transitions": "abc", "transitions": [5, {"ts": "x"}]}, {"transitions": 5},
+                       {"prev_transitions": [{"ts": "2026-01-01T00:00:01.000Z", "kind": "status", "text": 3}]}):
+            self.assertEqual(vpn_rules.daemon_transitions(types.SimpleNamespace(warp_daemon=window)), [], window)
+
+    def test_each_window_keeps_its_last_twenty_transitions(self):
+        lines = []
+        for i in range(30):
+            lines += [dl("05.%03d" % (i * 20), "status", "Disconnected(X)"), dl("05.%03d" % (i * 20 + 10), "status", "Connected")]
+        f = self.finding(self.run_seq(self.seq_for("RESOLVER_CHANGED", change_at=10, lines=lines)), "RESOLVER_CHANGED")
+        self.assertEqual(f.evidence["daemon_transitions"], lines[-vpn_rules.DAEMON_TRANSITIONS_MAX:])
+        state = {}
+        vpn_rules.warp_daemon_window(state, self.o(0, [dl("00.000", "status", "Connected")] + lines), suppress=False)
+        self.assertEqual(state[vpn_rules.DAEMON_PREV_TRANSITIONS_KEY], lines[-vpn_rules.DAEMON_TRANSITIONS_MAX:])   # 상태 파일도 상한
+
+    def test_the_first_broadcast_from_an_unknown_state_is_not_a_transition(self):
+        seq = [self.o(0, [dl("00.000", "status", "Disconnected(X)")], **self.BASE),
+               self.o(5, [dl("04.000", "status", "Connected")], resolvers=("198.51.100.53",), **self.BASE)]
+        f = self.finding(self.run_seq(seq), "RESOLVER_CHANGED")
+        self.assertEqual([x["text"] for x in f.evidence["daemon_transitions"]], ["Connected"])
+        seq = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE),
+               self.o(5, resolvers=("198.51.100.53",), **self.BASE)]
+        self.assertNotIn("daemon_transitions", self.finding(self.run_seq(seq), "RESOLVER_CHANGED").evidence)
+
+    def test_only_the_four_kinds_get_the_transitions(self):
+        seq = self.seq_for("RESOLVER_CHANGED", change_at=10)
+        seq[-1].data["dns"]["proxy"] = {"HTTPEnable": "1"}
+        res = self.run_seq(seq)
+        other = [f for f in res[-1][1] if f.kind in ("PROXY_ENABLED", "PROXY_SETTINGS_CHANGED")]
+        self.assertTrue(other)
+        for f in other:
+            self.assertNotIn("daemon_transitions", f.evidence)
+
+    def test_a_cycle_without_a_link_does_not_erase_the_previous_window(self):
+        seq = self.seq_for("RESOLVER_CHANGED", change_at=10)[:-1]
+        seq.append(self.o(10, self.DROP, **self.BASE))
+        seq.append(self.o(15, link=False, **self.BASE))
+        kw = dict(self.BASE)
+        kw.update(self.CHANGES["RESOLVER_CHANGED"])
+        seq.append(self.o(20, **kw))
+        f = self.finding(self.run_seq(seq), "RESOLVER_CHANGED")
+        self.assertEqual([x["text"] for x in f.evidence["daemon_transitions"]],
+                         ["Disconnected(InternalTunnelError)", "Connected"])
 
 
 def enginemod_replay(cfg, seq):

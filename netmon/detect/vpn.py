@@ -1285,8 +1285,12 @@ def daemon_transitions(ctx) -> List[Dict[str, str]]:
     window = getattr(ctx, "warp_daemon", None)
     if not isinstance(window, dict):
         return []
-    lines = list(window.get("prev_transitions") or []) + list(window.get("transitions") or [])
-    return [dict(ln) for ln in lines]
+    # 리졸버·경로 판정기 안에서 불린다 — 모양이 틀린 창이 예외로 그 판정기의 보안 판정까지 지우지 않도록
+    # (run_all 은 예외 난 판정기의 결과를 버린다) 여기서 다시 걸러 낸다. 창마다 뒤쪽 상한까지.
+    out: List[Dict[str, str]] = []
+    for key in ("prev_transitions", "transitions"):
+        out += _daemon_lines(window.get(key), DAEMON_TRANSITIONS_MAX)
+    return out
 
 
 def daemon_evidence(ctx, kind: str) -> Dict[str, Any]:
