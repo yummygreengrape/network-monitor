@@ -2123,6 +2123,34 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
         rules.daemon_evidence_without_link(state, self.o(10, self.DROP[2:3], link=False))
         self.assertEqual(json.dumps(state, sort_keys=True), before)
 
+    def test_a_recovery_after_a_cycle_without_a_link_gets_only_its_own_drop(self):
+        """링크 없는 사이의 복구 판정에 이미 복구된 다른 끊김의 줄이 붙지 않는다(K-6 "그 끊김의 줄")."""
+        drop_b = [dl("21.493", "status", "Disconnected(InternalTunnelError)")]
+        res = self.run_seq(self.start() + [self.o(10, self.DROP[:3], state="disconnected"),     # 끊김 A (조회로 잡힘)
+                                           self.o(15, self.DROP[3:]),                            # A 복구
+                                           self.o(20, drop_b, state="disconnected", link=False),  # 끊김 B (링크 없음)
+                                           self.o(25, [dl("23.004", "status", "Connected")])])   # B 복구
+        r = [f for f in res[5][1] if f.kind == "VPN_RECONNECTED"][0]
+        texts = [x["text"] for x in r.evidence["daemon_lines"]]
+        self.assertNotIn("runtime connection failure failure=Tunnel", texts)      # A 의 분류 줄
+        self.assertEqual(texts, ["Disconnected(InternalTunnelError)", "Connected"])
+
+    def test_the_evidence_of_a_cycle_without_a_link_uses_the_carried_lines_once(self):
+        from netmon.detect import vpn as rules
+        state = {"warp_daemon_carry": [dict(x) for x in self.DROP[:2]]}
+        ev = rules.daemon_evidence_without_link(state, self.o(10, self.DROP[2:3], link=False))
+        self.assertEqual([x["text"] for x in ev["daemon_lines"]], [x["text"] for x in self.DROP[:3]])
+        # 엔진에서도 줄이 두 번 붙지 않는다(넘기기는 증거 계산 뒤)
+        res = self.run_seq(self.start() + [self.o(10, self.DROP[:3], state="disconnected", link=False)])
+        d = [f for f in res[2][1] if f.kind == "VPN_DISCONNECTED"][0]
+        self.assertEqual(len(d.evidence["daemon_lines"]), 3)
+
+    def test_the_evidence_of_a_cycle_without_a_link_respects_a_reset(self):
+        from netmon.detect import vpn as rules
+        state = {"warp_daemon_carry": [dict(self.DROP[2])]}
+        ev = rules.daemon_evidence_without_link(state, self.o(10, self.DROP[4:], link=False, reset=True))
+        self.assertEqual(ev["daemon_lines"], [])       # reset 너머의 Connected 는 앞의 끊김을 닫지 않는다
+
     def test_no_daemon_data_is_absent_and_no_lines_is_an_empty_list(self):
         seq = self.start() + [self.o(10, state="disconnected")]
         del seq[2].data["warp_daemon"]
@@ -2150,6 +2178,9 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
                  ("Disconnected(SettingsChanged)", "SettingsChanged"),
                  ("Unable(NoNetwork)", "NoNetwork"),
                  ("Disconnected(Manual)", None),
+                 ("Disconnected(InternalTunnelErrorX)", None),
+                 ("Disconnected(Settings)", None),
+                 ("Unable(NoNetworkAtAll)", None),
                  ("Disconnected(SomethingNew)", None),
                  ("Disconnected", None),
                  ("Connecting(PerformingHappyEyeballs)", None)]
@@ -2160,7 +2191,7 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
             tail = " " + msg.VPN_DAEMON_REASON % quoted if quoted else ""
             self.assertTrue(d.summary.endswith(("원인을 좁히지 않음." if msg.VPN_DAEMON_REASON.startswith("데몬")
                                                 else "narrowed down.") + tail), (state_name, d.summary))
-            for part in ("Manual", "SomethingNew", "PerformingHappyEyeballs"):
+            for part in ("Manual", "SomethingNew", "PerformingHappyEyeballs", "ErrorX", "Settings)", "AtAll"):
                 self.assertNotIn(part, d.summary, state_name)
 
     def test_the_poll_summaries_are_unchanged(self):

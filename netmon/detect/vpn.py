@@ -984,8 +984,9 @@ DAEMON_STATE_KEY = "warp_daemon_state"
 DAEMON_CARRY_KEY = "warp_daemon_carry"
 DAEMON_CARRY_GAP_KEY = "warp_daemon_carry_gap"
 DAEMON_POLLS_KEY = "warp_daemon_polls"
-# 직전 판정 창에서 닫혔는데 새 경로가 쓰지 않은 끊김의 줄. 조회 경로의 복구 판정이 한 창 늦게
-# 와도 그 끊김의 줄을 증거로 붙이게 한다(TODO K-6 "끊김이 닫힐 때 복구 판정에도").
+# 직전 판정 창에서 닫혔는데 새 경로가 쓰지 않은 끊김의 줄(그 주기 조회가 연결이 아니었을 때만).
+# 조회 경로의 복구 판정이 한 창 늦게 와도 그 끊김의 줄을 증거로 붙이게 한다(TODO K-6 "끊김이
+# 닫힐 때 복구 판정에도").
 DAEMON_PREV_CLOSED_KEY = "warp_daemon_prev_closed"
 DAEMON_PREV_CLOSED_MAX = 40
 # 링크 없는 주기에서 넘어온 창의 줄 수 상한. 넘으면 앞쪽을 버리고 상태를 "모름" 으로.
@@ -1234,7 +1235,11 @@ def warp_daemon_window(state: Dict[str, Any], obs: Observation, suppress: bool) 
     unused = [ln for d in closed if not eligible or d.get("since") is None for ln in d["lines"]]
     state[DAEMON_STATE_KEY] = ds
     state[DAEMON_POLLS_KEY] = [_poll_of(obs)]
-    state[DAEMON_PREV_CLOSED_KEY] = unused[-DAEMON_PREV_CLOSED_MAX:]
+    # 다음 판정 주기로 넘기는 것은 이번 조회가 연결이 아닐 때뿐이다 — 조회 경로의 복구 판정이 한 창
+    # 늦게 오는 경우는 그때뿐이고, 이번 조회가 연결이면 그 끊김은 이번 주기에 붙었거나(복구 판정) 어느
+    # 판정에도 속하지 않는다(K-3 "없으면 표본에만"). 넘기면 다음 복구 판정에 다른 끊김의 줄이 붙는다.
+    state[DAEMON_PREV_CLOSED_KEY] = (unused[-DAEMON_PREV_CLOSED_MAX:]
+                                     if _poll_of(obs) != CONNECTED else [])
     state.pop(DAEMON_CARRY_KEY, None)
     state.pop(DAEMON_CARRY_GAP_KEY, None)
     read = wd.get("read") if wd.get("read") in ("ok", "missing", "unreadable") else "unreadable"
