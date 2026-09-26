@@ -941,7 +941,7 @@ class TestWarpDaemonLogReading(unittest.TestCase):
     읽는 쪽의 약속: 직전 주기 뒤에 붙은 **완결된 줄**만 돌려준다. 개행 없는 마지막 줄은
     데몬이 아직 쓰는 중일 수 있어 다음 주기로 미룬다. 회전(이름 바꾸기)과 두 번 회전,
     잘림, 한 주기 상한을 넘는 경우에도 줄이 겹치거나 빠지지 않는다 — 빠질 수밖에 없을
-    때(상한 초과, 회전본을 못 찾음)는 `reset` 으로 알린다.
+    때(상한 초과, 회전본을 못 찾음, 회전본의 개행 없는 꼬리를 버림)는 `reset` 으로 알린다.
     """
 
     def setUp(self):
@@ -1053,6 +1053,30 @@ class TestWarpDaemonLogReading(unittest.TestCase):
         self.assertEqual(lines, ["c", "d"])
         self.assertTrue(info["reset"])
         self.assertGreater(info["skipped_bytes"], 0)
+
+    def test_a_skip_inside_a_rotated_file_that_ends_mid_line_still_drops_the_tail(self):
+        """건너뛴 자리에서 시작한 회전본 조각이라도 줄 끝이 있으면, 마지막 개행 뒤 꼬리는 버린다(예외는 줄 끝이 하나도 없을 때만)."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("x" * 80 + "\nmid\nCONN")
+        self.rotate()
+        self.write("c\nd\n")
+        lines, _, info = self.read(pos, cap=30)
+        self.assertEqual(lines, ["mid", "c", "d"])
+        self.assertTrue(info["reset"])
+
+    def test_a_later_rotated_file_without_a_newline_after_a_skip_is_still_a_tail(self):
+        """예외는 건너뛴 자리에서 시작한 **첫** 조각에만 — 뒤따르는 줄 끝 없는 회전본은 꼬리로 버린다."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("x" * 80 + "\nok\n")
+        self.rotate()
+        self.write("PARTIAL")
+        self.rotate()
+        self.write("c\n")
+        lines, _, info = self.read(pos, cap=30)
+        self.assertEqual(lines, ["ok", "c"])
+        self.assertTrue(info["reset"])
 
     def test_double_rotation(self):
         self.write("a\n")
