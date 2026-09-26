@@ -483,8 +483,8 @@ WARP_STATUS_DEPTH = 4
 WARP_DAEMON_TEXT_CAP = 300
 _ADDR_PORT = re.compile(r"(<addr>\]?):\d{1,5}(?!\d)")
 _HEX_LONG = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16,}(?![0-9A-Fa-f])")
-_HEX_NAME = re.compile(r"[0-9A-Fa-f]{16,}")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# 화면·로그를 조작할 수 있는 문자: C0·DEL·C1 제어 문자, 줄·문단 구분자, 너비 없는 문자와 양방향 제어, BOM.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]")
 
 
 def warp_status_name(rest: str) -> Optional[str]:
@@ -499,8 +499,9 @@ def warp_status_name(rest: str) -> Optional[str]:
     while len(names) < WARP_STATUS_DEPTH:
         m = _WARP_NAME.match(s)
         after = s[m.end():m.end() + 1] if m else None
-        # 16자 이상이 전부 16진이면 이름이 아니라 키·주소 조각이다(분류·오류 줄의 16진 규칙과 같게).
-        if not m or after not in _WARP_NAME_END or _HEX_NAME.fullmatch(m.group(0)):
+        # 16자 이상 16진 덩어리를 품으면 이름이 아니라 키·주소 조각이다(분류·오류 줄의 16진 규칙과 같게 —
+        # 전부 16진일 때만이 아니라 `k0123…` 처럼 낱말 안에 든 덩어리도).
+        if not m or after not in _WARP_NAME_END or _HEX_LONG.search(m.group(0)):
             break
         names.append(m.group(0))
         if after != "(":
@@ -512,7 +513,7 @@ def warp_status_name(rest: str) -> Optional[str]:
 
 
 def scrub_daemon_text(text: str) -> str:
-    """분류·오류 줄 꼬리에서 IPv4·IPv6 주소(포트 포함)·16자 이상 16진 값·제어 문자를 도려내고 줄인다."""
+    """분류·오류 줄 꼬리에서 IPv4·IPv6 주소(포트 포함)·16자 이상 16진 값·제어 문자(`_CONTROL`)를 도려내고 줄인다."""
     t = replace_addresses(text, lambda kind, value: "<addr>")
     t = _ADDR_PORT.sub(r"\1", t)
     t = _HEX_LONG.sub("<hex>", t)

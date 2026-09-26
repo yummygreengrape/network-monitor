@@ -1502,10 +1502,11 @@ class TestWarpDaemonLineParsing(unittest.TestCase):
     """
 
     def parse(self, lines, last=None):
-        """(저장 줄, 마지막 상태, 해석 실패 수). 기준 상태가 `Connected`·모름이면 원인 줄은 보류되므로
-        (TODO K-1) 원인 줄의 도려내기를 보는 시험은 `cause` 를 쓴다."""
-        kept, last, unparsed, _ = vpnmod.parse_warp_daemon(lines, last)
-        return kept, last, unparsed
+        """(저장 줄 + 보류 줄, 마지막 상태, 해석 실패 수). 기준 상태가 `Connected`·모름이면 원인 줄은 저장되지 않고
+        보류되므로(TODO K-1) 보류 줄도 함께 돌려준다 — "매칭되지 않는다" 는 시험이 보류로 헛통과하지 않게(DEV-9).
+        보류와 저장을 가르는 시험은 `parse_warp_daemon` 을 직접 부른다."""
+        kept, last, unparsed, held = vpnmod.parse_warp_daemon(lines, last)
+        return kept + held, last, unparsed
 
     def cause(self, line):
         """열린 끊김 안(기준 상태가 비연결)에서 원인 줄 하나를 도려낸 글."""
@@ -1688,6 +1689,49 @@ class TestWarpDaemonLineParsing(unittest.TestCase):
                 self.assertLessEqual(len(k["text"]), vpnmod.WARP_DAEMON_TEXT_CAP)
             if want is not None:
                 self.assertEqual([(k["kind"], k["text"]) for k in kept], want, line[:60])
+
+    # DEV-9 (DEV-3 2회차 검수 [낮음]) ────────────────────────────────────────
+    def test_every_kind_requires_its_module_path(self):
+        lines = [T0 + " DEBUG warp::net: Ipc Broadcast ResponseStatus: Disconnected(X)",
+                 T0 + " DEBUG actor_ipc::other: Ipc Broadcast ResponseStatus: Disconnected(X)",
+                 T0 + " WARN other::mod: warp::warp_service: Connection experienced runtime error error=x",
+                 T0 + " WARN main_loop: other::svc: Connection experienced runtime error error=x",
+                 T0 + " WARN main_loop:x: warp::warp_service: Connection experienced runtime error error=x",
+                 T0 + " INFO main_loop:handle_update{update=SettingsChanged(x)}: warp::warp_service: Disconnecting due to x",
+                 T0 + " INFO main_loop:handle_update{update=SettingsChanged(...)}: warp::warp_service: Disconnecting due to x",
+                 T0 + " INFO main_loop: other::svc: Disconnecting due to x"]
+        for last in (None, "Connected", "Disconnected(X)"):
+            self.assertEqual(self.parse(lines, last), ([], last, 0), last)
+
+    def test_cause_lines_take_only_ascii_digits_in_the_timestamp(self):
+        wide = "\uff12\uff10\uff12\uff16-01-01T00:00:00.000Z"
+        arabic = "\u0662\u0660\u0662\u0666-01-01T00:00:00.000Z"
+        for ts in (wide, arabic):
+            lines = [ts + " WARN main_loop: warp::warp_service: Disconnecting due to x",
+                     ts + " WARN main_loop: warp::warp_service: Connection experienced runtime error error=x"]
+            self.assertEqual(self.parse(lines, "Disconnected(X)"), ([], "Disconnected(X)", 0), ts)
+
+    def test_a_brace_right_after_a_name_ends_it(self):
+        self.assertEqual(self.kinds([daemon_status("Connected{x}")]), [("status", "Connected")])
+
+    def test_screen_control_characters_become_question_marks(self):
+        for ch in ("\x7f", "\x80", "\x9b", "\x9f", "\u2028", "\u2029", "\u200b", "\u200e", "\u200f",
+                   "\u202a", "\u202e", "\u2066", "\u2069", "\ufeff"):
+            self.assertEqual(self.cause(daemon_error("a" + ch + "b")), "a?b", repr(ch))
+        for ch in ("\u00a0", "\u00e9", "\u4e00", "\u2030"):          # 제어 문자가 아닌 것은 그대로
+            self.assertEqual(self.cause(daemon_error("a" + ch + "b")), "a" + ch + "b", repr(ch))
+
+    def test_a_name_with_a_long_hex_run_is_not_a_name(self):
+        """16자 이상 16진 덩어리를 품은 이름은 이름이 아니다 — 전부 16진인 이름만 거르던 것을 분류·오류 줄의 16진 규칙과 같게(DEV-9)."""
+        self.assertEqual(self.kinds([daemon_status("Connecting(k0123456789abcdef0123456789abcdef)")]),
+                         [("status", "Connecting")])
+        self.assertEqual(self.kinds([daemon_status("Unable(Key(x0123456789abcdef0123456789abcdef))")]),
+                         [("status", "Unable(Key)")])
+        self.assertEqual(self.parse([daemon_status("Connected0123456789abcdef0123")]), ([], None, 1))
+        self.assertEqual(self.kinds([daemon_status("Connecting(PerformingHappyEyeballs)")]),
+                         [("status", "Connecting(PerformingHappyEyeballs)")])
+        self.assertEqual(self.kinds([daemon_status("Connecting(Deadbeefdeadbee)")]),        # 15자는 이름
+                         [("status", "Connecting(Deadbeefdeadbee)")])
 
     def test_name_edges_length_depth_and_hex(self):
         self.assertEqual(self.kinds([daemon_status("Connecting(abc-def)")]), [("status", "Connecting")])
