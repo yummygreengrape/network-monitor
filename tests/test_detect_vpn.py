@@ -1086,6 +1086,43 @@ class TestWarpDaemonLogReading(unittest.TestCase):
             lines, pos, info = self.read(None)
         self.assertEqual((lines, pos, info["reset"]), ([], None, True))
 
+    def test_a_read_with_no_new_bytes_returns_nothing_and_keeps_the_position(self):
+        """QA-2: 새 바이트가 없으면 줄도 없고 reset 도 아니며 위치가 그대로다(크기 == 저장 위치는 잘림이 아니다)."""
+        self.write("a\nb\n")
+        _, pos, _ = self.read(None)
+        lines, again, info = self.read(pos)
+        self.assertEqual((lines, info["reset"], again["offset"]), ([], False, pos["offset"]))
+
+    def test_a_rotation_right_after_reading_to_the_end_repeats_nothing(self):
+        """ADV-5: 끝까지 읽은 뒤(저장 위치 == 옛 파일 크기) 회전하면 새 파일의 줄만 나온다."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\nc\n")
+        _, pos, _ = self.read(pos)
+        self.rotate()
+        self.write("d\n")
+        lines, _, info = self.read(pos)
+        self.assertEqual((lines, info["reset"]), (["d"], False))
+
+    def test_a_triple_rotation_is_still_followed(self):
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        self.write("b\n")
+        for text in ("c\n", "d\n", "e\n"):
+            self.rotate()
+            self.write(text)
+        lines, _, info = self.read(pos)
+        self.assertEqual((lines, info["reset"]), (["b", "c", "d", "e"], False))
+
+    def test_a_stat_that_fails_for_another_reason_is_unreadable_and_keeps_the_position(self):
+        """AC-5: 없는 것(missing)과 읽을 수 없는 것(unreadable)을 구분하고, 위치는 버리지 않는다."""
+        self.write("a\n")
+        _, pos, _ = self.read(None)
+        with mock.patch.object(vpnmod.os, "stat", side_effect=PermissionError("secret /opt/netmon-not-a-real-path")):
+            lines, again, info = self.read(pos)
+        self.assertEqual((lines, info["read"], again), ([], "unreadable", pos))
+        self.assertNotIn("secret", json.dumps(info))
+
     def test_rotated_out_of_reach_resets(self):
         self.write("a\n")
         _, pos, _ = self.read(None)
@@ -1368,6 +1405,21 @@ class TestWarpDaemonLogInTheEngine(unittest.TestCase):
         self.assertEqual(obs.data["warp_daemon"]["read"], "unreadable")
         self.assertNotIn("secret", json.dumps(obs.data))
         self.assertIn("vpn", obs.data)
+
+    def test_an_unexpected_exception_drops_the_position_and_marks_a_reset(self):
+        """엔진은 예상 밖 예외 뒤 위치를 버리고 그 주기를 reset 으로 적는다 — 다음 주기는 처음 켬(끝에서 시작)이다."""
+        eng = self.engine()
+        self.observe(eng)
+        self.assertIn(enginemod_pos_key(), eng.state)
+
+        def boom(*a, **k):
+            raise RuntimeError("x")
+        obs = self.observe(eng, read=boom)
+        self.assertTrue(obs.data["warp_daemon"]["reset"])
+        self.assertNotIn(enginemod_pos_key(), eng.state)
+        self.append("a\n")
+        wd = self.observe(eng).data["warp_daemon"]
+        self.assertTrue(wd["reset"])                     # 처음 켬 — 끝에서 시작해 옛 줄을 읽지 않는다
 
     def test_the_reset_flag_reaches_the_sample(self):
         for flag in (True, False):
