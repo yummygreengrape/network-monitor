@@ -2567,7 +2567,10 @@ class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
         """조회로 잡힌 끊김: 10초 조회 disconnected(창에 Disconnected), 15초 조회 connected(창에 Connected)와 그 주기의 변화."""
         seq = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE), self.o(5, **self.BASE)]
         up = dict(self.BASE)
-        if kind != "DEFAULT_ROUTE_CHANGED":
+        if kind == "RESOLVER_CHANGED":
+            # VPN 이 올라오며 리졸버가 루프백 하나가 됨 — VPN 전환으로 설명되는 모양(dns.explained_by_vpn → vpn_change 귀속)
+            up.update(resolvers=("127.0.2.2",), via_loopback=True)
+        elif kind != "DEFAULT_ROUTE_CHANGED":
             up.update(self.CHANGES[kind])
         seq.append(self.o(10, [dl("07.493", "status", "Disconnected(InternalTunnelError)")], state="disconnected",
                           **self.BASE))
@@ -2599,7 +2602,7 @@ class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
             if f.attribution:
                 attributed.append(kind)
         # 귀속이 붙는 판정이 실제로 있어야 이 시험이 "귀속 보존" 을 본다(dns·route 두 판정기 모두)
-        for kind in ("DNS_LOCAL_PROXY_CHANGED", "DEFAULT_ROUTE_CHANGED", "ROUTES_OUTSIDE_TUNNEL"):
+        for kind in ("RESOLVER_CHANGED", "DNS_LOCAL_PROXY_CHANGED", "DEFAULT_ROUTE_CHANGED", "ROUTES_OUTSIDE_TUNNEL"):
             self.assertIn(kind, attributed)
 
     def test_a_gap_or_a_restart_cycle_keeps_the_finding_and_gets_the_transitions(self):
@@ -2675,6 +2678,45 @@ class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
         f = self.finding(self.run_seq(seq), "RESOLVER_CHANGED")
         self.assertEqual([x["text"] for x in f.evidence["daemon_transitions"]],
                          ["Disconnected(InternalTunnelError)", "Connected"])
+
+
+    # DEV-6 3회차 (검수 2회차 지적) ─────────────────────────────────────────
+    def change(self, sec, lines=(), kind="RESOLVER_CHANGED", n=1, **extra):
+        kw = dict(self.BASE)
+        kw.update(resolvers=("198.51.100.%d" % (50 + n),))
+        kw.update(extra)
+        return self.o(sec, lines, **kw)
+
+    def texts_at(self, res, i):
+        f = [f for f in res[i][1] if f.kind == "RESOLVER_CHANGED"][0]
+        return [x["text"] for x in f.evidence.get("daemon_transitions", [])]
+
+    def test_transitions_read_in_a_cycle_without_a_link_are_this_window_and_then_the_previous(self):
+        """링크가 끊긴 주기에 찍힌 끊김(넘어온 창)은 링크가 돌아온 판정 주기의 "이번 창" 이고, 그다음 판정 주기의 "직전 창" 이다(D1·D2)."""
+        drop = [dl("07.493", "status", "Disconnected(NoNetwork)"), dl("08.500", "status", "Connected")]
+        seq = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE), self.o(5, **self.BASE),
+               self.o(10, drop, link=False, **self.BASE), self.change(15, n=1), self.change(20, n=2), self.change(25, n=3)]
+        res = self.run_seq(seq)
+        want = ["Disconnected(NoNetwork)", "Connected"]
+        self.assertEqual(self.texts_at(res, 3), want)
+        self.assertEqual(self.texts_at(res, 4), want)
+        self.assertEqual(self.texts_at(res, 5), [])
+
+    def test_a_suppressed_cycle_keeps_and_passes_on_its_transitions(self):
+        """측정 공백·재시작 주기도 이번·직전 창의 전환을 붙이고(G·R), 그 주기의 전환을 다음 판정 주기에 넘긴다(L)."""
+        want = ["Disconnected(InternalTunnelError)", "Connected"]
+        base = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE), self.o(5, **self.BASE)]
+        # G: 공백 주기에 직전 창 전환
+        res = self.run_seq(base + [self.o(10, self.DROP, **self.BASE), self.change(100)])
+        self.assertEqual(self.texts_at(res, 3), want)
+        # R: 재시작 주기에 직전 창 전환(state.json 을 거친 것처럼 이어진 상태)
+        res = self.run_seq(base + [self.o(10, self.DROP, **self.BASE), self.change(15, start=True)])
+        self.assertEqual(self.texts_at(res, 3), want)
+        # L: 공백 주기에 읽은 전환이 다음 판정 주기의 직전 창으로
+        late = [dl("37.493", "status", "Disconnected(InternalTunnelError)"),
+                dl("38.500", "status", "Connected")]
+        res = self.run_seq(base + [self.o(40, late, **self.BASE), self.change(45)])
+        self.assertEqual(self.texts_at(res, 3), want)
 
 
 def enginemod_replay(cfg, seq):
