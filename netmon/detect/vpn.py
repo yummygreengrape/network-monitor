@@ -457,11 +457,14 @@ TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def _protection_lost(name: str, now: Any, cur: Observation, prev: Optional[Observation],
-                     user: bool, extra: Optional[Dict[str, Any]] = None) -> List[Finding]:
+                     user: bool, extra: Optional[Dict[str, Any]] = None,
+                     severity: Optional[str] = None) -> List[Finding]:
     """공급자가 연결 상태를 벗어난 것을 보안 축에 남긴다. 조회 경로와 데몬 로그 경로가 같이 쓴다.
 
     등급은 이 네트워크의 암호화 방식으로 갈린다. 개인별 키(PER_USER)면 내지 않는다.
+    `severity` 를 주면 그 등급으로 낸다(데몬 로그 경로는 info — 사용자 결정 2026-09-27).
     """
+    forced = severity
     kind = _security_kind(cur, prev)
     if kind == wifi_security.PER_USER:
         return []
@@ -485,7 +488,7 @@ def _protection_lost(name: str, now: Any, cur: Observation, prev: Optional[Obser
     evidence.update(extra or {})
     return [Finding(
         axis=SECURITY, kind="VPN_PROTECTION_LOST",
-        confidence=CONFIRMED, severity=severity,
+        confidence=CONFIRMED, severity=severity if forced is None else forced,
         summary=_protection_summary(name, now, body),
         evidence=evidence,
         attribution="user_action" if user else None,
@@ -1093,6 +1096,9 @@ def _advance(ds: Dict[str, Any], lines: List[Dict[str, str]]
     closed: List[Dict[str, Any]] = []
     transitions: List[Dict[str, str]] = []
     for ln in lines:
+        if ln.get("kind") == "reset":
+            ds.update(_unknown_daemon_state())
+            continue
         name, was = ln["text"], ds["state"]
         if ln["kind"] != "status":
             if was is None or _is_connected(was):
@@ -1127,6 +1133,27 @@ def _advance(ds: Dict[str, Any], lines: List[Dict[str, str]]
     return closed, transitions
 
 
+# 넘어온 창(`warp_daemon_carry`)에서 연속성이 끊긴 자리를 표시한다. 판정 주기에 이 표지를 만나면
+# 상태를 "모름" 으로 되돌린다 — 표지 앞의 줄(닫힌 끊김 포함)은 잃지 않고, 앞뒤 줄이 한 끊김으로
+# 합쳐지지도 않는다.
+_RESET_MARK = {"kind": "reset"}
+
+
+def _carry_items(items: Any) -> List[Dict[str, str]]:
+    """넘어온 창의 항목: 저장된 줄과 reset 표지. 모양이 틀린 항목은 버리고 뒤쪽 상한까지만."""
+    if not isinstance(items, list):
+        return []
+    out = []
+    for x in items[-DAEMON_CARRY_MAX * 4:]:
+        if isinstance(x, dict) and x.get("kind") == "reset" and len(x) == 1:
+            out.append(dict(_RESET_MARK))
+        else:
+            ln = _daemon_line(x)
+            if ln is not None:
+                out.append(ln)
+    return out[-DAEMON_CARRY_MAX:]
+
+
 def _window_lines(obs: Observation) -> Optional[Dict[str, Any]]:
     wd = obs.data.get("warp_daemon")
     return wd if isinstance(wd, dict) else None
@@ -1135,6 +1162,15 @@ def _window_lines(obs: Observation) -> Optional[Dict[str, Any]]:
 def _polls(state: Dict[str, Any]) -> List[Any]:
     raw = state.get(DAEMON_POLLS_KEY)
     return list(raw[-DAEMON_POLLS_MAX:]) if isinstance(raw, list) else []
+
+
+def _add_poll(polls: List[Any], poll: Any) -> List[Any]:
+    """조회를 더한다. 상한을 넘으면 맨 앞에 None 을 둬 판정 조건이 참이 되지 않게 한다 — 잘라 낸
+    조회 가운데 비연결이 있었는지 모르기 때문이다."""
+    polls = polls + [poll]
+    if len(polls) > DAEMON_POLLS_MAX:
+        polls = [None] + polls[-(DAEMON_POLLS_MAX - 1):]
+    return polls
 
 
 def _poll_of(obs: Observation) -> Any:
@@ -1151,27 +1187,25 @@ def _forget_daemon(state: Dict[str, Any]) -> None:
 def carry_warp_daemon(state: Dict[str, Any], obs: Observation, gap: bool) -> Dict[str, Any]:
     """판정하지 않는 주기(주 인터페이스 없음)의 창을 다음 판정 주기로 넘긴다(SPEC AC-2).
 
-    줄은 `warp_daemon_carry` 에 모으고(상한 초과면 앞쪽을 버리고 상태를 "모름" 으로),
+    줄은 `warp_daemon_carry` 에 모은다. 연속성이 끊긴 주기(`reset`)면 그 자리에 reset 표지를 두고,
+    상한을 넘으면 앞쪽을 버리고 맨 앞에 reset 표지를 둔다(버린 사이의 전환을 모르므로 "모름").
     이 주기의 조회는 `warp_daemon_polls` 에, 측정 공백이었으면 `warp_daemon_carry_gap` 에 남긴다.
-    연속성이 끊긴 주기(`reset`)면 모아 둔 줄을 버리고 상태를 "모름" 으로 되돌린다.
     """
     wd = _window_lines(obs)
     if wd is None:
         _forget_daemon(state)
         return state
-    carry = _daemon_lines(state.get(DAEMON_CARRY_KEY), DAEMON_CARRY_MAX)
+    carry = _carry_items(state.get(DAEMON_CARRY_KEY))
     if wd.get("reset") is True:
-        carry = []
-        state[DAEMON_STATE_KEY] = _unknown_daemon_state()
+        carry.append(dict(_RESET_MARK))
     lines = wd.get("lines") if isinstance(wd.get("lines"), list) else []
     carry += [ln for ln in (_daemon_line(x) for x in lines) if ln is not None]
     if len(carry) > DAEMON_CARRY_MAX:
-        carry = carry[-DAEMON_CARRY_MAX:]
-        state[DAEMON_STATE_KEY] = _unknown_daemon_state()
+        carry = [dict(_RESET_MARK)] + carry[-(DAEMON_CARRY_MAX - 1):]
     state[DAEMON_CARRY_KEY] = carry
     if gap:
         state[DAEMON_CARRY_GAP_KEY] = True
-    state[DAEMON_POLLS_KEY] = (_polls(state) + [_poll_of(obs)])[-DAEMON_POLLS_MAX:]
+    state[DAEMON_POLLS_KEY] = _add_poll(_polls(state), _poll_of(obs))
     return state
 
 
@@ -1188,15 +1222,12 @@ def warp_daemon_window(state: Dict[str, Any], obs: Observation, suppress: bool) 
                 "open": [], "unused": [], "prev_unused": []}
     ds = _load_daemon_state(state)
     prev_unused = _daemon_lines(state.get(DAEMON_PREV_CLOSED_KEY), DAEMON_PREV_CLOSED_MAX)
-    closed, transitions = _advance(ds, _daemon_lines(state.get(DAEMON_CARRY_KEY), DAEMON_CARRY_MAX))
-    if wd.get("reset") is True:
-        ds = _unknown_daemon_state()
-    lines = wd.get("lines")
-    more_closed, more_trans = _advance(ds, [ln for ln in (_daemon_line(x) for x in lines) if ln]
-                                       if isinstance(lines, list) else [])
-    closed += more_closed
-    transitions += more_trans
-    polls = _polls(state) + [_poll_of(obs)]
+    lines = wd.get("lines") if isinstance(wd.get("lines"), list) else []
+    items = (_carry_items(state.get(DAEMON_CARRY_KEY))
+             + ([dict(_RESET_MARK)] if wd.get("reset") is True else [])
+             + [ln for ln in (_daemon_line(x) for x in lines) if ln])
+    closed, transitions = _advance(ds, items)
+    polls = _add_poll(_polls(state), _poll_of(obs))
     eligible = (not suppress and state.get(DAEMON_CARRY_GAP_KEY) is not True
                 and len(polls) >= 2 and all(p == CONNECTED for p in polls))
     # 새 경로가 쓰지 않는 닫힌 끊김: 조건을 못 채운 창이면 전부, 채운 창이면 시작을 모르는 것.
@@ -1240,10 +1271,10 @@ def daemon_evidence_without_link(state: Dict[str, Any], obs: Observation) -> Dic
         return {"daemon_read": "absent", "daemon_lines": []}
     ds = _load_daemon_state(state)
     lines = wd.get("lines") if isinstance(wd.get("lines"), list) else []
-    carried = [] if wd.get("reset") is True else _daemon_lines(state.get(DAEMON_CARRY_KEY), DAEMON_CARRY_MAX)
-    if wd.get("reset") is True:
-        ds = _unknown_daemon_state()
-    closed, _ = _advance(ds, carried + [ln for ln in (_daemon_line(x) for x in lines) if ln])
+    items = (_carry_items(state.get(DAEMON_CARRY_KEY))
+             + ([dict(_RESET_MARK)] if wd.get("reset") is True else [])
+             + [ln for ln in (_daemon_line(x) for x in lines) if ln])
+    closed, _ = _advance(ds, items)
     out = [ln for d in closed for ln in d["lines"]]
     if not _is_connected(ds["state"]):
         out += ds["open_lines"]
@@ -1258,6 +1289,7 @@ class DaemonPath:
     `run_all` 은 예외가 난 판정기의 결과를 통째로 버리기 때문이다. 기능 스위치는 같다.
     """
     FEATURE = FEATURE
+    NAME = FEATURE + ".daemon"        # run_all 의 DETECTOR_ERROR 에 찍히는 이름(조회 경로 오류와 구분)
 
     @staticmethod
     def detect(prev: Optional[Observation], cur: Observation, ctx) -> List[Finding]:
@@ -1310,14 +1342,17 @@ def daemon_findings(cur: Observation, prev: Optional[Observation], ctx) -> List[
             continue
         first_state, last_state = _as_provider_state(down[0]), _as_provider_state(down[-1])
         reason = next((ln["text"] for ln in lines if ln["kind"] == "disconnect"), None)
-        down_s = max(0.0, (t1 - t0).total_seconds())
+        # 조회 경로와 같이 0.1초 단위(`_elapsed_seconds`). 밀리초 시각은 daemon_down_at·daemon_up_at 에 있다.
+        down_s = round(max(0.0, (t1 - t0).total_seconds()), 1)
         daemon = {"timing_source": "daemon", "daemon_down_at": since, "daemon_up_at": until,
                   "daemon_read": window.get("read"), "daemon_lines": [dict(ln) for ln in lines]}
         evidence = {"provider": name, "provider_state": first_state, "provider_reason": reason,
                     "attributions": list(ctx.attributions)}
         evidence.update(daemon)
+        # 세 판정 모두 info(사용자 결정 2026-09-27): 줄 맨 앞 위조를 막지 못하는 경로가 남아 있고
+        # 공격자 범위가 같은 네트워크의 다른 기기까지라, 위조의 영향을 알림 소음으로 줄인다.
         out.append(Finding(
-            axis=QUALITY, kind="VPN_DISCONNECTED", confidence=CONFIRMED, severity=MEDIUM,
+            axis=QUALITY, kind="VPN_DISCONNECTED", confidence=CONFIRMED, severity=INFO_SEV,
             summary=_down_between_polls_summary(name, first_state, down_s, down[0]),
             evidence=evidence,
             # 조회 경로는 같은 주기의 vpn_change 가 연 안정화 창 때문에 사실상 늘 귀속된다.
@@ -1325,7 +1360,7 @@ def daemon_findings(cur: Observation, prev: Optional[Observation], ctx) -> List[
             attribution=ctx.quality_attribution() or "vpn_change",
         ))
         out.extend(_protection_lost(name, first_state, cur, prev, False,
-                                    {"timing_source": "daemon"}))
+                                    {"timing_source": "daemon"}, severity=INFO_SEV))
         down_since = since[:19] + "Z"
         out.append(Finding(
             axis=QUALITY, kind="VPN_RECONNECTED", confidence=CONFIRMED, severity=INFO_SEV,

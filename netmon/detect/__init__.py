@@ -260,8 +260,8 @@ def run_all(prev: Optional[Observation], cur: Observation, ctx: Context) -> List
         except Exception as exc:  # 한 판정기의 버그가 나머지를 막지 않는다
             findings.append(Finding(
                 axis="info", kind="DETECTOR_ERROR", confidence="confirmed", severity="low",
-                summary=msg.DETECTOR_ERROR % (module.FEATURE, str(exc)[:120]),
-                evidence={"detector": module.FEATURE, "error": repr(exc)[:200]},
+                summary=msg.DETECTOR_ERROR % (getattr(module, "NAME", module.FEATURE), str(exc)[:120]),
+                evidence={"detector": getattr(module, "NAME", module.FEATURE), "error": repr(exc)[:200]},
             ))
     for f in findings:
         if f.network is None:

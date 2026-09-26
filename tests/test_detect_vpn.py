@@ -1785,7 +1785,7 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         self.assertEqual([f.kind for f in res[2][1] if f.kind.startswith("VPN_")],
                          ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
         d, p, r = [f for f in res[2][1] if f.kind.startswith("VPN_")]
-        self.assertEqual((d.severity, d.attribution), ("medium", "vpn_change"))
+        self.assertEqual((d.severity, d.attribution), ("info", "vpn_change"))
         self.assertEqual(d.evidence["provider_state"], "disconnected")
         self.assertEqual(d.evidence["provider_reason"], "runtime connection failure failure=Tunnel")
         self.assertEqual((d.evidence["daemon_down_at"], d.evidence["daemon_up_at"]),
@@ -1797,9 +1797,10 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
             self.assertNotIn(key, d.evidence)
         self.assertEqual(set(p.evidence), {"provider", "wifi_security", "security_kind",
                                            "passively_readable", "user_action", "timing_source"})
-        self.assertEqual((p.severity, p.attribution, p.evidence["user_action"]), ("medium", None, False))
+        self.assertEqual((p.severity, p.attribution, p.evidence["user_action"]), ("info", None, False))
+        self.assertEqual(r.severity, "info")
         self.assertEqual(r.evidence["down_since"], "2026-01-01T00:00:07Z")
-        self.assertAlmostEqual(r.evidence["down_seconds"], 1.511, places=3)
+        self.assertEqual(r.evidence["down_seconds"], 1.5)       # 조회 경로와 같이 0.1초 단위(밀리초는 daemon_*_at)
         self.assertEqual((r.evidence["unmeasured_seconds"], r.evidence["prev_state"]), (0.0, "connecting"))
         self.assertIsNone(r.attribution)
         self.assertEqual(d.summary, msg.VPN_DISCONNECTED_BETWEEN_POLLS
@@ -1810,8 +1811,8 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
                 dl("07.493", "status", "Disconnected(Manual)"), dl("09.004", "status", "Connected")]
         res = self.run_seq(self.start() + [self.o(10, drop)])
         d, p, r = [f for f in res[2][1] if f.kind.startswith("VPN_")]
-        self.assertEqual((d.severity, d.attribution), ("medium", "vpn_change"))
-        self.assertEqual((p.severity, p.attribution, p.evidence["user_action"]), ("medium", None, False))
+        self.assertEqual((d.severity, d.attribution), ("info", "vpn_change"))
+        self.assertEqual((p.severity, p.attribution, p.evidence["user_action"]), ("info", None, False))
 
     def test_the_daemon_path_opens_no_investigation(self):
         res = self.run_seq(self.start() + [self.o(10, self.DROP)] + [self.o(15 + 5 * i) for i in range(6)])
@@ -1838,8 +1839,8 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         second = [dl("11.000", "status", "Connecting(CheckingNetwork)"), dl("12.000", "status", "Connected")]
         res = self.run_seq(self.start() + [self.o(15, self.DROP + second)])
         self.assertEqual(self.daemon_kinds(res, 2), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"] * 2)
-        self.assertEqual([f.summary.split(" ")[1] for f in res[2][1] if f.kind == "VPN_DISCONNECTED"][1],
-                         (msg.VPN_RENEGOTIATING_BETWEEN_POLLS % ("warp", "x")).split(" ")[1])
+        second_d = [f for f in res[2][1] if f.kind == "VPN_DISCONNECTED"][1]
+        self.assertEqual(second_d.summary, msg.VPN_RENEGOTIATING_BETWEEN_POLLS % ("warp", msg.DUR_SECONDS % 1))
 
     def test_no_new_findings_on_a_gap_a_restart_an_unknown_state_or_a_carried_gap(self):
         cases = {
@@ -1945,8 +1946,14 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
                 for i in range(vpn_rules.DAEMON_CARRY_MAX + 10)]
         state = {}
         vpn_rules.carry_warp_daemon(state, self.o(10, many, link=False), gap=False)
-        self.assertEqual(len(state[vpn_rules.DAEMON_CARRY_KEY]), vpn_rules.DAEMON_CARRY_MAX)
-        self.assertIsNone(state[vpn_rules.DAEMON_STATE_KEY]["state"])
+        carry = state[vpn_rules.DAEMON_CARRY_KEY]
+        self.assertEqual(len(carry), vpn_rules.DAEMON_CARRY_MAX)
+        self.assertEqual(carry[0], {"kind": "reset"})          # 버린 사이의 전환을 모름 — 판정 주기에 "모름" 으로
+        state[vpn_rules.DAEMON_STATE_KEY] = {"state": "Connected", "pending": [], "open_since": None,
+                                             "open_lines": [], "open_dropped": 0}
+        vpn_rules.warp_daemon_window(state, self.o(15), suppress=False)
+        self.assertEqual(state[vpn_rules.DAEMON_STATE_KEY]["state"], "Connecting(P1)")
+        self.assertIsNone(state[vpn_rules.DAEMON_STATE_KEY]["open_since"])   # 시작을 모르는 끊김
 
     # ADV-7 ───────────────────────────────────────────────────────────────
     def test_a_clock_going_backwards_never_gives_a_negative_duration(self):
@@ -1959,6 +1966,75 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         res = self.run_seq(self.start() + [self.o(10, cause_after)])
         d = [f for f in res[2][1] if f.kind == "VPN_DISCONNECTED"][0]
         self.assertEqual(d.evidence["provider_reason"], "settings change")
+
+    DROP2 = [dl("21.490", "error", "TunnelError(SocketRecv(BrokenPipe))"),
+             dl("21.493", "status", "Disconnected(InternalTunnelError)"),
+             dl("23.004", "status", "Connected")]
+
+    def test_the_first_judged_cycle_after_a_restart_gives_nothing_even_with_a_saved_state(self):
+        """K-8: 저장된 상태(직전 조회 connected, 데몬 Connected)로 재시작해도 첫 판정 주기의 끊김은 새 판정이 없다."""
+        first = self.engine({}, judged=False)
+        self.judge_seq(first, self.start())
+        saved = json.loads(json.dumps(first.state))
+        second = self.engine(saved, judged=False)
+        out = self.judge_seq(second, [self.o(10, self.DROP), self.o(25, self.DROP2)])
+        self.assertEqual([f.kind for f in out[0] if f.evidence.get("timing_source")], [])
+        self.assertEqual([f.kind for f in out[1] if f.evidence.get("timing_source")],
+                         ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+
+    def test_a_carried_drop_is_judged_exactly_once(self):
+        res = self.run_seq(self.start() + [self.o(10, self.DROP, link=False), self.o(15), self.o(20), self.o(25)])
+        self.assertEqual([len(self.daemon_kinds(res, i)) for i in range(len(res))], [0, 0, 0, 3, 0, 0])
+
+    def test_a_short_drop_after_a_poll_caught_drop_is_judged(self):
+        res = self.run_seq(self.start() + [self.o(10, self.DROP[:3], state="disconnected"),
+                                           self.o(15, self.DROP[3:]), self.o(20), self.o(25, self.DROP2)])
+        self.assertEqual(self.daemon_kinds(res, 5), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+
+    def test_a_short_drop_after_a_carried_gap_is_judged_later(self):
+        res = self.run_seq(self.start() + [self.o(100, link=False), self.o(105), self.o(110, self.DROP2)])
+        self.assertEqual(self.daemon_kinds(res, 3), [])
+        self.assertEqual(self.daemon_kinds(res, 4), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+
+    def test_a_reset_in_a_cycle_without_a_link_does_not_join_lines_across_it(self):
+        res = self.run_seq(self.start() + [self.o(10, self.DROP[:3], link=False),
+                                           self.o(15, self.DROP[3:], link=False, reset=True), self.o(20)])
+        self.assertEqual([k for i in range(len(res)) for k in self.daemon_kinds(res, i)], [])
+
+    def test_a_drop_closed_before_a_reset_in_a_cycle_without_a_link_is_still_judged(self):
+        res = self.run_seq(self.start() + [self.o(10, self.DROP, link=False),
+                                           self.o(15, link=False, reset=True), self.o(20)])
+        self.assertEqual(self.daemon_kinds(res, 4), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+
+    def test_an_overflowing_poll_list_does_not_forget_a_disconnected_poll(self):
+        """조회 목록이 상한을 넘어도 직전 판정 주기의 비연결 조회를 잊지 않는다(넘치면 조건 불충족)."""
+        seq = self.start() + [self.o(10, self.DROP[:3], state="disconnected"),
+                              self.o(15, self.DROP[3:], link=False)]
+        seq += [self.o(20 + 5 * i, link=False) for i in range(vpn_rules.DAEMON_POLLS_MAX)]
+        seq += [self.o(20 + 5 * vpn_rules.DAEMON_POLLS_MAX)]
+        res = self.run_seq(seq)
+        self.assertEqual([k for i in range(len(res)) for k in self.daemon_kinds(res, i)], [])
+
+    def test_huge_broken_states_are_capped_in_an_eligible_window(self):
+        """ADV-6: 판정 조건을 채운 창에서, 모양이 맞는 거대한 대기·열린 줄이 와도 상한·시간을 지키고 오류가 없다."""
+        import time
+        line = dl("05.000", "disconnect", "x")
+        cases = [("Connected", "pending", self.DROP[2:3]),                       # 대기 줄이 전부 원인으로 붙는 순간
+                 ("Disconnected(X)", "open_lines", self.DROP[3:4])]               # 열린 끊김에 줄이 더해지는 순간
+        for state_name, key, window in cases:
+            st = {"state": state_name, "pending": [], "open_since": "2026-01-01T00:00:04.000Z",
+                  "open_lines": [], "open_dropped": 0}
+            st[key] = [dict(line)] * 20000
+            eng = self.engine(json.loads(json.dumps({"warp_daemon_state": st, "warp_daemon_polls": ["connected"]})),
+                              judged=True)
+            eng.prev = self.o(5)
+            start = time.time()
+            out = eng.judge(self.o(10, window), 5.0)          # 끊김이 열린 채로 끝남
+            self.assertLess(time.time() - start, 1.0, key)
+            st = eng.state[vpn_rules.DAEMON_STATE_KEY]
+            self.assertLessEqual(len(st["pending"]), vpn_rules.DAEMON_PENDING_MAX, key)
+            self.assertLessEqual(len(st["open_lines"]), vpn_rules.DAEMON_OPEN_MAX, key)
+            self.assertEqual([f for f in out if f.kind == "DETECTOR_ERROR"], [], key)
 
     # QA-10 ───────────────────────────────────────────────────────────────
     def test_the_same_samples_give_the_same_findings_after_a_round_trip(self):
@@ -1977,13 +2053,21 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         kinds = [f.kind for f in res[2][1]]
         self.assertIn("VPN_DISCONNECTED", kinds)
         self.assertIn("DETECTOR_ERROR", kinds)
+        err = [f for f in res[2][1] if f.kind == "DETECTOR_ERROR"][0]
+        self.assertEqual(err.evidence["detector"], "detect.vpn.daemon")
+        self.assertIn("detect.vpn.daemon", err.summary)
 
     def test_no_daemon_data_means_nothing_new_and_no_state(self):
         seq = self.start() + [self.o(10, self.DROP)]
+        eng = self.engine({}, judged=False)
+        self.judge_seq(eng, seq[:2])
+        self.assertTrue([k for k in eng.state if k.startswith("warp_daemon")])
         for o in seq:
             del o.data["warp_daemon"]
         res = self.run_seq(seq)
         self.assertEqual([k for i in range(len(res)) for k in self.daemon_kinds(res, i)], [])
+        self.judge_seq(eng, seq[2:])
+        self.assertEqual([k for k in eng.state if k.startswith("warp_daemon")], [])
 
 
 class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
