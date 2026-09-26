@@ -2535,6 +2535,51 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
         self.assertNotIn(msg.VPN_DAEMON_REASON.split("%")[0].strip(), d.summary)
 
 
+    # DEV-11 (DEV-5 2회차 검수 [낮음]) ──────────────────────────────────────
+    def test_the_names_read_from_the_binary_are_quoted_too(self):
+        """고정 목록 가운데 바이너리에서 끊어 읽은 세 이름도 인용한다(보존본에서 본 넷은 위 시험이 본다)."""
+        for state_name, quoted in (("Disconnected(ProxyAddressBound)", "ProxyAddressBound"),
+                                   ("Unable(TLSInterceptionBlockingDOH)", "TLSInterceptionBlockingDOH"),
+                                   ("Unable(Port53Bound)", "Port53Bound")):
+            drop = [dl("07.493", "status", state_name), dl("09.004", "status", "Connected")]
+            d = [f for f in self.run_seq(self.start() + [self.o(10, drop)])[2][1] if f.kind == "VPN_DISCONNECTED"][0]
+            self.assertTrue(d.summary.endswith(" " + msg.VPN_DAEMON_REASON % quoted), (state_name, d.summary))
+
+    def test_a_recovery_does_not_get_the_lines_of_a_drop_that_just_opened(self):
+        """복구 증거("up")는 닫힌 끊김의 줄만 — 조회가 연결을 본 뒤 새로 열린 끊김의 줄은 붙지 않는다."""
+        opened = dl("13.000", "status", "Disconnected(NoNetwork)")
+        res = self.run_seq(self.start() + [self.o(10, self.DROP[:3], state="disconnected"),
+                                           self.o(15, self.DROP[3:] + [opened])])
+        r = self.poll(res, 3, "VPN_RECONNECTED")[0]
+        texts = [x["text"] for x in r.evidence["daemon_lines"]]
+        self.assertIn("Disconnected(InternalTunnelError)", texts)
+        self.assertNotIn("Disconnected(NoNetwork)", texts)
+
+    def test_a_recovery_across_a_cycle_without_a_link_uses_the_recovery_evidence(self):
+        """링크 없는 사이의 복구 판정도 "up" 증거 — 같은 창에서 새로 열린 끊김의 줄은 붙지 않는다."""
+        drop_b = [dl("21.493", "status", "Disconnected(InternalTunnelError)")]
+        opened = dl("24.000", "status", "Disconnected(NoNetwork)")
+        res = self.run_seq(self.start() + [self.o(10), self.o(15),
+                                           self.o(20, drop_b, state="disconnected", link=False),
+                                           self.o(25, [dl("23.004", "status", "Connected"), opened])])
+        r = [f for f in res[5][1] if f.kind == "VPN_RECONNECTED" and f.evidence.get("link_absent")][0]
+        texts = [x["text"] for x in r.evidence["daemon_lines"]]
+        self.assertEqual(texts, ["Disconnected(InternalTunnelError)", "Connected"])
+
+    def test_a_broken_previous_closed_key_never_costs_a_poll_recovery(self):
+        """깨진 `warp_daemon_prev_closed` 가 조회 경로 복구 판정의 증거 계산에서 예외를 내지 않는다(ADV-6)."""
+        for bad in ([5], "abc", 5, {"x": 1}, [None, [1, 2], {"ts": "x"}],
+                    [{"ts": "2026-01-01T00:00:01.000Z", "kind": "status", "text": "x" * 10 ** 6}]):
+            eng = self.engine({})
+            self.judge_seq(eng, self.start() + [self.o(10, self.DROP[:3], state="disconnected")])
+            eng.state[vpn_rules.DAEMON_PREV_CLOSED_KEY] = bad
+            out = eng.judge(self.o(15, self.DROP[3:]), 5.0)
+            self.assertEqual([f for f in out if f.kind == "DETECTOR_ERROR"], [], repr(bad)[:40])
+            r = [f for f in out if f.kind == "VPN_RECONNECTED"]
+            self.assertEqual(len(r), 1, repr(bad)[:40])
+            self.assertIsInstance(r[0].evidence["daemon_lines"], list)
+
+
 class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
     """이번 또는 직전 창의 WARP 연결↔비연결 전환이 리졸버·로컬 프록시·기본 경로·터널 밖 경로 판정의 증거로 붙는다.
     등급·귀속은 그대로다 (DEV-6 — QA-8)."""
