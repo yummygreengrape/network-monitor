@@ -2757,11 +2757,27 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
         self.assertEqual(d.evidence["daemon_lines_dropped"], 13)
         self.assertEqual(len(d.evidence["daemon_lines"]), 21)
 
+    def test_the_documented_caps_are_forty_and_twenty(self):
+        """문서(docs/detections.md)가 적은 상한 값 — 조회 경로 `daemon_lines` 뒤쪽 40줄, 창당 전환 뒤쪽 20줄(DEV-12 2회차 검수 [낮음]:
+        다른 시험은 상수를 이름으로만 읽어 40→30 같은 변경에도 통과했다)."""
+        self.assertEqual((vpn_rules.DAEMON_EVIDENCE_MAX, vpn_rules.DAEMON_TRANSITIONS_MAX), (40, 20))
+        res = self.run_seq(self.start() + [self.o(10, self.many_drops(30) + self.DROP[:3], state="disconnected")])
+        d = self.poll(res, 2, "VPN_DISCONNECTED")[0]
+        self.assertEqual((len(d.evidence["daemon_lines"]), d.evidence["daemon_lines_dropped"]), (40, 23))
+
+    def test_no_count_key_stays_in_the_state_when_nothing_was_dropped(self):
+        """K-6 "버린 것이 없으면 키가 없다" 는 상태 파일에도 해당한다(DEV-12 2회차 검수 [정보]: 0 값 키를 남기는 변이가 살아남았다)."""
+        eng = self.engine({})
+        self.judge_seq(eng, self.start() + [self.o(10, self.DROP[:3], state="disconnected"), self.o(15, self.DROP[3:])])
+        self.assertNotIn(vpn_rules.DAEMON_PREV_CLOSED_DROPPED_KEY, eng.state)
+        self.assertNotIn(vpn_rules.DAEMON_PREV_TRANSITIONS_DROPPED_KEY, eng.state)
+
     def test_broken_dropped_counts_in_the_state_are_zero(self):
-        for bad in (-3, "7", 2.5, True, None, [1], 10 ** 12):
+        for bad in (-3, "7", 2.5, True, None, [1], 10 ** 12, {}, float("nan")):
             eng = self.engine({})
             self.judge_seq(eng, self.start() + [self.o(10, self.DROP[:3], state="disconnected")])
             eng.state[vpn_rules.DAEMON_PREV_CLOSED_DROPPED_KEY] = bad
+            eng.state[vpn_rules.DAEMON_PREV_TRANSITIONS_DROPPED_KEY] = bad
             out = eng.judge(self.o(15, self.DROP[3:]), 5.0)
             self.assertEqual([f for f in out if f.kind == "DETECTOR_ERROR"], [], repr(bad))
             r = [f for f in out if f.kind == "VPN_RECONNECTED"][0]
@@ -2810,6 +2826,21 @@ class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
             self.assertEqual(len(f.evidence["daemon_transitions"]), 2, kind)
             f = self.finding(self.run_seq(self.seq_for(kind, change_at=20)), kind)
             self.assertNotIn("daemon_transitions", f.evidence, kind)
+
+    def test_a_broken_dropped_count_in_the_state_never_costs_the_finding(self):
+        """깨진 `warp_daemon_prev_transitions_dropped` 가 이 판정들에서 예외를 내지 않고 표시도 붙이지 않는다(DEV-12 2회차 검수 [정보]:
+        이 값의 검증 두 자리를 모두 뺀 변이가 전체 시험을 통과했다 — 이 값을 읽는 판정은 전환 증거를 붙이는 이 넷뿐이다)."""
+        for bad in (-3, "7", 2.5, True, None, [1], 10 ** 12, {}, float("nan")):
+            for kind in self.CHANGES:
+                seq = self.seq_for(kind, change_at=15)
+                eng = self.engine({})
+                self.judge_seq(eng, seq[:-1])
+                eng.state[vpn_rules.DAEMON_PREV_TRANSITIONS_DROPPED_KEY] = bad
+                out = eng.judge(seq[-1], 5.0)
+                self.assertEqual([f for f in out if f.kind == "DETECTOR_ERROR"], [], (kind, repr(bad)))
+                f = [f for f in out if f.kind == kind][0]
+                self.assertEqual(len(f.evidence["daemon_transitions"]), 2, (kind, repr(bad)))
+                self.assertNotIn("daemon_transitions_dropped", f.evidence, (kind, repr(bad)))
 
     def test_phase_changes_inside_an_open_drop_are_not_transitions(self):
         # 창 10 에서 끊김이 열리고(전환), 창 15 는 연결 단계만 바뀌고(전환 아님), 변화는 창 20 — 직전 창(15)에 전환 없음
