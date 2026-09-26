@@ -1920,6 +1920,12 @@ class TestWarpDaemonLinesInTheSample(unittest.TestCase):
         self.assertEqual([x["kind"] for x in wd["lines"]], ["status"])      # 끊긴 너머의 원인 줄을 붙이지 않는다
         self.assertEqual(self.eng.state[enginemod.WARP_DAEMON_POS_KEY]["held"], [])
 
+    def test_a_held_line_with_a_trailing_newline_in_its_time_is_not_published(self):
+        """DEV-13: 시각 검증이 끝 개행(`…000Z\\n`)을 받지 않는다 — 조작된 보류 줄이 표본에 개행째 실리지 않게."""
+        self.assertEqual(vpnmod.valid_held([{"ts": T0 + "\n", "kind": "error", "text": "x"}]), [])
+        self.assertEqual(vpnmod.valid_held([{"ts": T0, "kind": "error", "text": "x"}]),
+                         [{"ts": T0, "kind": "error", "text": "x"}])
+
     def test_only_the_first_read_of_a_process_is_marked(self):
         first = self.observe([daemon_status("Connected")]).data["warp_daemon"]
         second = self.observe([]).data["warp_daemon"]
@@ -2123,6 +2129,17 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         texts = [x["text"] for x in lines]
         self.assertEqual(texts[:3], [x["text"] for x in self.DROP[:3]])
         self.assertEqual(texts[-1], "Connected")
+
+    def test_a_state_or_line_time_with_a_trailing_newline_is_not_trusted(self):
+        """DEV-13: 상태 파일의 데몬 상태 이름·줄 시각이 끝 개행을 달고 있으면 믿지 않는다(`$` 는 끝 개행 앞에서도 맞는다)."""
+        st = vpn_rules._load_daemon_state({vpn_rules.DAEMON_STATE_KEY: {"state": "Connected\n", "pending": [],
+                                                                       "open_since": None, "open_lines": [],
+                                                                       "open_dropped": 0}})
+        self.assertIsNone(st["state"])
+        self.assertIsNone(vpn_rules._daemon_line({"ts": "2026-01-01T00:00:01.000Z\n", "kind": "status", "text": "x"}))
+        self.assertIsNone(vpn_rules._daemon_time("2026-01-01T00:00:01.000Z\n"))
+        # strptime 은 전각 숫자를 받는다 — 시각 모양은 ASCII 숫자로만(수집 쪽 정규식과 같게)
+        self.assertIsNone(vpn_rules._daemon_time("\uff12\uff10\uff12\uff16-01-01T00:00:01.000Z"))
 
     # ADV-6 (판정 쪽 키) ─────────────────────────────────────────────────────
     def test_broken_state_keys_restart_from_unknown_without_an_exception(self):

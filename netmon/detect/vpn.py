@@ -1010,7 +1010,8 @@ DAEMON_DROPS_MAX = 10
 # 원인 줄은 끊김 방송보다 0~5ms 앞선다(보존본 26건). 이보다 멀면 그 끊김의 원인으로 붙이지 않는다.
 DAEMON_PENDING_SECONDS = 10.0
 _DAEMON_KINDS = ("status", "disconnect", "error")
-_DAEMON_TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+# `\Z`(끝)로 묶는다 — `$` 는 끝 개행 앞에서도 맞아 상태 파일의 `…000Z\n` 을 받는다(작업 DEV-13).
+_DAEMON_TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\Z", re.ASCII)
 _DAEMON_TEXT_MAX = 300
 
 
@@ -1083,7 +1084,7 @@ def _load_daemon_state(state: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         return _unknown_daemon_state()
     name = raw.get("state")
-    if not isinstance(name, str) or not re.match(r"^[A-Za-z][A-Za-z0-9_()]{0,300}$", name):
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_()]{0,300}", name, re.ASCII):
         return _unknown_daemon_state()
     dropped = raw.get("open_dropped")
     ds = {"state": name,

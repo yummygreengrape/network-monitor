@@ -530,7 +530,8 @@ def scrub_daemon_text(text: str) -> str:
 
 # 수집 쪽 보류 줄 상한(TODO K-1 — 판정 쪽 대기 줄 상한과 같은 수).
 WARP_DAEMON_HELD_MAX = 20
-_HELD_TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$", re.ASCII)
+# `\Z` — `$` 는 끝 개행 앞에서도 맞아 조작된 `…000Z\n` 이 표본에 실린다(작업 DEV-13).
+_HELD_TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\Z", re.ASCII)
 
 
 def _is_connected_name(name: Optional[str]) -> bool:
