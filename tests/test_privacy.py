@@ -425,6 +425,29 @@ class TestAddressesInsideFreeText(unittest.TestCase):
         t4 = redactmod.token(self.salt, "ipv4", "192.0.2.1")
         self.assertEqual(self.red({"reason": "x2001:db8::192.0.2.1"})["reason"], "x2001:db8::" + t4)
 
+    def test_an_invalid_ipv6_before_an_ipv4_still_masks_the_ipv4(self):
+        """IPv6 로 유효하지 않은 앞부분에 붙은 IPv4 는 옛 경로처럼 IPv4 만 가린다(DEV-10 2회차 — 새 가지가 통째로 원문을 남기던 후퇴)."""
+        t4 = redactmod.token(self.salt, "ipv4", "192.0.2.1")
+        t4b = redactmod.token(self.salt, "ipv4", "198.51.100.7")
+        for text, want in (("to :::192.0.2.1 x", "to :::%s x" % t4), ("to ::::::192.0.2.1 x", "to ::::::%s x" % t4),
+                           ("to 2001:db8:192.0.2.1 x", "to 2001:db8:%s x" % t4),
+                           ("to :2408::198.51.100.7 x", "to :2408::%s x" % t4b),
+                           ("to 2001::db8::192.0.2.1 x", "to 2001::db8::%s x" % t4),
+                           ("[2001:db8:192.0.2.1]:443", "[2001:db8:%s]:443" % t4)):
+            self.assertEqual(self.red({"reason": text})["reason"], want, text)
+
+    def test_more_shapes_of_an_embedded_ipv4(self):
+        """`::` 뒤 바로 IPv4, 여섯 그룹 + IPv4, 영역 표시, `::` 뒤 다섯 그룹 + IPv4, 대괄호 없는 포트."""
+        for v6, rest in (("::192.0.2.1", " x"), ("2001:db8:1:2:3:4:192.0.2.1", " x"), ("2001:db8::192.0.2.1%en0", " x"),
+                         ("::2001:db8:1:2:3:192.0.2.1", " x"), ("2001:db8::192.0.2.1", ":2408 x")):
+            t6 = redactmod.token(self.salt, "ipv6", v6)
+            self.assertEqual(self.red({"reason": "to " + v6 + rest})["reason"], "to " + t6 + rest, v6)
+
+    def test_an_embedded_ipv4_is_masked_when_only_ipv4_is_asked(self):
+        t4 = redactmod.token(self.salt, "ipv4", "192.0.2.1")
+        out = self.red({"reason": "to 2001:db8::192.0.2.1 x"}, kinds={"ipv4"})["reason"]
+        self.assertEqual(out, "to 2001:db8::%s x" % t4)
+
     def test_same_address_same_token_as_the_wrapped_value(self):
         d = {"reason": ENDPOINT_REASON, "tunnel_endpoint": ident("ipv4", ENDPOINT)}
         out = self.red(d)

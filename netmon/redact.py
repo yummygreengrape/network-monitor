@@ -68,13 +68,15 @@ LINE_LIST_KEYS = frozenset(("lines", "daemon_lines", "daemon_transitions"))
 # 이 경계 때문에 앞뒤가 영숫자·점(IPv6 은 콜론까지)으로 이어진 주소(`ip192.0.2.1`,
 # `host.192.0.2.1`, `addr:2001:db8::7`)는 못 가린다. ipaddress 가 거부하는 모양(잘린 조각,
 # 0으로 시작하는 옥텟, 포트가 콜론으로 붙은 8그룹 IPv6)도 그대로 남는다(README "개인정보").
-# IPv4 를 품은 IPv6 표기(`2001:db8::192.0.2.1`, `::ffff:192.0.2.1`)는 IPv6 갈래의 앞 가지가 통째로 잡는다 —
-# 없으면 뒤의 IPv4 만 가려 IPv6 앞부분이 남는다(작업 2026-09-23-warp-daemon-log DEV-10).
+# IPv4 를 품은 IPv6 표기(`2001:db8::192.0.2.1`, `::ffff:192.0.2.1`)는 따로 갈래(`v6e`)로 통째로 잡는다 — 없으면 뒤의 IPv4 만
+# 가려 IPv6 앞부분이 남는다. 이 갈래는 뒤에 `:<숫자>`(포트)가 와도 된다. 후보가 IPv6 로 유효하지 않거나(`:::192.0.2.1`)
+# IPv6 을 가리지 않는 종류 필터면 뒤의 IPv4 만 옛 경로처럼 가린다(작업 2026-09-23-warp-daemon-log DEV-10).
 _ADDR = re.compile(
     r"\[(?P<b6>[0-9A-Fa-f:.]+(?:%[\w.]+)?)\]"
     r"|(?<![0-9A-Za-z.])(?P<v4>\d{1,3}(?:\.\d{1,3}){3})(?![0-9A-Za-z]|\.\d)"
-    r"|(?<![0-9A-Za-z:.])(?P<v6>(?:[0-9A-Fa-f]{0,4}:){2,6}\d{1,3}(?:\.\d{1,3}){3}(?:%\w+)?"
-    r"|[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:%\w+)?)"
+    r"|(?<![0-9A-Za-z:.])(?P<v6e>(?:[0-9A-Fa-f]{0,4}:){2,7}(?P<v6e4>\d{1,3}(?:\.\d{1,3}){3})(?:%\w+)?)"
+    r"(?![0-9A-Za-z]|\.[0-9A-Za-z]|:(?!\d))"
+    r"|(?<![0-9A-Za-z:.])(?P<v6>[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:%\w+)?)"
     r"(?![0-9A-Za-z:]|\.[0-9A-Za-z])")
 
 
@@ -101,6 +103,19 @@ def replace_addresses(text: str, fn: Callable[[str, str], Optional[str]]) -> str
     내보낼 때의 가림(`redact_text`)과 WARP 데몬 줄 도려내기(netmon/vpn)가 같은 판별을 쓴다.
     """
     def one(m: "re.Match[str]") -> str:
+        if m.group("v6e"):
+            value = m.group("v6e")
+            kind = _address_kind(value)
+            rep = fn(kind, value) if kind == "ipv6" else None
+            if rep is not None:
+                return rep
+            # IPv6 로 유효하지 않거나 IPv6 을 가리지 않으면 뒤의 IPv4 만 — 이 갈래가 없던 때와 같다.
+            v4 = m.group("v6e4")
+            rep4 = fn("ipv4", v4) if _address_kind(v4) == "ipv4" else None
+            if rep4 is None:
+                return m.group(0)
+            a, b = m.start("v6e4") - m.start(), m.end("v6e4") - m.start()
+            return m.group(0)[:a] + rep4 + m.group(0)[b:]
         value = m.group("b6") or m.group("v4") or m.group("v6")
         kind = _address_kind(value)
         if kind is None and m.group("b6"):
