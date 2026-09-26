@@ -448,6 +448,26 @@ class TestAddressesInsideFreeText(unittest.TestCase):
         out = self.red({"reason": "to 2001:db8::192.0.2.1 x"}, kinds={"ipv4"})["reason"]
         self.assertEqual(out, "to 2001:db8::%s x" % t4)
 
+    def test_a_non_ascii_digit_next_to_an_address_does_not_unmask_it(self):
+        """DEV-10 3회차: 주소 옆의 비ASCII 숫자(전각·아랍-인도)가 가림을 무너뜨리지 않는다 — 주소 정규식은 ASCII 숫자만 숫자로 본다."""
+        for text, gone in (("to 2001:db8::\uff1192.0.2.1 x", ("2001:db8",)),
+                           ("to ::ffff:192.0.2.1\uff11.\uff11 x", ("192.0.2.1",)),
+                           ("to :::203.0.113.9\u0663.\u0663 x", ("203.0.113.9",)),
+                           ("to 192.0.2.1\uff11 x", ("192.0.2.1",))):
+            out = self.red({"reason": text})["reason"]
+            for g in gone:
+                self.assertNotIn(g, out, text)
+
+    def test_the_edges_of_the_embedded_ipv4_branch(self):
+        """DEV-10 3회차: 뒤 콜론은 막지 않음, 앞 점 뒤에서 시작하지 않음, 뒤 IPv4 가 주소가 아니면 되돌림도 가리지 않음, 되돌림은 뒤 글을 지키지 않음."""
+        t4 = redactmod.token(self.salt, "ipv4", "192.0.2.1")
+        t6 = redactmod.token(self.salt, "ipv6", "2001:db8::192.0.2.1")
+        for text, want in (("to 2001:db8::192.0.2.1: refused", "to %s: refused" % t6),
+                           ("a.b::192.0.2.1 x", "a.b::%s x" % t4),
+                           ("to 2001:db8::999.0.2.1 x", "to 2001:db8::999.0.2.1 x"),
+                           ("to 2001:db8:192.0.2.1%en0 x", "to 2001:db8:%s%%en0 x" % t4)):
+            self.assertEqual(self.red({"reason": text})["reason"], want, text)
+
     def test_same_address_same_token_as_the_wrapped_value(self):
         d = {"reason": ENDPOINT_REASON, "tunnel_endpoint": ident("ipv4", ENDPOINT)}
         out = self.red(d)
