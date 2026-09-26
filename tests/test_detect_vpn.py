@@ -1715,8 +1715,8 @@ class TestWarpDaemonLineParsing(unittest.TestCase):
         self.assertEqual(self.kinds([daemon_status("Connected{x}")]), [("status", "Connected")])
 
     def test_screen_control_characters_become_question_marks(self):
-        for ch in ("\x7f", "\x80", "\x9b", "\x9f", "\u2028", "\u2029", "\u200b", "\u200e", "\u200f",
-                   "\u202a", "\u202e", "\u2066", "\u2069", "\ufeff"):
+        for ch in ("\x00", "\x1b", "\x7f", "\x80", "\x9b", "\x9f", "\u2028", "\u2029", "\u200b", "\u200e", "\u200f",
+                   "\u202a", "\u202e", "\u2066", "\u2069", "\ufeff", "\u00ad", "\u061c", "\u2060", "\U000e0041"):
             self.assertEqual(self.cause(daemon_error("a" + ch + "b")), "a?b", repr(ch))
         for ch in ("\u00a0", "\u00e9", "\u4e00", "\u2030"):          # 제어 문자가 아닌 것은 그대로
             self.assertEqual(self.cause(daemon_error("a" + ch + "b")), "a" + ch + "b", repr(ch))

@@ -14,6 +14,7 @@ import os
 import ipaddress
 import re
 import time
+import unicodedata
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -483,8 +484,13 @@ WARP_STATUS_DEPTH = 4
 WARP_DAEMON_TEXT_CAP = 300
 _ADDR_PORT = re.compile(r"(<addr>\]?):\d{1,5}(?!\d)")
 _HEX_LONG = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16,}(?![0-9A-Fa-f])")
-# 화면·로그를 조작할 수 있는 문자: C0·DEL·C1 제어 문자, 줄·문단 구분자, 너비 없는 문자와 양방향 제어, BOM.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]")
+# 화면·로그를 조작할 수 있는 문자: 유니코드 범주 Cc(제어 — C0·DEL·C1), Cf(서식 — 양방향 제어·너비 없는 문자·BOM·
+# 태그 문자 등), Zl·Zp(줄·문단 구분자). 범주는 파이썬에 딸린 유니코드 문자 데이터베이스(`unicodedata`)를 따른다.
+_SCREEN_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
+
+
+def _mask_controls(text: str) -> str:
+    return "".join("?" if unicodedata.category(c) in _SCREEN_CATEGORIES else c for c in text)
 
 
 def warp_status_name(rest: str) -> Optional[str]:
@@ -513,12 +519,12 @@ def warp_status_name(rest: str) -> Optional[str]:
 
 
 def scrub_daemon_text(text: str) -> str:
-    """분류·오류 줄 꼬리에서 IPv4·IPv6 주소(포트 포함)·16자 이상 16진 값·제어 문자(`_CONTROL`)를 도려내고 줄인다."""
+    """분류·오류 줄 꼬리에서 IPv4·IPv6 주소(포트 포함)·16자 이상 16진 값을 도려내고 줄인 뒤 조작 문자(`_mask_controls`)를 `?` 로."""
     t = replace_addresses(text, lambda kind, value: "<addr>")
     t = _ADDR_PORT.sub(r"\1", t)
     t = _HEX_LONG.sub("<hex>", t)
-    t = _CONTROL.sub("?", t)
-    return t[:WARP_DAEMON_TEXT_CAP]
+    # 조작 문자 치환은 한 글자를 한 글자로 바꾸므로 자른 뒤에 해도 결과가 같다(글자마다 범주를 보는 값을 300자로 묶는다).
+    return _mask_controls(t[:WARP_DAEMON_TEXT_CAP])
 
 
 # 수집 쪽 보류 줄 상한(TODO K-1 — 판정 쪽 대기 줄 상한과 같은 수).
