@@ -2580,6 +2580,72 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
             self.assertIsInstance(r[0].evidence["daemon_lines"], list)
 
 
+    # DEV-12 잘림 표시와 조회 경로 상한 ────────────────────────────────────────
+    def many_drops(self, n, start=5):
+        out = []
+        for i in range(n):
+            out += [dl("%02d.%03d" % (start, i * 20), "status", "Disconnected(X)"),
+                    dl("%02d.%03d" % (start, i * 20 + 10), "status", "Connected")]
+        return out
+
+    def test_a_poll_finding_keeps_the_last_lines_and_counts_the_rest(self):
+        drops = self.many_drops(30)                                            # 닫힌 끊김 30건 = 60줄
+        res = self.run_seq(self.start() + [self.o(10, drops + self.DROP[:3], state="disconnected")])
+        d = self.poll(res, 2, "VPN_DISCONNECTED")[0]
+        self.assertEqual(len(d.evidence["daemon_lines"]), vpn_rules.DAEMON_EVIDENCE_MAX)
+        self.assertEqual(d.evidence["daemon_lines_dropped"], 63 - vpn_rules.DAEMON_EVIDENCE_MAX)
+        self.assertEqual(d.evidence["daemon_lines"][-1]["text"], "Disconnected(InternalTunnelError)")   # 열린 끊김이 남는다
+        small = self.poll(self.run_seq(self.start() + [self.o(10, self.DROP[:3], state="disconnected")]), 2,
+                          "VPN_DISCONNECTED")[0]
+        self.assertNotIn("daemon_lines_dropped", small.evidence)
+
+    def test_a_long_drop_counts_the_lines_its_own_cap_dropped(self):
+        phases = [dl("08.%03d" % i, "status", "Connecting(Phase%d)" % (i % 2)) for i in range(40)]
+        drop = self.DROP[:3] + phases + [dl("09.004", "status", "Connected")]
+        res = self.run_seq(self.start() + [self.o(10, drop)])                  # 새 경로
+        for f in res[2][1]:
+            if f.kind in ("VPN_DISCONNECTED", "VPN_RECONNECTED"):
+                self.assertEqual(f.evidence["daemon_lines_dropped"], len(drop) - vpn_rules.DAEMON_OPEN_MAX, f.kind)
+        res = self.run_seq(self.start() + [self.o(10, drop[:-1], state="disconnected"),   # 조회 경로(열린 끊김)
+                                           self.o(15, drop[-1:])])
+        d = self.poll(res, 2, "VPN_DISCONNECTED")[0]
+        r = self.poll(res, 3, "VPN_RECONNECTED")[0]
+        self.assertEqual(d.evidence["daemon_lines_dropped"], len(drop) - 1 - vpn_rules.DAEMON_OPEN_MAX)
+        self.assertEqual(r.evidence["daemon_lines_dropped"], len(drop) - vpn_rules.DAEMON_OPEN_MAX)
+        # 끊김이 조회 끊김 주기의 창에서 통째로 닫히고 복구 판정은 한 창 늦게 — 직전 창에서 버린 수도 이어진다
+        res = self.run_seq(self.start() + [self.o(10, drop, state="disconnected"), self.o(15)])
+        r = self.poll(res, 3, "VPN_RECONNECTED")[0]
+        self.assertEqual(len(r.evidence["daemon_lines"]), vpn_rules.DAEMON_OPEN_MAX)
+        self.assertEqual(r.evidence["daemon_lines_dropped"], len(drop) - vpn_rules.DAEMON_OPEN_MAX)
+        few = self.run_seq(self.start() + [self.o(10, self.DROP)])
+        for f in few[2][1]:
+            self.assertNotIn("daemon_lines_dropped", f.evidence, f.kind)
+
+    def test_a_cycle_without_a_link_counts_and_caps_its_lines(self):
+        from netmon.detect import vpn as rules
+        cur = self.o(10, self.many_drops(30) + self.DROP[:3], state="disconnected", link=False)
+        found, _ = rules.without_link(vpn_state("connected"), cur, {})
+        d = [f for f in found if f.kind == "VPN_DISCONNECTED"][0]
+        self.assertEqual(len(d.evidence["daemon_lines"]), vpn_rules.DAEMON_EVIDENCE_MAX)
+        self.assertEqual(d.evidence["daemon_lines_dropped"], 63 - vpn_rules.DAEMON_EVIDENCE_MAX)
+        phases = [dl("08.%03d" % i, "status", "Connecting(Phase%d)" % (i % 2)) for i in range(40)]
+        cur = self.o(10, self.DROP[:3] + phases, state="disconnected", link=False)       # 열린 긴 끊김 43줄
+        found, _ = rules.without_link(vpn_state("connected"), cur, {})
+        d = [f for f in found if f.kind == "VPN_DISCONNECTED"][0]
+        self.assertEqual(len(d.evidence["daemon_lines"]), vpn_rules.DAEMON_OPEN_MAX)
+        self.assertEqual(d.evidence["daemon_lines_dropped"], 43 - vpn_rules.DAEMON_OPEN_MAX)
+
+    def test_broken_dropped_counts_in_the_state_are_zero(self):
+        for bad in (-3, "7", 2.5, True, None, [1], 10 ** 12):
+            eng = self.engine({})
+            self.judge_seq(eng, self.start() + [self.o(10, self.DROP[:3], state="disconnected")])
+            eng.state[vpn_rules.DAEMON_PREV_CLOSED_DROPPED_KEY] = bad
+            out = eng.judge(self.o(15, self.DROP[3:]), 5.0)
+            self.assertEqual([f for f in out if f.kind == "DETECTOR_ERROR"], [], repr(bad))
+            r = [f for f in out if f.kind == "VPN_RECONNECTED"][0]
+            self.assertNotIn("daemon_lines_dropped", r.evidence, repr(bad))
+
+
 class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
     """이번 또는 직전 창의 WARP 연결↔비연결 전환이 리졸버·로컬 프록시·기본 경로·터널 밖 경로 판정의 증거로 붙는다.
     등급·귀속은 그대로다 (DEV-6 — QA-8)."""
@@ -2786,6 +2852,21 @@ class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
                 dl("38.500", "status", "Connected")]
         res = self.run_seq(base + [self.o(40, late, **self.BASE), self.change(45)])
         self.assertEqual(self.texts_at(res, 3), want)
+
+
+    def test_a_truncated_window_of_transitions_says_how_many_were_dropped(self):
+        lines = []
+        for i in range(30):
+            lines += [dl("05.%03d" % (i * 20), "status", "Disconnected(X)"), dl("05.%03d" % (i * 20 + 10), "status", "Connected")]
+        seq = self.seq_for("RESOLVER_CHANGED", change_at=10, lines=lines)
+        seq.append(self.change(15, n=4))                                       # 다음 판정 주기 — 직전 창으로
+        res = self.run_seq(seq)
+        now = [f for f in res[-2][1] if f.kind == "RESOLVER_CHANGED"][0]
+        nxt = [f for f in res[-1][1] if f.kind == "RESOLVER_CHANGED"][0]
+        self.assertEqual(now.evidence["daemon_transitions_dropped"], 60 - vpn_rules.DAEMON_TRANSITIONS_MAX)
+        self.assertEqual(nxt.evidence["daemon_transitions_dropped"], 60 - vpn_rules.DAEMON_TRANSITIONS_MAX)
+        few = self.finding(self.run_seq(self.seq_for("RESOLVER_CHANGED", change_at=10)), "RESOLVER_CHANGED")
+        self.assertNotIn("daemon_transitions_dropped", few.evidence)
 
 
 def enginemod_replay(cfg, seq):

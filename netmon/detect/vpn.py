@@ -992,6 +992,12 @@ DAEMON_PREV_CLOSED_MAX = 40
 # 직전 판정 창의 연결↔비연결 전환 방송 줄(TODO K-2). 리졸버·경로 판정이 "이번 또는 직전 창" 을 본다.
 DAEMON_PREV_TRANSITIONS_KEY = "warp_daemon_prev_transitions"
 DAEMON_TRANSITIONS_MAX = 20
+# 직전 창의 두 목록이 상한으로 버린 줄 수(TODO DEV-12 — 잘린 목록을 전부로 읽지 않게). 버린 것이 없으면 키가 없다.
+DAEMON_PREV_CLOSED_DROPPED_KEY = "warp_daemon_prev_closed_dropped"
+DAEMON_PREV_TRANSITIONS_DROPPED_KEY = "warp_daemon_prev_transitions_dropped"
+# 조회 경로 판정의 `daemon_lines` 상한(`warp_daemon_prev_closed` 와 같은 수). 뒤쪽을 남긴다 — 끊김 판정에는 지금 열린
+# 끊김이, 복구 판정에는 방금 닫힌 끊김이 뒤에 있다.
+DAEMON_EVIDENCE_MAX = 40
 # 링크 없는 주기에서 넘어온 창의 줄 수 상한. 넘으면 앞쪽을 버리고 상태를 "모름" 으로.
 DAEMON_CARRY_MAX = 200
 # 끊김 하나에 모으는 줄 수 상한(보존본 끊김 15건의 저장 대상 10~23줄). 대기 줄도 같은 수로 묶는다.
@@ -1035,6 +1041,20 @@ def _daemon_lines(items: Any, cap: int) -> List[Dict[str, str]]:
         return []
     out = [ln for ln in (_daemon_line(x) for x in items[-cap * 4:]) if ln is not None]
     return out[-cap:]
+
+
+def _count(value: Any) -> int:
+    """상태·창에서 읽은 버린 줄 수. 정수가 아니거나 범위 밖이면 0."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 10 ** 9 else 0
+
+
+def _capped_evidence(read: Any, lines: List[Dict[str, str]], dropped: int) -> Dict[str, Any]:
+    """조회 경로 판정의 데몬 증거: 뒤쪽 `DAEMON_EVIDENCE_MAX` 줄과, 버린 줄이 있으면 그 수."""
+    dropped += max(0, len(lines) - DAEMON_EVIDENCE_MAX)
+    out: Dict[str, Any] = {"daemon_read": read, "daemon_lines": [dict(ln) for ln in lines[-DAEMON_EVIDENCE_MAX:]]}
+    if dropped:
+        out["daemon_lines_dropped"] = dropped
+    return out
 
 
 def _is_connected(name: Any) -> bool:
@@ -1187,7 +1207,8 @@ def _poll_of(obs: Observation) -> Any:
 
 def _forget_daemon(state: Dict[str, Any]) -> None:
     for key in (DAEMON_STATE_KEY, DAEMON_CARRY_KEY, DAEMON_CARRY_GAP_KEY, DAEMON_POLLS_KEY,
-                DAEMON_PREV_CLOSED_KEY, DAEMON_PREV_TRANSITIONS_KEY):
+                DAEMON_PREV_CLOSED_KEY, DAEMON_PREV_TRANSITIONS_KEY,
+                DAEMON_PREV_CLOSED_DROPPED_KEY, DAEMON_PREV_TRANSITIONS_DROPPED_KEY):
         state.pop(key, None)
 
 
@@ -1231,6 +1252,8 @@ def warp_daemon_window(state: Dict[str, Any], obs: Observation, suppress: bool) 
         _forget_daemon(state)
         return {"read": "absent", "eligible": False, "closed": [], "not_judged": 0, "transitions": [],
                 "prev_transitions": [], "open": [], "unused": [], "prev_unused": []}
+    prev_transitions_dropped = _count(state.get(DAEMON_PREV_TRANSITIONS_DROPPED_KEY))
+    prev_unused_dropped = _count(state.get(DAEMON_PREV_CLOSED_DROPPED_KEY))
     suppress = suppress or wd.get("process_start") is True
     ds = _load_daemon_state(state)
     prev_transitions = _daemon_lines(state.get(DAEMON_PREV_TRANSITIONS_KEY), DAEMON_TRANSITIONS_MAX)
@@ -1258,14 +1281,23 @@ def warp_daemon_window(state: Dict[str, Any], obs: Observation, suppress: bool) 
         d["judge"] = True
     # 새 경로가 쓰지 않는 닫힌 끊김(조건 불충족·시작 모름·상한 초과)은 조회 경로 판정의 증거로 간다.
     unused = [ln for d in closed if not d.get("judge") for ln in d["lines"]]
+    unused_dropped = sum(_count(d.get("dropped")) for d in closed if not d.get("judge"))
+    transitions_dropped = max(0, len(transitions) - DAEMON_TRANSITIONS_MAX)
     state[DAEMON_STATE_KEY] = ds
     state[DAEMON_POLLS_KEY] = [_poll_of(obs)]
     # 다음 판정 주기로 넘기는 것은 이번 조회가 연결이 아닐 때뿐이다 — 조회 경로의 복구 판정이 한 창
     # 늦게 오는 경우는 그때뿐이고, 이번 조회가 연결이면 그 끊김은 이번 주기에 붙었거나(복구 판정) 어느
     # 판정에도 속하지 않는다(K-3 "없으면 표본에만"). 넘기면 다음 복구 판정에 다른 끊김의 줄이 붙는다.
-    state[DAEMON_PREV_CLOSED_KEY] = (unused[-DAEMON_PREV_CLOSED_MAX:]
-                                     if _poll_of(obs) != CONNECTED else [])
+    carried_closed = _poll_of(obs) != CONNECTED
+    state[DAEMON_PREV_CLOSED_KEY] = unused[-DAEMON_PREV_CLOSED_MAX:] if carried_closed else []
+    closed_dropped = (unused_dropped + max(0, len(unused) - DAEMON_PREV_CLOSED_MAX)) if carried_closed else 0
     state[DAEMON_PREV_TRANSITIONS_KEY] = transitions[-DAEMON_TRANSITIONS_MAX:]
+    for key, value in ((DAEMON_PREV_CLOSED_DROPPED_KEY, closed_dropped),
+                       (DAEMON_PREV_TRANSITIONS_DROPPED_KEY, transitions_dropped)):
+        if value:
+            state[key] = value
+        else:
+            state.pop(key, None)
     state.pop(DAEMON_CARRY_KEY, None)
     state.pop(DAEMON_CARRY_GAP_KEY, None)
     read = wd.get("read") if wd.get("read") in ("ok", "missing", "unreadable") else "unreadable"
@@ -1273,7 +1305,11 @@ def warp_daemon_window(state: Dict[str, Any], obs: Observation, suppress: bool) 
             "not_judged": max(0, len(candidates) - DAEMON_DROPS_MAX),
             "transitions": transitions[-DAEMON_TRANSITIONS_MAX:], "prev_transitions": prev_transitions,
             "open": [dict(ln) for ln in ds["open_lines"]] if not _is_connected(ds["state"]) else [],
-            "unused": unused, "prev_unused": prev_unused}
+            "unused": unused, "prev_unused": prev_unused,
+            # 상한으로 버린 줄 수(DEV-12). 판정 증거의 `daemon_lines_dropped`·`daemon_transitions_dropped` 가 된다.
+            "transitions_dropped": transitions_dropped, "prev_transitions_dropped": prev_transitions_dropped,
+            "open_dropped": ds["open_dropped"] if not _is_connected(ds["state"]) else 0,
+            "unused_dropped": unused_dropped, "prev_unused_dropped": prev_unused_dropped}
 
 
 def daemon_transitions(ctx) -> List[Dict[str, str]]:
@@ -1293,6 +1329,14 @@ def daemon_transitions(ctx) -> List[Dict[str, str]]:
     return out
 
 
+def daemon_transitions_dropped(ctx) -> int:
+    """`daemon_transitions` 가 창당 상한으로 버린 전환 줄 수(이번·직전 창). 없으면 0(TODO DEV-12)."""
+    window = getattr(ctx, "warp_daemon", None)
+    if not isinstance(window, dict):
+        return 0
+    return _count(window.get("prev_transitions_dropped")) + _count(window.get("transitions_dropped"))
+
+
 def daemon_evidence(ctx, kind: str) -> Dict[str, Any]:
     """조회 경로의 WARP 끊김·복구 판정에 붙일 데몬 로그 증거(SPEC AC-7, TODO K-6).
 
@@ -1305,9 +1349,11 @@ def daemon_evidence(ctx, kind: str) -> Dict[str, Any]:
         return {"daemon_read": "absent", "daemon_lines": []}
     if kind == "down":
         lines = list(window.get("unused") or []) + list(window.get("open") or [])
+        dropped = _count(window.get("unused_dropped")) + _count(window.get("open_dropped"))
     else:
         lines = list(window.get("prev_unused") or []) + list(window.get("unused") or [])
-    return {"daemon_read": window.get("read", "absent"), "daemon_lines": [dict(ln) for ln in lines]}
+        dropped = _count(window.get("prev_unused_dropped")) + _count(window.get("unused_dropped"))
+    return _capped_evidence(window.get("read", "absent"), lines, dropped)
 
 
 def daemon_evidence_without_link(state: Dict[str, Any], obs: Observation) -> Dict[str, Any]:
@@ -1326,10 +1372,12 @@ def daemon_evidence_without_link(state: Dict[str, Any], obs: Observation) -> Dic
              + [ln for ln in (_daemon_line(x) for x in lines) if ln])
     closed, _ = _advance(ds, items)
     out = [ln for d in closed for ln in d["lines"]]
+    dropped = sum(_count(d.get("dropped")) for d in closed)
     if not _is_connected(ds["state"]):
         out += ds["open_lines"]
+        dropped += _count(ds["open_dropped"])
     read = wd.get("read") if wd.get("read") in ("ok", "missing", "unreadable") else "unreadable"
-    return {"daemon_read": read, "daemon_lines": [dict(ln) for ln in out]}
+    return _capped_evidence(read, out, dropped)
 
 
 class DaemonPath:
@@ -1400,6 +1448,8 @@ def daemon_findings(cur: Observation, prev: Optional[Observation], ctx) -> List[
         down_s = round(span, 1) if span >= 0 else None
         daemon = {"timing_source": "daemon", "daemon_down_at": since, "daemon_up_at": until,
                   "daemon_read": window.get("read"), "daemon_lines": [dict(ln) for ln in lines]}
+        if _count(drop.get("dropped")):
+            daemon["daemon_lines_dropped"] = drop["dropped"]      # 끊김당 줄 상한으로 버린 줄 수(DEV-12)
         evidence = {"provider": name, "provider_state": first_state, "provider_reason": reason,
                     "attributions": list(ctx.attributions)}
         evidence.update(daemon)

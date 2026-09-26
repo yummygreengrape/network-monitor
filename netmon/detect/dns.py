@@ -11,7 +11,7 @@ from .. import messages as msg
 from ..model import (CONFIRMED, HIGH, INFO, MEDIUM, SECURITY, SUSPECT,
                      Finding, Observation, unwrap)
 from ..util import is_loopback
-from .vpn import daemon_transitions
+from .vpn import daemon_transitions, daemon_transitions_dropped
 
 FEATURE = "detect.dns"
 
@@ -27,6 +27,9 @@ def _with_transitions(ctx, evidence):
     trans = daemon_transitions(ctx)
     if trans:
         evidence["daemon_transitions"] = trans
+        dropped = daemon_transitions_dropped(ctx)
+        if dropped:
+            evidence["daemon_transitions_dropped"] = dropped      # 창당 상한으로 버린 전환 줄 수(DEV-12)
     return evidence
 
 def explained_by_vpn(prev: Optional[Observation], cur: Observation, ctx) -> bool:
