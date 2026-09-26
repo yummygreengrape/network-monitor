@@ -2155,6 +2155,22 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         self.assertEqual(texts[:3], [x["text"] for x in self.DROP[:3]])
         self.assertEqual(texts[-1], "Connected")
 
+    def test_the_per_drop_cap_drops_middle_states_of_any_kind_oldest_first(self):
+        """끊김당 20줄 상한(`_cap_open`): 첫·마지막 사이 상태 줄을 종류와 무관하게 오래된 것부터 버린다 — 보존본 01:56:12 긴 끊김에서
+        `Disconnected(Manual)` 이 먼저 버려진 모양. 그래도 넘치면 원인 줄을 오래된 것부터 버리되 첫·마지막 상태 줄은 남긴다
+        (DEV-7 (r2) 3회차 검수: 연결 단계 먼저·새 것부터 버리는 변이가 살아남았다, DEV-12 4회차 [범위 밖] C1~C3)."""
+        first, last = dl("01.000", "status", "Unable(NoNetwork)"), dl("02.000", "status", "Connecting(Z)")
+        mids = [dl("01.100", "status", "Disconnected(Manual)")] + [
+            dl("01.%03d" % (200 + i), "status", "Connecting(P%d)" % (i % 2)) for i in range(19)]
+        lines, dropped = vpn_rules._cap_open([first] + mids + [last], 0)            # 22줄
+        self.assertEqual((len(lines), dropped), (20, 2))
+        self.assertEqual([x["text"] for x in lines], [first["text"]] + [x["text"] for x in mids[2:]] + [last["text"]])
+        s0, s1 = dl("03.000", "status", "Disconnected(X)"), dl("03.100", "status", "Connecting(Y)")
+        causes = [dl("03.%03d" % (200 + i), "error", "e%d" % i) for i in range(20)]
+        lines, dropped = vpn_rules._cap_open([s0, s1] + causes, 3)                    # 가운데 상태 줄 없음 — 22줄
+        self.assertEqual((len(lines), dropped), (20, 5))
+        self.assertEqual([x["text"] for x in lines], [s0["text"], s1["text"]] + ["e%d" % i for i in range(2, 20)])
+
     def test_a_state_or_line_time_with_a_trailing_newline_is_not_trusted(self):
         """DEV-13: 상태 파일의 데몬 상태 이름·줄 시각이 끝 개행을 달고 있으면 믿지 않는다(`$` 는 끝 개행 앞에서도 맞는다)."""
         st = vpn_rules._load_daemon_state({vpn_rules.DAEMON_STATE_KEY: {"state": "Connected\n", "pending": [],

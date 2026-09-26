@@ -1003,7 +1003,7 @@ DAEMON_EVIDENCE_MAX = 40
 # 버린 줄과, 그 reset 이 지우는 직전 판정 주기의 열린 끊김 줄은 `daemon_lines_dropped`·`daemon_transitions_dropped` 에 세지 않는다
 # (버린 줄의 끊김·전환을 가리지 않고 reset 표지만 남긴다).
 DAEMON_CARRY_MAX = 200
-# 끊김 하나에 모으는 줄 수 상한(보존본 끊김 15건의 저장 대상 10~23줄). 대기 줄도 같은 수로 묶는다.
+# 끊김 하나에 모으는 줄 수 상한(보존본 끊김 15건에서 모은 줄 11~23줄 — 닫는 Connected 포함, 20줄을 넘는 것은 둘). 대기 줄도 같은 수로 묶는다.
 DAEMON_OPEN_MAX = 20
 DAEMON_PENDING_MAX = 20
 DAEMON_POLLS_MAX = 200
