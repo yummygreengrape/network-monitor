@@ -2654,6 +2654,60 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
         self.assertEqual(len(d.evidence["daemon_lines"]), vpn_rules.DAEMON_OPEN_MAX)
         self.assertEqual(d.evidence["daemon_lines_dropped"], 43 - vpn_rules.DAEMON_OPEN_MAX)
 
+    # DEV-12 2회차 (검수 1회차: 시험이 고정하지 않던 셈 규칙) ─────────────────────
+    def long_drop(self, start="11", n_phases=30, close=True):
+        """원인 줄 둘 + 연결 단계 n_phases + (닫으면) Connected — 끊김당 20줄 상한으로 줄을 버리는 끊김."""
+        lines = [dl(start + ".000", "error", "e"), dl(start + ".001", "status", "Disconnected(X)")]
+        lines += [dl("%s.%03d" % (start, 10 + i), "status", "Connecting(P%d)" % (i % 2)) for i in range(n_phases)]
+        if close:
+            lines.append(dl("%s.900" % start, "status", "Connected"))
+        return lines
+
+    def test_the_previous_window_overflow_of_forty_is_counted_on_a_late_recovery(self):
+        """직전 창 40줄 상한으로 넘기지 못한 줄도 센다(한 창 늦은 복구)."""
+        drops = self.many_drops(25)                                            # 닫힌 짧은 끊김 25건 = 50줄
+        res = self.run_seq(self.start() + [self.o(10, drops, state="disconnected"), self.o(15)])
+        r = self.poll(res, 3, "VPN_RECONNECTED")[0]
+        self.assertEqual(len(r.evidence["daemon_lines"]), vpn_rules.DAEMON_EVIDENCE_MAX)
+        self.assertEqual(r.evidence["daemon_lines_dropped"], 50 - vpn_rules.DAEMON_EVIDENCE_MAX)
+
+    def test_a_count_is_not_carried_when_the_lines_are_not(self):
+        """조회가 연결인 주기의 닫힌 끊김은 다음 주기로 넘기지 않는다 — 버린 수도 넘기지 않는다(과다 표시 방지)."""
+        seq = self.start() + [self.o(10, self.DROP[:3], state="disconnected"),
+                              self.o(15, self.DROP[3:] + self.long_drop("12")),            # 긴 끊김 B: 줄을 버림, 조회 연결
+                              self.o(20, [dl("17.000", "status", "Disconnected(NoNetwork)")], state="disconnected", link=False),
+                              self.o(25, [dl("22.000", "status", "Connected")])]
+        res = self.run_seq(seq)
+        r = [f for f in res[5][1] if f.kind == "VPN_RECONNECTED" and f.evidence.get("link_absent")][0]
+        self.assertEqual([x["text"] for x in r.evidence["daemon_lines"]], ["Disconnected(NoNetwork)", "Connected"])
+        self.assertNotIn("daemon_lines_dropped", r.evidence)
+
+    def test_forgetting_the_daemon_state_forgets_the_counts(self):
+        state = {vpn_rules.DAEMON_PREV_CLOSED_DROPPED_KEY: 7, vpn_rules.DAEMON_PREV_TRANSITIONS_DROPPED_KEY: 40}
+        ob = self.o(10)
+        del ob.data["warp_daemon"]
+        vpn_rules.warp_daemon_window(state, ob, suppress=False)
+        self.assertNotIn(vpn_rules.DAEMON_PREV_CLOSED_DROPPED_KEY, state)
+        self.assertNotIn(vpn_rules.DAEMON_PREV_TRANSITIONS_DROPPED_KEY, state)
+
+    def test_a_drop_finding_counts_the_closed_drops_of_its_window(self):
+        """끊김 판정(down) 증거는 그 창의 닫힌 긴 끊김이 버린 수와 열린 끊김이 버린 수를 더한다."""
+        closed = self.long_drop("06")                                          # 닫힘: 33줄 → 20줄, 13 버림
+        opened = self.long_drop("08", n_phases=25, close=False)                # 열림: 27줄 → 20줄, 7 버림
+        res = self.run_seq(self.start() + [self.o(10, closed + opened, state="disconnected")])
+        d = self.poll(res, 2, "VPN_DISCONNECTED")[0]
+        self.assertEqual(d.evidence["daemon_lines_dropped"], 13 + 7 + (40 - vpn_rules.DAEMON_EVIDENCE_MAX))
+        self.assertEqual(len(d.evidence["daemon_lines"]), vpn_rules.DAEMON_EVIDENCE_MAX)
+
+    def test_a_cycle_without_a_link_counts_the_closed_drops_too(self):
+        from netmon.detect import vpn as rules
+        cur = self.o(10, self.long_drop("06") + [dl("09.000", "status", "Disconnected(NoNetwork)")],
+                     state="disconnected", link=False)
+        found, _ = rules.without_link(vpn_state("connected"), cur, {})
+        d = [f for f in found if f.kind == "VPN_DISCONNECTED"][0]
+        self.assertEqual(d.evidence["daemon_lines_dropped"], 13)
+        self.assertEqual(len(d.evidence["daemon_lines"]), 21)
+
     def test_broken_dropped_counts_in_the_state_are_zero(self):
         for bad in (-3, "7", 2.5, True, None, [1], 10 ** 12):
             eng = self.engine({})
@@ -2872,6 +2926,27 @@ class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
         res = self.run_seq(base + [self.o(40, late, **self.BASE), self.change(45)])
         self.assertEqual(self.texts_at(res, 3), want)
 
+
+    def test_every_kind_says_how_many_transitions_were_dropped(self):
+        lines = []
+        for i in range(30):
+            lines += [dl("05.%03d" % (i * 20), "status", "Disconnected(X)"), dl("05.%03d" % (i * 20 + 10), "status", "Connected")]
+        for kind in self.CHANGES:
+            f = self.finding(self.run_seq(self.seq_for(kind, change_at=10, lines=lines)), kind)
+            self.assertEqual(f.evidence["daemon_transitions_dropped"], 60 - vpn_rules.DAEMON_TRANSITIONS_MAX, kind)
+
+    def test_transitions_carried_from_a_cycle_without_a_link_count_in_the_window(self):
+        carried = []
+        for i in range(15):
+            carried += [dl("07.%03d" % (i * 20), "status", "Disconnected(X)"), dl("07.%03d" % (i * 20 + 10), "status", "Connected")]
+        own = []
+        for i in range(5):
+            own += [dl("12.%03d" % (i * 20), "status", "Disconnected(Y)"), dl("12.%03d" % (i * 20 + 10), "status", "Connected")]
+        seq = [self.o(0, [dl("00.000", "status", "Connected")], **self.BASE), self.o(5, **self.BASE),
+               self.o(10, carried, link=False, **self.BASE), self.change(15, own, n=1)]
+        f = [f for f in self.run_seq(seq)[-1][1] if f.kind == "RESOLVER_CHANGED"][0]
+        self.assertEqual(len(f.evidence["daemon_transitions"]), vpn_rules.DAEMON_TRANSITIONS_MAX)
+        self.assertEqual(f.evidence["daemon_transitions_dropped"], 40 - vpn_rules.DAEMON_TRANSITIONS_MAX)
 
     def test_a_truncated_window_of_transitions_says_how_many_were_dropped(self):
         lines = []
