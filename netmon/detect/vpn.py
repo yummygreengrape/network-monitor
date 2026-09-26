@@ -1028,7 +1028,8 @@ def _daemon_time(ts: Any) -> Optional[datetime.datetime]:
 
 
 def _daemon_line(item: Any) -> Optional[Dict[str, str]]:
-    """저장된 줄 하나. 모양이 틀리면(시각 아님, 모르는 종류, 너무 긴 글) 버린다."""
+    """저장된 줄 하나. 모양이 틀리면(시각 아님, 모르는 종류, 너무 긴 글) 버리고, 수집 쪽이 저장했을 글이 아니어도
+    (상태 이름 문법 왕복이 안 됨, 도려내기를 다시 거치면 달라짐 — DEV-14) 버린다."""
     if not isinstance(item, dict):
         return None
     ts, kind, text = item.get("ts"), item.get("kind"), item.get("text")
