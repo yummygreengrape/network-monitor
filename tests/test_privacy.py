@@ -453,13 +453,28 @@ class TestAddressesInsideFreeText(unittest.TestCase):
         for text, gone in (("to 2001:db8::\uff1192.0.2.1 x", ("2001:db8",)),
                            ("to ::ffff:192.0.2.1\uff11.\uff11 x", ("192.0.2.1",)),
                            ("to :::203.0.113.9\u0663.\u0663 x", ("203.0.113.9",)),
-                           ("to 192.0.2.1\uff11 x", ("192.0.2.1",))):
+                           ("to 192.0.2.1\uff11 x", ("192.0.2.1",)),
+                           ("to 192.0.2.1.\uff11 x", ("192.0.2.1",))):     # IPv4 뒤 점 + 비ASCII 숫자(끝 둘러보기 `\.[0-9]`)
             out = self.red({"reason": text})["reason"]
             for g in gone:
                 self.assertNotIn(g, out, text)
 
+    def test_an_address_right_after_a_zone_is_still_masked(self):
+        """DEV-10 3회차 검수 [중간]: 영역 표시(`%…`)를 단 IPv4 품은 IPv6 바로 뒤에 콜론으로 이어진 주소가 오면, 영역 표시가 그 주소의 첫
+        그룹을 삼켜 뒤 IPv6 이 남던 후퇴 — 내보내기(`redact_text`)와 저장(`scrub_daemon_text`) 둘 다. 영역 표시는 뒤에 콜론이 오면 영역 표시로
+        보지 않는다(맨 IPv6 갈래와 같은 끝 조건)."""
+        from netmon.vpn import scrub_daemon_text
+        for text, gone in (("to ::192.0.2.1%2001:db8::1 x", "db8::1"),
+                           ("to 2001:db8:192.0.2.1%2001:db8::7 x", "db8::7"),     # 앞 후보가 IPv6 로 무효 — 되돌림 경로
+                           ("to ::192.0.2.1%_2001:db8::1 x", "db8::1"),
+                           ("to ::192.0.2.1%\uff112001:db8::1 x", "db8::1"),
+                           ("to ::192.0.2.1%1:2::3 x", "2::3")):
+            self.assertNotIn(gone, self.red({"reason": text})["reason"], text)
+            self.assertNotIn(gone, scrub_daemon_text(text), text)
+
     def test_the_edges_of_the_embedded_ipv4_branch(self):
-        """DEV-10 3회차: 뒤 콜론은 막지 않음, 앞 점 뒤에서 시작하지 않음, 뒤 IPv4 가 주소가 아니면 되돌림도 가리지 않음, 되돌림은 뒤 글을 지키지 않음."""
+        """DEV-10 3회차: 뒤 콜론은 막지 않음, 앞 점 뒤에서 시작하지 않음, 뒤 IPv4 가 주소가 아니면 되돌림도 가리지 않음, 되돌림은 뒤 글(영역 표시)을
+        지킴."""
         t4 = redactmod.token(self.salt, "ipv4", "192.0.2.1")
         t6 = redactmod.token(self.salt, "ipv6", "2001:db8::192.0.2.1")
         for text, want in (("to 2001:db8::192.0.2.1: refused", "to %s: refused" % t6),
@@ -514,6 +529,9 @@ class TestAddressesInsideFreeText(unittest.TestCase):
         out = self.red({"reason": ":" * 80000 + ENDPOINT})["reason"]
         self.assertLess(time.time() - start, 2.0)
         self.assertNotIn(ENDPOINT, out)
+        start = time.time()                         # 긴 영역 표시 뒤 콜론 — 영역 표시 끝 조건이 되돌아가며 다시 봐도 멈추지 않는다(DEV-10 4회차)
+        self.red({"reason": ("::192.0.2.1%" + "a" * 50 + ":") * 4000 + "::192.0.2.1%" + "a" * 100000 + ":"})
+        self.assertLess(time.time() - start, 2.0)
 
 
 class TestACollectorFailureCarriesNoPath(unittest.TestCase):
