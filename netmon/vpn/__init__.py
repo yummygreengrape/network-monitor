@@ -268,8 +268,8 @@ ALL: List[Provider] = [Warp(), Tailscale(), WireGuard(), MacOSNative()]
 # ─── WARP 데몬 로그 (작업 2026-09-23-warp-daemon-log) ─────────────────────────
 # 조회 간격보다 짧은 끊김과 그 원인은 warp-cli 조회에는 남지 않고 데몬 로그에만 남는다.
 # `root:wheel 0644` 라 sudo 없이 읽힌다. 약 10MiB 마다 `.1`~`.3` 으로 이름이 밀리고
-# (이름 바꾸기 방식) 자정에도 새 파일로 넘어간다. 여기서는 **읽기**만 한다 — 어떤 줄을
-# 쓰고 무엇을 도려내는지는 다음 단계(표본 저장)가 정한다.
+# (이름 바꾸기 방식) 자정에도 새 파일로 넘어간다. 이 절은 **읽기**만 한다 — 어떤 줄을
+# 쓰고 무엇을 도려내는지는 아래 "데몬 로그에서 쓰는 줄" 절(`parse_warp_daemon`)이 정한다.
 WARP_DAEMON_LOG = "/Library/Application Support/Cloudflare/cfwarp_service_log.txt"
 WARP_DAEMON_ROTATIONS = 3
 # 한 주기 읽기 상한. 보존본 평균 약 47.8KB/분 기준 약 85분치(잠자기 뒤 몰림 대비).
@@ -293,6 +293,9 @@ def _valid_daemon_pos(pos: Any) -> Optional[Dict[str, Any]]:
         return None
     if last is not None and not isinstance(last, str):
         return None
+    # 비교 기준 상태는 표본 `state` 로도 나가므로 이름 문법에 맞는 것만 믿는다. 아니면 모름으로.
+    if last is not None and warp_status_name(last) != last:
+        last = None
     return {"file": f, "offset": off, "last_status": last}
 
 
@@ -448,13 +451,14 @@ def _read_after(path: str, p: Optional[Dict[str, Any]], cur: str, size: int, cap
 # 문구가 들어 있어도(예: 네트워크 이름에 섞인 문구) 매칭하지 않는다. 분류 줄의 모듈
 # 경로는 관측된 두 모양뿐이다 — `[^ ]*` 처럼 넓히면 span 의 따옴표 값 안 글이 통과한다.
 # 타임스탬프 없는 연속 줄은 어느 것에도 맞지 않아 그냥 버려진다(해석 실패로 세지 않음).
+# 숫자는 ASCII 만 받는다(`re.ASCII` — 전각·아랍 숫자 시각을 받지 않는다).
 _WARP_TS = r"^(?P<ts>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)"
-_RX_WARP_STATUS = re.compile(_WARP_TS + r" +DEBUG +actor_ipc::logging: Ipc Broadcast ResponseStatus: ")
+_RX_WARP_STATUS = re.compile(_WARP_TS + r" +DEBUG +actor_ipc::logging: Ipc Broadcast ResponseStatus: ", re.ASCII)
 _RX_WARP_DISCONNECT = re.compile(
     _WARP_TS + r" +(?:INFO|WARN) +main_loop(?::handle_update\{update=[A-Za-z]+\(\.\.\)\})?: "
-    r"warp::warp_service: Disconnecting due to ")
+    r"warp::warp_service: Disconnecting due to ", re.ASCII)
 _RX_WARP_ERROR = re.compile(
-    _WARP_TS + r" +WARN +main_loop: warp::warp_service: Connection experienced runtime error error=")
+    _WARP_TS + r" +WARN +main_loop: warp::warp_service: Connection experienced runtime error error=", re.ASCII)
 
 # 상태 이름. 첫 글자가 영문자이고 64자까지(관측 최장 29자). 이름 바로 뒤가 아래 글자나
 # 줄끝일 때만 이름이다 — `fe80::1` 의 `fe80`, `host.example` 의 `host` 가 이름으로 새지 않게.
@@ -462,11 +466,14 @@ _WARP_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 _WARP_NAME_END = frozenset(("(", ")", "{", " ", ",", ""))
 # 괄호 안으로 들어가는 깊이(관측 최대 3단계 `Unable(ConnectivityCheckFailed(Unknown))`).
 WARP_STATUS_DEPTH = 4
-# 분류·오류 줄 꼬리의 저장 상한. 도려내기는 앞쪽 이만큼에만 한다(긴 줄에서도 일이 묶인다).
+# 분류·오류 줄 꼬리의 저장 상한. 도려내기는 꼬리 **전체**에 한 뒤 자른다 — 먼저 자르면 창 끝에
+# 걸친 주소·16진 값이 조각이 되어 주소로 인식되지 않고 남는다(한 줄은 읽기 상한 4MiB 안이고
+# 정규식은 선형이라 전체에 해도 된다).
 WARP_DAEMON_TEXT_CAP = 300
-_WARP_SCRUB_WINDOW = 4096
 _ADDR_PORT = re.compile(r"(<addr>\]?):\d{1,5}(?!\d)")
 _HEX_LONG = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16,}(?![0-9A-Fa-f])")
+_HEX_NAME = re.compile(r"[0-9A-Fa-f]{16,}")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def warp_status_name(rest: str) -> Optional[str]:
@@ -481,7 +488,8 @@ def warp_status_name(rest: str) -> Optional[str]:
     while len(names) < WARP_STATUS_DEPTH:
         m = _WARP_NAME.match(s)
         after = s[m.end():m.end() + 1] if m else None
-        if not m or after not in _WARP_NAME_END:
+        # 16자 이상이 전부 16진이면 이름이 아니라 키·주소 조각이다(분류·오류 줄의 16진 규칙과 같게).
+        if not m or after not in _WARP_NAME_END or _HEX_NAME.fullmatch(m.group(0)):
             break
         names.append(m.group(0))
         if after != "(":
@@ -493,10 +501,11 @@ def warp_status_name(rest: str) -> Optional[str]:
 
 
 def scrub_daemon_text(text: str) -> str:
-    """분류·오류 줄 꼬리에서 IPv4·IPv6 주소(포트 포함)와 16자 이상 16진 값을 도려내고 줄인다."""
-    t = replace_addresses(text[:_WARP_SCRUB_WINDOW], lambda kind, value: "<addr>")
+    """분류·오류 줄 꼬리에서 IPv4·IPv6 주소(포트 포함)·16자 이상 16진 값·제어 문자를 도려내고 줄인다."""
+    t = replace_addresses(text, lambda kind, value: "<addr>")
     t = _ADDR_PORT.sub(r"\1", t)
     t = _HEX_LONG.sub("<hex>", t)
+    t = _CONTROL.sub("?", t)
     return t[:WARP_DAEMON_TEXT_CAP]
 
 

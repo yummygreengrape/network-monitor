@@ -1546,19 +1546,53 @@ class TestWarpDaemonLineParsing(unittest.TestCase):
         self.assertEqual(self.parse(lines), ([], None, 0))
 
     def test_a_forged_prefix_shorter_than_the_real_one_does_not_match(self):
-        """SSID(최대 32옥텟)가 날 개행 뒤에 줄 맨 앞으로 와도 81바이트 고정 접두를 채울 수 없다."""
-        for full in (daemon_status("Disconnected(Manual)"), daemon_disconnect("manual"),
-                     daemon_error("x")):
-            head = full[:full.index(":", 30) + 1]
+        """고정 접두(상태 81·분류 82·오류 104바이트)에 못 미치는 조각은 줄 맨 앞에 와도 매칭되지 않는다.
+
+        이보다 긴 문자열로 줄 맨 앞을 통째로 위조하는 것은 막지 않는다 — 네트워크가 정하는 문자열이
+        날 개행과 함께 로그에 찍히는 경로를 모두 닫았다고 확인하지 못했다(docs/detections.md 의 한계).
+        """
+        for full, rx in ((daemon_status("Disconnected(Manual)"), vpnmod._RX_WARP_STATUS),
+                         (daemon_disconnect("manual"), vpnmod._RX_WARP_DISCONNECT),
+                         (daemon_error("x"), vpnmod._RX_WARP_ERROR)):
+            head = full[:rx.match(full).end()]
             for n in range(len(head)):
                 self.assertEqual(self.parse([head[:n]]), ([], None, 0), head[:n])
 
     def test_a_quoted_span_value_in_the_module_path_does_not_match(self):
         for module in ('main_loop:handle_update{update="manual user"}', "main_loop{reason=manual}",
+                       "main_loop:handle_update{update=manual user(..)}",
                        "main_loop:handle_update{update=SettingsChanged(..)} user",
                        "main_loop:x"):
             line = daemon_disconnect("manual", level="INFO", module=module)
             self.assertEqual(self.parse([line]), ([], None, 0), module)
+
+    def test_the_level_and_the_timestamp_must_be_exactly_the_observed_shape(self):
+        lines = [T0 + " TRACE actor_ipc::logging: Ipc Broadcast ResponseStatus: Disconnected(X)",
+                 T0 + " ERROR main_loop: warp::warp_service: Disconnecting due to x",
+                 T0 + " INFO main_loop: warp::warp_service: Connection experienced runtime error error=x",
+                 "2026-01-01T00:00:00Z DEBUG actor_ipc::logging: Ipc Broadcast ResponseStatus: Disconnected(X)",
+                 "2026-01-01T00:00:00.1234Z DEBUG actor_ipc::logging: Ipc Broadcast ResponseStatus: Disconnected(X)",
+                 "\uff12\uff10\uff12\uff16-01-01T00:00:00.000Z DEBUG actor_ipc::logging: Ipc Broadcast ResponseStatus: X"]
+        self.assertEqual(self.parse(lines), ([], None, 0))
+
+    def test_cutting_happens_after_scrubbing_so_nothing_is_split_at_an_edge(self):
+        """앞쪽이 긴 16진 덩어리 하나로 줄어들어도, 그 뒤 어디에 걸친 주소·16진 값이든 조각으로 남지 않는다."""
+        for value, leak in (("192.0.2.123", "192.0.2"), ("[2001:db8:1234:5678::9]:2408", "2001:db8"),
+                            ("0123456789abcdef01234567", "0123456789")):
+            for k in range(len(value) + 2):
+                tail = "f" * (4096 - 1 - k) + " " + value + " rest"
+                text = self.parse([daemon_error(tail)])[0][0]["text"]
+                self.assertNotIn(leak, text, (value, k))
+
+    def test_the_hex_and_port_boundaries(self):
+        self.assertIn("<hex>", self.kinds([daemon_error("key 0123456789abcdef end")])[0][1])
+        self.assertIn("0123456789abcde", self.kinds([daemon_error("key 0123456789abcde end")])[0][1])
+        self.assertNotIn(":51820", self.kinds([daemon_error("to 198.51.100.7:51820 end")])[0][1])
+
+    def test_control_characters_are_not_stored(self):
+        text = self.kinds([daemon_error("a\x1b[2Jb\x00c\x07d")])[0][1]
+        for ch in ("\x1b", "\x00", "\x07"):
+            self.assertNotIn(ch, text)
 
     # ADV-2 ───────────────────────────────────────────────────────────────
     def test_brackets_that_do_not_start_with_a_name_are_dropped(self):
@@ -1604,6 +1638,18 @@ class TestWarpDaemonLineParsing(unittest.TestCase):
                 self.assertLessEqual(len(k["text"]), vpnmod.WARP_DAEMON_TEXT_CAP)
             if want is not None:
                 self.assertEqual([(k["kind"], k["text"]) for k in kept], want, line[:60])
+
+    def test_name_edges_length_depth_and_hex(self):
+        self.assertEqual(self.kinds([daemon_status("Connecting(abc-def)")]), [("status", "Connecting")])
+        self.assertEqual(self.kinds([daemon_status("Connecting(Abc,Def)")]), [("status", "Connecting(Abc)")])
+        self.assertEqual(self.kinds([daemon_status("Z" * 64)]), [("status", "Z" * 64)])
+        self.assertEqual(self.parse([daemon_status("Z" * 65)])[2], 1)
+        self.assertEqual(self.kinds([daemon_status("A(B(C(D(E))))")]), [("status", "A(B(C(D)))")])
+        # 16자 이상이 전부 16진이면 이름이 아니다(주소·키 조각) — 15자까지는 이름
+        self.assertEqual(self.kinds([daemon_status("Connecting(deadbeefdeadbeef)")]), [("status", "Connecting")])
+        self.assertEqual(self.parse([daemon_status("deadbeefdeadbeef00")])[2], 1)
+        self.assertEqual(self.kinds([daemon_status("Connecting(Deadbeefdeadbee)")]),
+                         [("status", "Connecting(Deadbeefdeadbee)")])
 
     def test_nesting_is_bounded(self):
         kept = self.parse([daemon_status("A(" * 5000)])[0]
@@ -1668,10 +1714,23 @@ class TestWarpDaemonLinesInTheSample(unittest.TestCase):
     def test_a_parse_exception_leaves_no_message_and_does_not_stop_the_cycle(self):
         def boom(*a, **k):
             raise ValueError("secret /opt/netmon-not-a-real-path/log")
+        self.observe([daemon_status("Connected")])
         obs = self.observe([daemon_status("Connected")], parse=boom)
         wd = obs.data["warp_daemon"]
-        self.assertEqual((wd["read"], wd["lines"]), ("unreadable", []))
+        self.assertEqual((wd["read"], wd["lines"], wd["reset"]), ("unreadable", [], True))
         self.assertNotIn("secret", json.dumps(obs.data))
+        self.assertNotIn(enginemod_pos_key(), self.eng.state)    # 같은 구간을 되읽어 매 주기 실패하지 않게
+
+    def test_a_comparison_state_that_is_not_a_status_name_is_not_trusted(self):
+        """state.json 의 `last_status` 가 이름 문법에 맞지 않으면 모름으로 본다(표본 `state` 로 새지 않게)."""
+        from netmon import engine as enginemod
+        self.eng.state[enginemod.WARP_DAEMON_POS_KEY] = {"file": "1:1", "offset": 10,
+                                                         "last_status": "Connected {organization: x}"}
+        real_read = vpnmod.read_warp_daemon
+        with mock.patch.object(vpnmod, "read_warp_daemon",
+                               side_effect=lambda pos, *a, **k: real_read(pos, path="/opt/netmon-not-a-real-path")):
+            wd = self.eng._read_warp_daemon()
+        self.assertIsNone(wd["state"])
 
 
 def dl(ts, kind, text):
