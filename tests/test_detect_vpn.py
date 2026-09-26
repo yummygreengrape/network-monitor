@@ -1635,6 +1635,10 @@ class TestWarpDaemonLineParsing(unittest.TestCase):
                 text = self.cause(daemon_error(tail))
                 self.assertNotIn(leak, text, (value, k))
 
+    def test_an_ipv6_with_an_embedded_ipv4_is_cut_whole(self):
+        for v6 in ("2001:db8:1234:5678::192.0.2.1", "64:ff9b::198.51.100.7"):
+            self.assertEqual(self.cause(daemon_error("to %s x" % v6)), "to <addr> x")
+
     def test_the_hex_and_port_boundaries(self):
         self.assertIn("<hex>", self.cause(daemon_error("key 0123456789abcdef end")))
         self.assertIn("0123456789abcde", self.cause(daemon_error("key 0123456789abcde end")))

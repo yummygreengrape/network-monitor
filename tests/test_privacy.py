@@ -408,6 +408,23 @@ class TestAddressesInsideFreeText(unittest.TestCase):
                            ("%s로 연결" % ENDPOINT, "%s로 연결" % self.t4)):
             self.assertEqual(self.red({"reason": text})["reason"], want)
 
+    def test_an_ipv6_with_an_embedded_ipv4_is_masked_whole(self):
+        """IPv4 를 품은 IPv6 표기는 IPv6 앞부분까지 한 주소로 가린다(DEV-10 — 전에는 뒤의 IPv4 만 가려 앞부분이 남았다)."""
+        for v6 in ("2001:db8:1234:5678::192.0.2.1", "64:ff9b::198.51.100.7", "::ffff:192.0.2.1", "2001:db8::203.0.113.9"):
+            t6 = redactmod.token(self.salt, "ipv6", v6)
+            for text, want in (("to %s x" % v6, "to %s x" % t6), ("[%s]:443" % v6, "[%s]:443" % t6),
+                               ("via %s." % v6, "via %s." % t6)):
+                out = self.red({"reason": text})["reason"]
+                self.assertEqual(out, want, text)
+                self.assertNotIn(v6.split("::")[0] or "ffff", out)
+
+    def test_an_embedded_ipv4_shape_that_is_not_an_address_stays(self):
+        for text in ("at 12:34:56.789 ok", "2001:db8::192.0.2.1.5", "2001:db8:c:192.0.2.4x"):
+            self.assertEqual(self.red({"reason": text})["reason"], text, text)
+        # 영숫자에 붙은 IPv6 은 경계 규칙상 못 가린다(알려진 한계) — 뒤의 IPv4 는 그래도 가린다
+        t4 = redactmod.token(self.salt, "ipv4", "192.0.2.1")
+        self.assertEqual(self.red({"reason": "x2001:db8::192.0.2.1"})["reason"], "x2001:db8::" + t4)
+
     def test_same_address_same_token_as_the_wrapped_value(self):
         d = {"reason": ENDPOINT_REASON, "tunnel_endpoint": ident("ipv4", ENDPOINT)}
         out = self.red(d)
@@ -446,10 +463,14 @@ class TestAddressesInsideFreeText(unittest.TestCase):
         """콜론·점·16진이 끝없이 이어진 문자열에서도 멈추지 않는다 (ADV-4)."""
         import time
         for text in ("1:" * 40000, "a:" * 40000, "1." * 40000, "f" * 80000 + ":", "[" * 40000,
-                     "_1:" * 30000, "[1:" * 30000 + "]"):
+                     "_1:" * 30000, "[1:" * 30000 + "]", "1:1." * 30000, "::1.1.1." * 20000):
             start = time.time()
             self.assertEqual(self.red({"reason": text})["reason"], text)
             self.assertLess(time.time() - start, 2.0, text[:8])
+        start = time.time()                         # 콜론이 끝없이 이어진 뒤의 IPv4 — 가리되 멈추지 않는다
+        out = self.red({"reason": ":" * 80000 + ENDPOINT})["reason"]
+        self.assertLess(time.time() - start, 2.0)
+        self.assertNotIn(ENDPOINT, out)
 
 
 class TestACollectorFailureCarriesNoPath(unittest.TestCase):
