@@ -2757,6 +2757,25 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
         self.assertEqual(d.evidence["daemon_lines_dropped"], 13)
         self.assertEqual(len(d.evidence["daemon_lines"]), 21)
 
+    def test_exactly_one_dropped_line_is_counted_everywhere(self):
+        """상한을 딱 한 줄 넘은 경계(DEV-12 3회차 검수 [낮음]: `if dropped:` 를 `> 1` 로 바꾼 변이가 살아남았다) — 조회 경로 41줄, 새 경로
+        끊김 21줄, 직전 창에서 넘긴 닫힌 끊김 41줄(상태 키로 1 이 넘어가 한 창 늦은 복구에)."""
+        res = self.run_seq(self.start() + [self.o(10, self.many_drops(19) + self.DROP[:3], state="disconnected")])   # 38 + 3 = 41줄
+        d = self.poll(res, 2, "VPN_DISCONNECTED")[0]
+        self.assertEqual((len(d.evidence["daemon_lines"]), d.evidence.get("daemon_lines_dropped")), (40, 1))
+        phases = [dl("08.%03d" % i, "status", "Connecting(Phase%d)" % (i % 2)) for i in range(17)]
+        drop = self.DROP[:3] + phases + [dl("09.004", "status", "Connected")]
+        self.assertEqual(len(drop), vpn_rules.DAEMON_OPEN_MAX + 1)
+        res = self.run_seq(self.start() + [self.o(10, drop)])                  # 새 경로
+        got = sorted((f.kind, f.evidence.get("daemon_lines_dropped")) for f in res[2][1]
+                     if f.kind in ("VPN_DISCONNECTED", "VPN_RECONNECTED"))
+        self.assertEqual(got, [("VPN_DISCONNECTED", 1), ("VPN_RECONNECTED", 1)])
+        closed = self.many_drops(19) + [dl("09.000", "status", "Disconnected(Y)"), dl("09.100", "status", "Connecting(Z)"),
+                                        dl("09.200", "status", "Connected")]                         # 닫힌 끊김 41줄
+        res = self.run_seq(self.start() + [self.o(10, closed, state="disconnected"), self.o(15)])
+        r = self.poll(res, 3, "VPN_RECONNECTED")[0]
+        self.assertEqual((len(r.evidence["daemon_lines"]), r.evidence.get("daemon_lines_dropped")), (40, 1))
+
     def test_the_documented_caps_are_forty_and_twenty(self):
         """문서(docs/detections.md)가 적은 상한 값 — 조회 경로 `daemon_lines` 뒤쪽 40줄, 창당 전환 뒤쪽 20줄(DEV-12 2회차 검수 [낮음]:
         다른 시험은 상수를 이름으로만 읽어 40→30 같은 변경에도 통과했다)."""
@@ -3046,6 +3065,18 @@ class TestDaemonTransitionsOnOtherFindings(_DaemonSequence, unittest.TestCase):
                self.change(20, n=1)]
         res = self.run_seq(seq)
         self.assertEqual(self.texts_at(res, 4), ["Disconnected(InternalTunnelError)", "Connected"])
+
+    def test_exactly_one_dropped_transition_is_counted(self):
+        """한 창의 21번째 전환(DEV-12 3회차 검수 [낮음]: 경계 1 을 고정하는 시험이 없었다) — 네 판정의 이번 창과, 다음 판정 주기의 직전 창
+        (상태 키로 넘어간 1)."""
+        lines = [dl("05.%03d" % (i * 10), "status", "Disconnected(X)" if i % 2 == 0 else "Connected") for i in range(21)]
+        for kind in self.CHANGES:
+            f = self.finding(self.run_seq(self.seq_for(kind, change_at=10, lines=lines)), kind)
+            self.assertEqual((len(f.evidence["daemon_transitions"]), f.evidence.get("daemon_transitions_dropped")), (20, 1), kind)
+        seq = self.seq_for("RESOLVER_CHANGED", change_at=10, lines=lines)
+        seq.append(self.change(15, n=4))
+        nxt = [f for f in self.run_seq(seq)[-1][1] if f.kind == "RESOLVER_CHANGED"][0]
+        self.assertEqual(nxt.evidence.get("daemon_transitions_dropped"), 1)
 
     def test_a_truncated_window_of_transitions_says_how_many_were_dropped(self):
         lines = []

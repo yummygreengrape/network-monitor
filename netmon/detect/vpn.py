@@ -999,8 +999,9 @@ DAEMON_PREV_TRANSITIONS_DROPPED_KEY = "warp_daemon_prev_transitions_dropped"
 # 끊김이 뒤에 있다. 복구 판정은 대개 방금 닫힌 끊김이 뒤에 있지만, 한 창 늦은 복구에서 다음 창에 긴 끊김이 더 있으면
 # 그 복구가 가리키는 끊김이 앞쪽에서 잘릴 수 있다(docs/detections.md).
 DAEMON_EVIDENCE_MAX = 40
-# 링크 없는 주기에서 넘어온 창의 줄 수 상한. 넘으면 앞쪽을 버리고 상태를 "모름" 으로. 이 상한으로 버린 줄은
-# `daemon_lines_dropped`·`daemon_transitions_dropped` 에 세지 않는다(버린 줄의 끊김·전환을 가리지 않고 reset 표지만 남긴다).
+# 링크 없는 주기에서 넘어온 창의 항목 수 상한(reset 표지 포함). 넘으면 앞쪽을 버리고 맨 앞에 reset 표지를 둔다(상태 "모름").
+# 버린 줄과, 그 reset 이 지우는 직전 판정 주기의 열린 끊김 줄은 `daemon_lines_dropped`·`daemon_transitions_dropped` 에 세지 않는다
+# (버린 줄의 끊김·전환을 가리지 않고 reset 표지만 남긴다).
 DAEMON_CARRY_MAX = 200
 # 끊김 하나에 모으는 줄 수 상한(보존본 끊김 15건의 저장 대상 10~23줄). 대기 줄도 같은 수로 묶는다.
 DAEMON_OPEN_MAX = 20
