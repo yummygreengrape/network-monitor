@@ -202,6 +202,7 @@ DUR_HOURS = "%d h"
 DUR_MINUTES = "%d min"
 DUR_SECONDS = "%d s"
 DUR_UNDER_SECOND = "under 1 s"
+DUR_UNKNOWN = "length unknown"
 
 # Whether the first-hop evidence is one probe or a burst. In burst cycles
 # reachable/rtt_ms come from the first probe only (collect/link.merge_probes),

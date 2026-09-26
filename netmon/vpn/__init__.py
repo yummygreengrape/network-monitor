@@ -509,16 +509,49 @@ def scrub_daemon_text(text: str) -> str:
     return t[:WARP_DAEMON_TEXT_CAP]
 
 
-def parse_warp_daemon(lines: List[str], last_status: Optional[str]
-                      ) -> Tuple[List[Dict[str, str]], Optional[str], int]:
-    """읽은 줄에서 저장할 것만 `{ts, kind, text}` 로. (저장할 줄, 마지막 상태, 해석 실패 수).
+# 수집 쪽 보류 줄 상한(TODO K-1 — 판정 쪽 대기 줄 상한과 같은 수).
+WARP_DAEMON_HELD_MAX = 20
+_HELD_TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$", re.ASCII)
+
+
+def _is_connected_name(name: Optional[str]) -> bool:
+    return name is not None and name.split("(", 1)[0] == "Connected"
+
+
+def valid_held(items: Any) -> List[Dict[str, str]]:
+    """`warp_daemon_pos.held`(state.json)에서 읽은 보류 줄. 모양이 틀리거나 도려내기를 거치지 않은 글이면
+    버린다 — 표본으로 나가는 글이라 사람이 고친 상태 파일이 도려내지 않은 글을 싣지 못하게 한다."""
+    if not isinstance(items, list):
+        return []
+    out = []
+    for x in items[-WARP_DAEMON_HELD_MAX:]:
+        if not isinstance(x, dict) or set(x) != {"ts", "kind", "text"}:
+            continue
+        ts, kind, text = x["ts"], x["kind"], x["text"]
+        if not isinstance(ts, str) or not _HELD_TS.match(ts) or kind not in ("disconnect", "error"):
+            continue
+        if not isinstance(text, str) or scrub_daemon_text(text) != text:
+            continue
+        out.append({"ts": ts, "kind": kind, "text": text})
+    return out
+
+
+def parse_warp_daemon(lines: List[str], last_status: Optional[str],
+                      held: Optional[List[Dict[str, str]]] = None
+                      ) -> Tuple[List[Dict[str, str]], Optional[str], int, List[Dict[str, str]]]:
+    """읽은 줄에서 저장할 것만 도려내 남긴다(SPEC AC-3·AC-4). (저장 줄, 마지막 상태, 해석 실패 수, 보류 줄).
 
     - 상태 방송은 이름만. 도려낸 이름이 `last_status` 와 같으면(반복 방송) 저장하지 않는다.
     - 분류(`disconnect`)·오류 원인(`error`) 줄은 꼬리를 `scrub_daemon_text` 로 도려낸다.
+      기준 상태가 `Connected` 이거나 모름일 때 본 원인 줄은 **보류**한다(TODO K-1 수집 쪽 보류): 다음 상태
+      방송이 바뀐 방송이면 그 앞에 붙여 저장하고, 반복 방송이면 버린다. 반복 방송은 저장하지 않으므로
+      판정 쪽은 "원인 줄 뒤에 `Connected` 가 왔다" 는 것을 볼 수 없기 때문이다. 보류 줄은 호출자가 다음
+      읽기로 넘긴다(`held`, 최대 `WARP_DAEMON_HELD_MAX`). 비연결 상태의 원인 줄은 바로 저장한다.
     - 매칭 접두는 맞는데 상태 이름을 뽑지 못하면 세기만 한다(내용은 남기지 않음 — SPEC AC-5).
     - 그 밖의 줄은 저장하지 않는다.
     """
     kept: List[Dict[str, str]] = []
+    held = list(held or [])
     unparsed = 0
     for ln in lines:
         m = _RX_WARP_STATUS.match(ln)
@@ -527,15 +560,23 @@ def parse_warp_daemon(lines: List[str], last_status: Optional[str]
             if name is None:
                 unparsed += 1
             elif name != last_status:
+                kept.extend(held)
+                held = []
                 kept.append({"ts": m.group("ts"), "kind": "status", "text": name})
                 last_status = name
+            else:
+                held = []            # 반복 방송이 답했다 — 보류한 원인 줄은 끊김으로 이어지지 않았다
             continue
         for kind, rx in (("disconnect", _RX_WARP_DISCONNECT), ("error", _RX_WARP_ERROR)):
             m = rx.match(ln)
             if m:
-                kept.append({"ts": m.group("ts"), "kind": kind, "text": scrub_daemon_text(ln[m.end():])})
+                item = {"ts": m.group("ts"), "kind": kind, "text": scrub_daemon_text(ln[m.end():])}
+                if last_status is None or _is_connected_name(last_status):
+                    held = (held + [item])[-WARP_DAEMON_HELD_MAX:]
+                else:
+                    kept.append(item)
                 break
-    return kept, last_status, unparsed
+    return kept, last_status, unparsed, held
 
 
 def installed_providers() -> List[Provider]:

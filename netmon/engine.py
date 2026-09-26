@@ -115,9 +115,10 @@ class Engine:
         self.investigator = investigate.Investigator(cfg.data.get("investigate"))
         # 조사가 요청한 측정 변화. 다음 주기에 반영된다.
         self.needs: Dict[str, Any] = {}
-        # 이 프로세스에서 판정한 주기가 있었는가. 재시작 뒤 첫 판정 주기에는 데몬 로그의
-        # 새 판정을 내지 않는다 — 꺼져 있던 동안의 끊김은 조회 경로가 다룬다(TODO K-8).
-        self._warp_daemon_judged = False
+        # 이 프로세스가 데몬 로그를 읽은 적이 있는가. 첫 읽기는 표본에 `process_start` 를 남기고,
+        # 판정은 그 표지로 재시작 뒤 첫 판정 주기의 새 판정을 막는다(TODO K-8) — 메모리 표지만으로
+        # 막으면 표본을 다시 판정하는 `replay` 가 같은 결과를 내지 못한다.
+        self._warp_daemon_read = False
 
     # --- 재시작을 건너뛰는 비교 기준 ---
     def _restore_baseline(self) -> None:
@@ -343,14 +344,23 @@ class Engine:
 
         쓰는 줄·도려내는 규칙은 `vpn.parse_warp_daemon`(SPEC AC-3·AC-4). 반복 방송 비교의
         기준 상태(`last_status`)는 위치와 함께 수집 쪽이 가진다 — 회전·잘림·상한 초과로
-        연속성이 끊기면 읽기가 그 값을 비운다. 실패는 종류와 개수만 남긴다(메시지·줄 내용 없음).
+        연속성이 끊기면 읽기가 그 값을 비운다. 기준 상태가 `Connected`·모름일 때 본 원인 줄의 보류(TODO K-1)도
+        위치와 함께 간다(`held`). 실패는 종류와 개수만 남긴다(메시지·줄 내용 없음). 이 프로세스의 첫 읽기면
+        `process_start: true` 를 남긴다(TODO K-8).
         """
+        first = not getattr(self, "_warp_daemon_read", False)
+        self._warp_daemon_read = True
         try:
-            lines, pos, info = vpn.read_warp_daemon(self.state.get(WARP_DAEMON_POS_KEY))
+            saved = self.state.get(WARP_DAEMON_POS_KEY)
+            lines, pos, info = vpn.read_warp_daemon(saved)
             last = pos.get("last_status") if pos else None
-            kept, last, unparsed = vpn.parse_warp_daemon(lines, last)
+            # 보류 줄(TODO K-1)은 기준 상태와 함께 간다 — 연속성이 끊겨 기준 상태를 비우면 함께 버린다.
+            held = ([] if pos is None or info["reset"] or not isinstance(saved, dict)
+                    else vpn.valid_held(saved.get("held")))
+            kept, last, unparsed, held = vpn.parse_warp_daemon(lines, last, held)
             if pos is not None:
                 pos["last_status"] = last
+                pos["held"] = held
         except Exception:
             info, pos = {"read": "unreadable", "skipped_bytes": 0, "reset": True}, None
             kept, last, unparsed = [], None, 0
@@ -358,9 +368,12 @@ class Engine:
             self.state.pop(WARP_DAEMON_POS_KEY, None)
         else:
             self.state[WARP_DAEMON_POS_KEY] = pos
-        return {"read": info["read"], "lines": kept, "state": last,
-                "skipped_bytes": info["skipped_bytes"], "unparsed": unparsed,
-                "reset": info["reset"]}
+        out = {"read": info["read"], "lines": kept, "state": last,
+               "skipped_bytes": info["skipped_bytes"], "unparsed": unparsed,
+               "reset": info["reset"]}
+        if first:
+            out["process_start"] = True
+        return out
 
     def _remember_for_burst(self, obs: Observation) -> None:
         """다음 주기의 다발 측정 판단에 쓸, 직전 두 주기의 상태를 남긴다.
@@ -466,11 +479,10 @@ class Engine:
                                               disrupted="link_restart" if link_gap else None)
 
         # 데몬 로그 창은 판정기보다 먼저 처리한다 — VPN 판정과 (다음 단계의) 리졸버·경로
-        # 판정이 같은 창을 본다. 측정 공백 주기와 재시작 뒤 첫 판정 주기에는 새 판정이 없다.
+        # 판정이 같은 창을 본다. 측정 공백 주기와 재시작 뒤 첫 판정 주기(표본의 `process_start`)에는
+        # 새 판정이 없다.
         daemon = vpn_detect.warp_daemon_window(
-            self.state, obs,
-            suppress=gap_exceeded(elapsed, interval) or not getattr(self, "_warp_daemon_judged", False))
-        self._warp_daemon_judged = True
+            self.state, obs, suppress=gap_exceeded(elapsed, interval))
         ctx = Context(
             elapsed=elapsed,
             interval=interval,
@@ -540,7 +552,6 @@ def replay(cfg: Config, observations: List[Observation]) -> List[Tuple[Observati
     eng.state = {}
     eng.investigator = investigate.Investigator(cfg.data.get("investigate"))
     eng.needs = {}
-    eng._warp_daemon_judged = False
 
     out = []
     for obs in observations:

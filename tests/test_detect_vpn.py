@@ -1459,7 +1459,14 @@ class TestWarpDaemonLineParsing(unittest.TestCase):
     """
 
     def parse(self, lines, last=None):
-        return vpnmod.parse_warp_daemon(lines, last)
+        """(저장 줄, 마지막 상태, 해석 실패 수). 기준 상태가 `Connected`·모름이면 원인 줄은 보류되므로
+        (TODO K-1) 원인 줄의 도려내기를 보는 시험은 `cause` 를 쓴다."""
+        kept, last, unparsed, _ = vpnmod.parse_warp_daemon(lines, last)
+        return kept, last, unparsed
+
+    def cause(self, line):
+        """열린 끊김 안(기준 상태가 비연결)에서 원인 줄 하나를 도려낸 글."""
+        return self.parse([line], "Disconnected(X)")[0][0]["text"]
 
     def kinds(self, lines):
         return [(k["kind"], k["text"]) for k in self.parse(lines)[0]]
@@ -1511,7 +1518,7 @@ class TestWarpDaemonLineParsing(unittest.TestCase):
         tail = ("failure to 198.51.100.7:2408 via [2001:db8::7]:443 and [192.0.2.1:53] key "
                 "0123456789abcdef0123 " + "x" * 500)
         for line in (daemon_disconnect(tail), daemon_error(tail)):
-            text = self.parse([line])[0][0]["text"]
+            text = self.cause(line)
             for leak in ("198.51.100", "2001:db8", "192.0.2.1", "0123456789abcdef", ":2408", ":443", ":53"):
                 self.assertNotIn(leak, text)
             self.assertIn("<addr>", text)
@@ -1581,16 +1588,16 @@ class TestWarpDaemonLineParsing(unittest.TestCase):
                             ("0123456789abcdef01234567", "0123456789")):
             for k in range(len(value) + 2):
                 tail = "f" * (4096 - 1 - k) + " " + value + " rest"
-                text = self.parse([daemon_error(tail)])[0][0]["text"]
+                text = self.cause(daemon_error(tail))
                 self.assertNotIn(leak, text, (value, k))
 
     def test_the_hex_and_port_boundaries(self):
-        self.assertIn("<hex>", self.kinds([daemon_error("key 0123456789abcdef end")])[0][1])
-        self.assertIn("0123456789abcde", self.kinds([daemon_error("key 0123456789abcde end")])[0][1])
-        self.assertNotIn(":51820", self.kinds([daemon_error("to 198.51.100.7:51820 end")])[0][1])
+        self.assertIn("<hex>", self.cause(daemon_error("key 0123456789abcdef end")))
+        self.assertIn("0123456789abcde", self.cause(daemon_error("key 0123456789abcde end")))
+        self.assertNotIn(":51820", self.cause(daemon_error("to 198.51.100.7:51820 end")))
 
     def test_control_characters_are_not_stored(self):
-        text = self.kinds([daemon_error("a\x1b[2Jb\x00c\x07d")])[0][1]
+        text = self.cause(daemon_error("a\x1b[2Jb\x00c\x07d"))
         for ch in ("\x1b", "\x00", "\x07"):
             self.assertNotIn(ch, text)
 
@@ -1733,6 +1740,78 @@ class TestWarpDaemonLinesInTheSample(unittest.TestCase):
         self.assertIsNone(wd["state"])
 
 
+    # DEV-4 3회차: 수집 쪽 보류(TODO K-1)와 첫 읽기 표지(K-8) ─────────────────────
+    def at(self, sec):
+        return "2026-01-01T00:00:%sZ" % sec
+
+    def held(self):
+        return self.eng.state[enginemod_pos_key()].get("held")
+
+    def test_cause_lines_seen_while_connected_wait_for_the_next_broadcast(self):
+        self.observe([daemon_status("Connected", ts=self.at("00.000"))])
+        obs = self.observe([daemon_disconnect("settings change", ts=self.at("05.000"))])
+        self.assertEqual(obs.data["warp_daemon"]["lines"], [])                # 아직 저장하지 않는다
+        self.assertEqual([x["text"] for x in self.held()], ["settings change"])
+        obs = self.observe([daemon_status("Connected {again}", ts=self.at("05.001"))])
+        self.assertEqual((obs.data["warp_daemon"]["lines"], self.held()), ([], []))   # 반복 방송이 답함 → 버림
+        self.observe([daemon_error("TunnelError(x)", ts=self.at("06.000"))])
+        obs = self.observe([daemon_status("Disconnected(InternalTunnelError)", ts=self.at("06.001"))])
+        self.assertEqual([(x["kind"], x["text"]) for x in obs.data["warp_daemon"]["lines"]],
+                         [("error", "TunnelError(x)"), ("status", "Disconnected(InternalTunnelError)")])
+        obs = self.observe([daemon_disconnect("x", ts=self.at("07.000"))])       # 비연결 상태 — 바로 저장
+        self.assertEqual([x["kind"] for x in obs.data["warp_daemon"]["lines"]], ["disconnect"])
+        self.assertEqual(self.held(), [])
+
+    def test_the_hold_is_capped(self):
+        self.observe([daemon_status("Connected", ts=self.at("00.000"))])
+        self.observe([daemon_error("e%d" % i, ts=self.at("01.%03d" % i)) for i in range(50)])
+        self.assertEqual(len(self.held()), vpnmod.WARP_DAEMON_HELD_MAX)
+        self.assertEqual(self.held()[-1]["text"], "e49")
+
+    def test_a_tampered_hold_in_the_state_file_is_not_published(self):
+        from netmon import engine as enginemod
+        good = {"ts": T0, "kind": "error", "text": "fine"}
+        self.eng.state[enginemod.WARP_DAEMON_POS_KEY] = {
+            "file": "1:1", "offset": 10, "last_status": "Connected",
+            "held": [dict(good)] * 3 + [
+                {"ts": T0, "kind": "error", "text": "to 198.51.100.7 x"},     # 도려내지 않은 글
+                {"ts": T0, "kind": "error", "text": "k " + "ab" * 12},        # 도려내지 않은 긴 16진
+                {"ts": "yesterday", "kind": "error", "text": "a"},
+                {"ts": T0, "kind": "status", "text": "Connected"},
+                {"ts": T0, "kind": "error", "text": "b", "extra": 1},
+                "x", 5]}
+        obs = self.observe([daemon_status("Disconnected(X)", ts=self.at("01.000"))])
+        lines = obs.data["warp_daemon"]["lines"]
+        self.assertNotIn("198.51.100", json.dumps(obs.data))
+        self.assertNotIn("abab", json.dumps(obs.data))
+        self.assertEqual(lines[:-1], [good] * 3)
+        self.assertEqual(lines[-1]["text"], "Disconnected(X)")
+        self.eng.state[enginemod.WARP_DAEMON_POS_KEY].update(last_status="Connected", held=[dict(good)] * 30)
+        obs = self.observe([daemon_status("Disconnected(Y)", ts=self.at("01.500"))])
+        self.assertEqual(obs.data["warp_daemon"]["lines"][:-1], [good] * vpnmod.WARP_DAEMON_HELD_MAX)
+        self.eng.state[enginemod.WARP_DAEMON_POS_KEY]["held"] = "not a list"
+        self.observe([daemon_status("Connected", ts=self.at("02.000"))])
+
+    def test_a_break_in_continuity_drops_the_hold_with_the_comparison_state(self):
+        self.observe([daemon_status("Connected", ts=self.at("00.000"))])
+        self.observe([daemon_disconnect("settings change", ts=self.at("05.000"))])
+        from netmon import engine as enginemod
+
+        def reset_read(pos, *a, **k):
+            return [daemon_status("Disconnected(X)", ts=self.at("09.000"))], \
+                {"file": "2:2", "offset": 0, "last_status": None}, {"read": "ok", "skipped_bytes": 0, "reset": True}
+        with mock.patch.object(vpnmod, "read_warp_daemon", side_effect=reset_read):
+            wd = self.eng._read_warp_daemon()
+        self.assertEqual([x["kind"] for x in wd["lines"]], ["status"])      # 끊긴 너머의 원인 줄을 붙이지 않는다
+        self.assertEqual(self.eng.state[enginemod.WARP_DAEMON_POS_KEY]["held"], [])
+
+    def test_only_the_first_read_of_a_process_is_marked(self):
+        first = self.observe([daemon_status("Connected")]).data["warp_daemon"]
+        second = self.observe([]).data["warp_daemon"]
+        self.assertIs(first.get("process_start"), True)
+        self.assertNotIn("process_start", second)
+
+
 def dl(ts, kind, text):
     """저장된 데몬 줄 하나(`data.warp_daemon.lines` 의 모양)."""
     return {"ts": "2026-01-01T00:00:%sZ" % ts, "kind": kind, "text": text}
@@ -1752,17 +1831,21 @@ class _DaemonSequence:
         self.addCleanup(shutil.rmtree, self.d, True)
         self.cfg = configmod.load(os.path.join(self.d, "config.json"))
 
-    def o(self, sec, lines=(), state="connected", reset=False, link=True, read="ok", **kw):
+    def o(self, sec, lines=(), state="connected", reset=False, link=True, read="ok", start=False, **kw):
+        """`start` 는 이 표본이 프로세스의 첫 읽기라는 표지(`process_start`, TODO K-8)다 — 실제 수집에서는
+        새 엔진 인스턴스의 첫 `_read_warp_daemon` 이 남긴다."""
         kw.setdefault("security", "WPA2_PSK")
         ob = obs(ts="2026-01-01T00:%02d:%02dZ" % divmod(sec, 60), vpn=vpn_state(state), **kw)
         if not link:
             ob.data["iface"]["primary"] = None
         ob.data["warp_daemon"] = {"read": read, "lines": [dict(x) for x in lines], "state": None,
                                   "skipped_bytes": 0, "unparsed": 0, "reset": reset}
+        if start:
+            ob.data["warp_daemon"]["process_start"] = True
         return ob
 
     def start(self):
-        """재시작 뒤 첫 판정 주기(새 판정 없음)와 상태를 아는 둘째 주기."""
+        """첫 주기(데몬 상태를 모르고 조회가 하나뿐이라 새 판정 없음)와 상태를 아는 둘째 주기."""
         return [self.o(0, [dl("00.000", "status", "Connected")]), self.o(5)]
 
     def run_seq(self, seq):
@@ -1846,7 +1929,8 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
     def test_no_new_findings_on_a_gap_a_restart_an_unknown_state_or_a_carried_gap(self):
         cases = {
             "측정 공백": self.start() + [self.o(100, self.DROP)],
-            "재시작 첫 주기": [self.o(0, [dl("00.000", "status", "Connected")] + self.DROP)],
+            "처음 켠 첫 주기": [self.o(0, [dl("00.000", "status", "Connected")] + self.DROP)],
+            "재시작 첫 주기": self.start() + [self.o(10, self.DROP, start=True)],
             "상태 모름": [self.o(0), self.o(5, self.DROP[2:])],
             "넘어온 창의 공백": self.start() + [self.o(100, self.DROP, link=False), self.o(105)],
             "연속성이 끊긴 주기": self.start() + [self.o(10, self.DROP[2:], reset=True)],
@@ -1858,7 +1942,8 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
     def test_a_window_from_a_cycle_without_a_link_is_judged_in_the_next_judged_cycle(self):
         res = self.run_seq(self.start() + [self.o(10, self.DROP, link=False), self.o(15)])
         self.assertEqual(self.daemon_kinds(res, 2), [])
-        self.assertEqual(self.daemon_kinds(res, 3), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+        # 링크 없는 주기에 시작한 끊김이라 보호 상실은 없다(K-3, DEV-4 3회차)
+        self.assertEqual(self.daemon_kinds(res, 3), ["VPN_DISCONNECTED", "VPN_RECONNECTED"])
 
     def test_a_drop_that_starts_renegotiating_has_the_renegotiating_head(self):
         drop = [dl("07.493", "status", "Connecting(PerformingHappyEyeballs)"), dl("09.004", "status", "Connected")]
@@ -1883,7 +1968,8 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         d = [f for f in res[2][1] if f.kind == "VPN_DISCONNECTED"][0]
         self.assertIsNone(d.evidence["provider_reason"])
 
-    def engine(self, state, judged):
+    def engine(self, state):
+        """새 엔진 인스턴스(재시작). 재시작 뒤 첫 판정 주기의 억제는 표본의 `process_start` 로 준다(`o(start=True)`)."""
         from netmon import investigate
         eng = Engine.__new__(Engine)
         eng.cfg, eng.state, eng.store = self.cfg, state, None
@@ -1892,7 +1978,6 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         eng._baseline_saved_at = eng._arp_log_read_at = None
         eng.investigator = investigate.Investigator(None)
         eng.needs = {}
-        eng._warp_daemon_judged = judged
         return eng
 
     def judge_seq(self, eng, seq):
@@ -1903,11 +1988,11 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         return out
 
     def test_a_pending_cause_line_survives_a_window_and_a_restart(self):
-        first = self.engine({}, judged=False)
+        first = self.engine({})
         self.judge_seq(first, self.start() + [self.o(10, self.DROP[:2])])      # 원인 줄만 — 대기
         saved = json.loads(json.dumps(first.state))                              # state.json 을 거침
-        second = self.engine(saved, judged=False)                                # 재시작
-        out = self.judge_seq(second, [self.o(15, self.DROP[2:4]), self.o(20, self.DROP[4:])])
+        second = self.engine(saved)                                               # 재시작
+        out = self.judge_seq(second, [self.o(15, self.DROP[2:4], start=True), self.o(20, self.DROP[4:])])
         self.assertEqual([f.kind for f in out[0] if f.evidence.get("timing_source")], [])  # 재시작 첫 주기
         d = [f for f in out[1] if f.kind == "VPN_DISCONNECTED"][0]
         self.assertEqual([x["kind"] for x in d.evidence["daemon_lines"]],
@@ -1934,7 +2019,7 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
                                                                   "kind": "evil", "text": "x"}],
                                          "open_dropped": -4}}]
         for bad in broken:
-            eng = self.engine(dict(bad), judged=True)
+            eng = self.engine(dict(bad))
             eng.judge(self.o(10, self.DROP), 5.0)
             st = eng.state.get(vpn_rules.DAEMON_STATE_KEY)
             self.assertIsInstance(st, dict, bad)
@@ -1961,7 +2046,7 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         drop = [dl("09.000", "status", "Disconnected(InternalTunnelError)"), dl("07.000", "status", "Connected")]
         res = self.run_seq(self.start() + [self.o(10, drop)])
         r = [f for f in res[2][1] if f.kind == "VPN_RECONNECTED"][0]
-        self.assertEqual(r.evidence["down_seconds"], 0.0)
+        self.assertIsNone(r.evidence["down_seconds"])                  # 음수도 0 도 아닌 "모름"(DEV-4 3회차)
         cause_after = [dl("09.500", "disconnect", "settings change"),
                        dl("09.000", "status", "Disconnected(SettingsChanged)"), dl("09.600", "status", "Connected")]
         res = self.run_seq(self.start() + [self.o(10, cause_after)])
@@ -1974,18 +2059,18 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
 
     def test_the_first_judged_cycle_after_a_restart_gives_nothing_even_with_a_saved_state(self):
         """K-8: 저장된 상태(직전 조회 connected, 데몬 Connected)로 재시작해도 첫 판정 주기의 끊김은 새 판정이 없다."""
-        first = self.engine({}, judged=False)
+        first = self.engine({})
         self.judge_seq(first, self.start())
         saved = json.loads(json.dumps(first.state))
-        second = self.engine(saved, judged=False)
-        out = self.judge_seq(second, [self.o(10, self.DROP), self.o(25, self.DROP2)])
+        second = self.engine(saved)
+        out = self.judge_seq(second, [self.o(10, self.DROP, start=True), self.o(25, self.DROP2)])
         self.assertEqual([f.kind for f in out[0] if f.evidence.get("timing_source")], [])
         self.assertEqual([f.kind for f in out[1] if f.evidence.get("timing_source")],
                          ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
 
     def test_a_carried_drop_is_judged_exactly_once(self):
         res = self.run_seq(self.start() + [self.o(10, self.DROP, link=False), self.o(15), self.o(20), self.o(25)])
-        self.assertEqual([len(self.daemon_kinds(res, i)) for i in range(len(res))], [0, 0, 0, 3, 0, 0])
+        self.assertEqual([len(self.daemon_kinds(res, i)) for i in range(len(res))], [0, 0, 0, 2, 0, 0])
 
     def test_a_short_drop_after_a_poll_caught_drop_is_judged(self):
         res = self.run_seq(self.start() + [self.o(10, self.DROP[:3], state="disconnected"),
@@ -2005,7 +2090,7 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
     def test_a_drop_closed_before_a_reset_in_a_cycle_without_a_link_is_still_judged(self):
         res = self.run_seq(self.start() + [self.o(10, self.DROP, link=False),
                                            self.o(15, link=False, reset=True), self.o(20)])
-        self.assertEqual(self.daemon_kinds(res, 4), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+        self.assertEqual(self.daemon_kinds(res, 4), ["VPN_DISCONNECTED", "VPN_RECONNECTED"])
 
     def test_an_overflowing_poll_list_does_not_forget_a_disconnected_poll(self):
         """조회 목록이 상한을 넘어도 직전 판정 주기의 비연결 조회를 잊지 않는다(넘치면 조건 불충족)."""
@@ -2026,8 +2111,7 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
             st = {"state": state_name, "pending": [], "open_since": "2026-01-01T00:00:04.000Z",
                   "open_lines": [], "open_dropped": 0}
             st[key] = [dict(line)] * 20000
-            eng = self.engine(json.loads(json.dumps({"warp_daemon_state": st, "warp_daemon_polls": ["connected"]})),
-                              judged=True)
+            eng = self.engine(json.loads(json.dumps({"warp_daemon_state": st, "warp_daemon_polls": ["connected"]})))
             eng.prev = self.o(5)
             start = time.time()
             out = eng.judge(self.o(10, window), 5.0)          # 끊김이 열린 채로 끝남
@@ -2060,7 +2144,7 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
 
     def test_no_daemon_data_means_nothing_new_and_no_state(self):
         seq = self.start() + [self.o(10, self.DROP)]
-        eng = self.engine({}, judged=False)
+        eng = self.engine({})
         self.judge_seq(eng, seq[:2])
         self.assertTrue([k for k in eng.state if k.startswith("warp_daemon")])
         for o in seq:
@@ -2069,6 +2153,140 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         self.assertEqual([k for i in range(len(res)) for k in self.daemon_kinds(res, i)], [])
         self.judge_seq(eng, seq[2:])
         self.assertEqual([k for k in eng.state if k.startswith("warp_daemon")], [])
+
+
+    # DEV-4 3회차 ────────────────────────────────────────────────────────────
+    def test_a_clock_going_backwards_leaves_the_length_unknown(self):
+        """복귀 시각이 이탈 시각보다 이르면 길이를 적지 않는다(조회 경로 `_elapsed_seconds` 와 같음)."""
+        drop = [dl("09.000", "status", "Disconnected(InternalTunnelError)"), dl("08.000", "status", "Connected")]
+        res = self.run_seq(self.start() + [self.o(10, drop)])
+        d = [f for f in res[2][1] if f.kind == "VPN_DISCONNECTED"][0]
+        r = [f for f in res[2][1] if f.kind == "VPN_RECONNECTED"][0]
+        self.assertIsNone(r.evidence["down_seconds"])
+        self.assertNotIn(msg.DUR_UNDER_SECOND, d.summary)
+        self.assertIn(msg.DUR_UNKNOWN, d.summary)
+
+    def test_one_window_judges_at_most_ten_drops_and_counts_the_rest(self):
+        drops = []
+        for i in range(15):
+            drops += [dl("05.%03d" % (i * 20), "status", "Disconnected(X)"),
+                      dl("05.%03d" % (i * 20 + 10), "status", "Connected")]
+        res = self.run_seq(self.start() + [self.o(10, drops)])
+        kinds = self.daemon_kinds(res, 2)
+        self.assertEqual(kinds, ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"] * vpn_rules.DAEMON_DROPS_MAX)
+        last = [f for f in res[2][1] if f.kind == "VPN_RECONNECTED"][-1]
+        self.assertEqual(last.evidence["daemon_drops_not_judged"], 15 - vpn_rules.DAEMON_DROPS_MAX)
+        first = [f for f in res[2][1] if f.kind == "VPN_RECONNECTED"][0]
+        self.assertNotIn("daemon_drops_not_judged", first.evidence)
+        few = self.run_seq(self.start() + [self.o(10, self.DROP)])
+        self.assertNotIn("daemon_drops_not_judged", [f for f in few[2][1] if f.kind == "VPN_RECONNECTED"][0].evidence)
+
+    def test_a_drop_that_started_without_a_link_gets_no_protection_lost(self):
+        """링크 없는 주기에 읽은 줄에서 시작한 끊김은 끊김·복구만(조회 경로도 링크 없는 주기엔 보호 상실을 내지 않음)."""
+        res = self.run_seq(self.start() + [self.o(10, self.DROP, link=False), self.o(15)])
+        self.assertEqual(self.daemon_kinds(res, 3), ["VPN_DISCONNECTED", "VPN_RECONNECTED"])
+        res = self.run_seq(self.start() + [self.o(10, self.DROP[:3], link=False), self.o(15, self.DROP[3:])])
+        self.assertEqual(self.daemon_kinds(res, 3), ["VPN_DISCONNECTED", "VPN_RECONNECTED"])
+        res = self.run_seq(self.start() + [self.o(10, link=False), self.o(15, self.DROP2)])
+        self.assertEqual(self.daemon_kinds(res, 3), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+        # 링크가 있을 때 시작해 링크 없는 주기에 닫힌 끊김은 링크 없는 주기에 시작한 것이 아니다
+        res = self.run_seq(self.start() + [self.o(10, self.DROP[:3]), self.o(15, self.DROP[3:], link=False), self.o(20)])
+        self.assertEqual(self.daemon_kinds(res, 4), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+
+    def test_a_restart_in_a_cycle_without_a_link_holds_back_the_next_judged_window(self):
+        """첫 읽기가 링크 없는 주기면 다음 판정 주기의 창도 새 판정이 없다(K-8 — `warp_daemon_carry_gap` 과 같이)."""
+        res = self.run_seq(self.start() + [self.o(10, link=False, start=True), self.o(15, self.DROP),
+                                           self.o(20), self.o(25, self.DROP2)])
+        self.assertEqual(self.daemon_kinds(res, 3), [])
+        self.assertEqual(self.daemon_kinds(res, 5), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+
+    def test_one_known_poll_is_not_enough(self):
+        """조건은 직전 판정 주기의 조회와 그 뒤의 조회 — 직전 판정 주기의 조회를 모르면(목록에 이번 것 하나) 판정하지 않는다."""
+        state = {vpn_rules.DAEMON_STATE_KEY: {"state": "Connected", "pending": [], "open_since": None,
+                                             "open_lines": [], "open_dropped": 0}}
+        w = vpn_rules.warp_daemon_window(state, self.o(10, self.DROP), suppress=False)
+        self.assertFalse(w["eligible"])
+        self.assertEqual(len(w["closed"]), 1)
+
+    def test_a_cause_line_far_after_the_drop_on_a_backward_clock_is_not_attached(self):
+        late = dl("25.000", "disconnect", "settings change")        # 끊김 방송보다 17.5초 뒤 시각
+        res = self.run_seq(self.start() + [self.o(10, [late] + self.DROP[2:])])
+        d = [f for f in res[2][1] if f.kind == "VPN_DISCONNECTED"][0]
+        self.assertIsNone(d.evidence["provider_reason"])
+
+    def test_many_cause_lines_in_one_window_keep_the_pending_cap(self):
+        many = [dl("05.%03d" % i, "error", "x%d" % i) for i in range(3 * vpn_rules.DAEMON_PENDING_MAX)]
+        state = {}
+        vpn_rules.warp_daemon_window(state, self.o(0, [dl("00.000", "status", "Connected")] + many), suppress=False)
+        pending = state[vpn_rules.DAEMON_STATE_KEY]["pending"]
+        self.assertEqual(len(pending), vpn_rules.DAEMON_PENDING_MAX)
+        self.assertEqual(pending[-1]["text"], many[-1]["text"])
+
+    # 실제 수집 경로와 replay (DEV-4 2회차 검수 [중간] 두 건 — QA-10, QA-14, TODO K-1 수집 쪽 보류, K-8) ──
+    def live(self, eng, sec, raw, **kw):
+        """원문 줄을 실제 수집 경로(`_read_warp_daemon` → `parse_warp_daemon`)로 표본에 싣고 판정한다."""
+        def read(pos, *a, **k):
+            last = pos.get("last_status") if isinstance(pos, dict) else None
+            return list(raw), {"file": "1:1", "offset": 100 + sec, "last_status": last}, \
+                {"read": "ok", "skipped_bytes": 0, "reset": False}
+        with mock.patch.object(vpnmod, "read_warp_daemon", side_effect=read):
+            wd = eng._read_warp_daemon()
+        ob = self.o(sec, **kw)
+        ob.data["warp_daemon"] = wd
+        found = eng.judge(ob, 5.0)
+        eng.prev = ob
+        return ob, found
+
+    def at(self, s):
+        return "2026-01-01T00:00:%sZ" % s
+
+    def live_and_replay(self, cycles, restart_before=None):
+        eng = self.engine({})
+        seq, live = [], []
+        for i, (sec, raw) in enumerate(cycles):
+            if i == restart_before:
+                eng = self.engine(json.loads(json.dumps(eng.state)))
+            ob, found = self.live(eng, sec, raw)
+            seq.append(ob)
+            live.append(found)
+        replayed = [fs for _, fs in self.run_seq(seq)]
+        key = lambda fss: [[(f.kind, f.evidence.get("provider_reason")) for f in fs
+                            if f.evidence.get("timing_source") == "daemon"] for fs in fss]
+        self.assertEqual(key(live), key(replayed))
+        return live
+
+    def test_a_cause_line_answered_by_a_repeated_connected_is_dropped_on_the_real_path(self):
+        base = [(0, [daemon_status("Connected", ts=self.at("00.000"))]), (5, [])]
+        tail = [(15, [daemon_status("Disconnected(InternalTunnelError)", ts=self.at("12.000")),
+                      daemon_status("Connected", ts=self.at("12.800"))])]
+        same_read = [(10, [daemon_disconnect("settings change", ts=self.at("07.000")),
+                           daemon_status("Connected", ts=self.at("07.001"))])]
+        across = [(10, [daemon_disconnect("settings change", ts=self.at("07.000"))])]
+        across_tail = [(15, [daemon_status("Connected", ts=self.at("07.001"))] + tail[0][1])]
+        for cycles in (base + same_read + tail, base + across + across_tail):
+            live = self.live_and_replay(cycles)
+            d = [f for f in live[3] if f.kind == "VPN_DISCONNECTED"][0]
+            self.assertIsNone(d.evidence["provider_reason"])
+            self.assertNotIn("settings change", [x["text"] for x in d.evidence["daemon_lines"]])
+
+    def test_a_cause_line_followed_by_its_drop_is_kept_on_the_real_path(self):
+        cycles = [(0, [daemon_status("Connected", ts=self.at("00.000"))]), (5, []),
+                  (10, [daemon_disconnect("settings change", ts=self.at("09.990"))]),
+                  (15, [daemon_status("Disconnected(SettingsChanged)", ts=self.at("09.995")),
+                        daemon_status("Connected", ts=self.at("12.800"))])]
+        live = self.live_and_replay(cycles)
+        d = [f for f in live[3] if f.kind == "VPN_DISCONNECTED"][0]
+        self.assertEqual(d.evidence["provider_reason"], "settings change")
+
+    def test_a_short_restart_gives_the_same_findings_live_and_in_replay(self):
+        """재시작 뒤 첫 판정 주기의 억제가 표본에 남아 replay 도 같은 결과를 낸다(메모리 표지면 갈렸다)."""
+        drop = [daemon_status("Disconnected(InternalTunnelError)", ts=self.at("12.000")),
+                daemon_status("Connecting(CheckingNetwork)", ts=self.at("12.500")),
+                daemon_status("Connected", ts=self.at("13.000"))]
+        cycles = [(0, [daemon_status("Connected", ts=self.at("00.000"))]), (5, []), (10, []),
+                  (15, drop), (20, []), (25, [])]
+        live = self.live_and_replay(cycles, restart_before=3)
+        self.assertEqual([f.kind for f in live[3] if f.evidence.get("timing_source") == "daemon"], [])
 
 
 class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):

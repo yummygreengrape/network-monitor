@@ -188,6 +188,7 @@ DUR_HOURS = "%d시간"
 DUR_MINUTES = "%d분"
 DUR_SECONDS = "%d초"
 DUR_UNDER_SECOND = "1초 미만"
+DUR_UNKNOWN = "길이 모름"
 
 # 첫 홉 증거가 1발인지 다발인지. 다발 주기의 reachable·rtt_ms 는 첫 발
 # 기준이라(collect/link.merge_probes), 이 문장이 없으면 3발 중 2발 손실이
