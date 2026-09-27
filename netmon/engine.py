@@ -16,7 +16,7 @@ from .detect import quality
 # 수집기 `netmon.vpn` 과 이름이 겹쳐 별칭으로 부른다.
 from .detect import vpn as vpn_detect
 from .detect import (Context, associated_without_ipv4, attributions_for, gap_exceeded,
-                     is_complete, network_key, next_last_ssid,
+                     is_complete, network_key, next_last_ssid, read_ssid,
                      run_all)
 from . import messages as msg
 from .model import CONFIRMED, INFO, INFO_SEV, Finding, Observation, unwrap
@@ -61,6 +61,11 @@ def _collect_error(exc: Exception) -> str:
 
 # 비교 기준을 디스크에 남기는 주기. 매 주기 쓰면 쓰기량이 20배가 된다.
 BASELINE_SAVE_SECONDS = 60.0
+
+# 기준선 스냅샷에서 되살리는 "마지막으로 읽은 SSID" 의 길이 상한. 스냅샷은 사람이 고칠 수 있는 파일이라 되살릴 때만 본다.
+# SSID 는 802.11 에서 최대 32옥텟이고(규격 원문은 확인하지 않음), 헬퍼는 CoreWLAN 의 NSString 을 `%@` 로 UTF-8 출력한다
+# (tools/location-helper/request_location.m). 바이트마다 4글자 표기가 되는 최악을 잡아 128자. 넘으면 없는 것으로 본다(지금까지의 동작).
+IDENTITY_SSID_MAX = 128
 
 # 이 끊김에 터널 엔드포인트로 몇 발 나갔는가. 상한(vpn.TUNNEL_PROBE_CAP)을
 # 세는 자리이고, 모양은 `{공급자: {"shots": 발 수, "capped": 상한에 닿았는가}}`
@@ -111,9 +116,10 @@ class Engine:
         # launchd 가 KeepAlive 로 되살리므로 의도치 않은 재시작도 잦다.
         self._baseline_saved_at: Optional[float] = None
         self._arp_log_read_at: Optional[float] = None
-        # 판정한 주기 가운데 SSID 를 마지막으로 읽은 주기의 SSID(detect.next_last_ssid). 메모리에만 둔다 — 재시작 뒤에는 "없음" 으로
-        # 지금까지처럼 앵커와 견준다. state.json 에 두면 안 된다: state.json 은 매 주기, 앵커(baseline.json)는 60초마다 저장돼
-        # 재시작 뒤 둘이 어긋난다(같은 서브넷에서 SSID 만 바뀐 이동이 "같은 네트워크" 로 읽혀 high).
+        # 판정한 주기 가운데 SSID 를 마지막으로 읽은 주기의 SSID(detect.next_last_ssid). 재시작용으로는 기준선 스냅샷(baseline.json)에
+        # 앵커와 같은 시점 값으로 함께 남긴다(`_keep_baseline`). state.json 에 두면 안 된다: state.json 은 매 주기, 스냅샷은 60초마다
+        # 저장돼 재시작 뒤 둘이 어긋난다(같은 서브넷에서 SSID 만 바뀐 이동이 "같은 네트워크" 로 읽혀 high). 이 값은 내보내는 경로가
+        # 없다 — 표본·보고서로 내보내게 되면 가림(`ident`) 대상이다.
         self.identity_ssid: Optional[str] = None
         self._restore_baseline()
         self.investigator = investigate.Investigator(cfg.data.get("investigate"))
@@ -137,6 +143,11 @@ class Engine:
             return
         self.prev = obs
         self.anchor = obs
+        ssid = saved.get("identity_ssid")
+        # 키가 없는(이전 판이 남긴) 스냅샷이나 깨진 값이면 되살린 관측이 읽은 SSID 를 쓴다 — 지금까지처럼 앵커와 견주는 것과 같다.
+        # 문자열이면(제어 문자·`|` 포함) 그대로 받는다 — 읽은 SSID 와의 동일성 비교에만 쓰인다.
+        self.identity_ssid = (ssid if isinstance(ssid, str) and 0 < len(ssid) <= IDENTITY_SSID_MAX
+                              else read_ssid(obs))
         wall = saved.get("wall")
         self.prev_wall = float(wall) if isinstance(wall, (int, float)) else None
         # 에이전트가 멈춰 있던 시간은 측정 공백이다. 다음 주기에서 elapsed 가
@@ -154,7 +165,9 @@ class Engine:
         last = self._baseline_saved_at
         if last is not None and wall is not None and wall - last < BASELINE_SAVE_SECONDS:
             return
-        self.store.save_baseline({"ts": obs.ts, "data": obs.data, "wall": wall})
+        # 마지막으로 읽은 SSID 를 앵커와 같은 시점 값으로 함께 남긴다. 동의가 꺼져 있으면 judge 가 이미 지웠으므로 None 이 저장된다.
+        self.store.save_baseline({"ts": obs.ts, "data": obs.data, "wall": wall,
+                                  "identity_ssid": getattr(self, "identity_ssid", None)})
         self._baseline_saved_at = wall
 
     # --- 수집 ---
