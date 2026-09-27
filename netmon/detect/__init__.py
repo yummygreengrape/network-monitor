@@ -137,7 +137,8 @@ def ssid_gap(obs: Observation) -> bool:
     """SSID 를 읽을 수 있어야 하는데 못 읽은 주기인가(공백 주기).
 
     주 인터페이스가 Wi-Fi 이고(`applicable`) 위치 정보를 쓸 수 있는데(`identity_withheld` 없음) SSID 가 없다 — 위치 헬퍼가 실패했거나
-    "Wi-Fi 연결 없음" 을 줬다(collect/wifi.py 가 `helper_unavailable` 을 붙임). 사유는 가리지 않는다. 동의가 없거나 주 인터페이스가
+    인터페이스가 없다고(`wifi=none`) 했거나 SSID·BSSID 를 빈 값으로 줬다(연결이 풀림·헬퍼 위치 권한 없음 — CoreWLAN `ssid` 가 nil.
+    collect/wifi.py 가 `helper_unavailable` 을 붙임). 사유는 가리지 않는다. 동의가 없거나 주 인터페이스가
     Wi-Fi 가 아니면 SSID 가 늘 없어 깜빡이지 않으므로 공백이 아니다. `wifi.is_primary` 는 보지 않는다 — 2026-09-21 이전 표본에 없다.
     """
     wifi = obs.get("wifi") or {}

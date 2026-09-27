@@ -189,7 +189,7 @@ LaunchAgent와 실행기에서도 PATH를 넓히지만, 그것은 보조 수단�
 - **`CLLocationManager.authorizationStatus`는 만든 직후 읽으면 안 됩니다.**
   델리게이트로 비동기 전달되므로 이미 승인된 앱도 `not-determined`로 보입니다.
   첫 콜백을 최대 2초 기다린 뒤 읽습니다.
-- **헬퍼가 값을 못 주는 주기가 있습니다.** 헬퍼를 띄우지 못했거나 제한 시간 안에 답이 없거나, Wi-Fi
+- **헬퍼가 값을 못 주는 주기가 있습니다.** 헬퍼를 띄우지 못했거나 제한 시간 안에 결과가 없거나 비었거나, Wi-Fi
   인터페이스가 없거나(`wifi=none`), SSID·BSSID 가 둘 다 비었을 때입니다 — CoreWLAN 은 인터페이스가 Wi-Fi
   네트워크에 참여하지 않거나(연결이 풀림) 호출한 앱에 위치 권한이 없으면 `ssid`·`bssid` 를 nil 로 줍니다
   (SDK 헤더 `CWInterface.h`). 어느 경우든 SSID·BSSID·채널·RSSI 없이 `helper_unavailable` 만 남습니다(사유는
