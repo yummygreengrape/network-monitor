@@ -176,19 +176,90 @@ class TestTheLastReadSsidSurvivesARestartWithItsAnchor(unittest.TestCase):
         from netmon.engine import IDENTITY_SSID_MAX
         self.assertEqual(IDENTITY_SSID_MAX, 128)
         cases = [("키 없음", None, False), ("숫자", 5, False), ("목록", ["x"], False), ("빈 값", "", False),
-                 ("상한", "a" * 128, True), ("상한+1", "a" * 129, False), ("제어 문자", "a\nb", True), ("구분자", "a|b", True)]
+                 ("상한", "a" * 128, True), ("상한+1", "a" * 129, False), ("제어 문자", "a\nb", True), ("구분자", "a|b", True),
+                 ("짝 없는 대리 문자", "\ud800", False)]
         for name, value, kept in cases:
             with self.subTest(name):
                 store = Store(self.dir)
                 snap = {"ts": "2026-01-01T00:00:05Z", "data": self.gap(ts="2026-01-01T00:00:05Z").data, "wall": 1000.0}
                 if name != "키 없음":
                     snap["identity_ssid"] = value
-                store.save_baseline(snap)
+                self.write_raw(store, snap)
                 self.assertEqual(self.engine().identity_ssid, value if kept else None)
         store = Store(self.dir)
         read = obs(ts="2026-01-01T00:00:05Z", ssid=SSID)
         store.save_baseline({"ts": read.ts, "data": read.data, "wall": 1000.0})
         self.assertEqual(self.engine().identity_ssid, SSID, "옛 스냅샷 — 앵커가 읽은 SSID(지금까지처럼 앵커와 견주는 것과 같음)")
+
+    def test_an_unencodable_snapshot_value_does_not_stop_the_agent(self):
+        """ADV-1 짝 없는 대리 문자는 되살리지 않는다 — 되살리면 다음 저장에서 UTF-8 예외로 에이전트가 죽고, 되살아나 같은 값을 다시 읽어
+        되풀이한다(DEV-4 검수 1회차 [중간]). 저장이 예외 없이 되고 조작된 키가 사라진다(기준 커밋과 같음)."""
+        store = Store(self.dir)
+        g = self.gap(ts="2026-01-01T00:00:00Z")
+        self.write_raw(store, {"ts": g.ts, "data": g.data, "wall": 1000.0, "identity_ssid": "\ud800"})
+        e = self.engine()
+        g2 = self.gap(ts="2026-01-01T00:00:05Z")
+        e.judge(g2, 5.0)
+        e._keep_baseline(g2, 1005.0)
+        self.assertIsNone(Store(self.dir).load_baseline().get("identity_ssid"))
+
+    @staticmethod
+    def write_raw(store, snap):
+        """사람이 고친 파일처럼 쓴다 — JSON 이스케이프(ensure_ascii)라 짝 없는 대리 문자도 `"\\ud800"` 로 들어간다."""
+        import json
+        with open(store.baseline_path, "w", encoding="utf-8") as fh:
+            json.dump(snap, fh)
+
+    def run_cycles(self, e, seq):
+        """`Engine.cycle` 을 그대로 돈다(관측만 바꿔 끼움) — 판정과 스냅샷 저장의 순서까지 실제 경로로."""
+        out = []
+        for wall, o in seq:
+            e.observe = (lambda o=o: o)
+            out.append(e.cycle(now=wall)[1])
+        return out
+
+    def test_the_snapshot_pairs_the_anchor_with_the_ssid_of_the_same_cycle(self):
+        """(K-7) 저장은 판정 뒤다 — 앵커와 그 주기 갱신 뒤의 읽은 SSID 가 함께 저장된다. A 를 읽고 61초 뒤 같은 서브넷의 다른 SSID B 로
+        옮겨(스냅샷 저장) 재시작한 뒤 B 에서 게이트웨이 MAC 이 바뀌면 같은 네트워크의 MAC 변화(high) — 기준 커밋과 같다. 저장을 판정 앞으로
+        옮기면 B 앵커와 A 가 짝지어져 이동(low)으로 억제된다(DEV-4 검수 1회차 변이 X1)."""
+        e = self.engine()
+        self.run_cycles(e, [(1000.0, obs(ts="2026-01-01T00:00:00Z", ssid=SSID)),
+                            (1061.0, obs(ts="2026-01-01T00:01:01Z", ssid="OtherNet"))])
+        e.store.save_state(e.state)
+        f = [x for fs in self.run_cycles(self.engine(), [(1066.0, obs(ts="2026-01-01T00:01:06Z", ssid="OtherNet",
+                                                                          gw_mac=GW_MAC_ALT))])
+             for x in fs if x.kind == "GW_MAC_CHANGED"]
+        self.assertEqual([(x.severity, x.attribution) for x in f], [("high", None)])
+
+    def test_a_broken_snapshot_gives_the_same_verdicts_as_before(self):
+        """(K-7) 스냅샷 키가 없거나 깨졌을 때의 판정은 기준 커밋과 같다 — 내부 값이 아니라 다음 주기의 게이트웨이 MAC 변화 판정으로 본다.
+        앵커가 SSID 를 읽은 관측이면 같은 SSID 는 high·다른 SSID 는 이동(low), 앵커가 공백 관측이면 둘 다 이동(low)."""
+        values = [("키 없음", None), ("None", "none"), ("숫자", 5), ("목록", ["x"]), ("빈 값", ""), ("상한+1", "a" * 129)]
+        for anchor_kind in ("읽음", "공백"):
+            for name, value in values:
+                for nxt, want in (("같은 SSID", ("high", None) if anchor_kind == "읽음" else ("low", "network_change")),
+                                  ("다른 SSID", ("low", "network_change"))):
+                    with self.subTest(anchor=anchor_kind, value=name, next=nxt):
+                        a = obs(ts="2026-01-01T00:00:00Z", ssid=SSID) if anchor_kind == "읽음" else self.gap(ts="2026-01-01T00:00:00Z")
+                        snap = {"ts": a.ts, "data": a.data, "wall": 1000.0}
+                        if name != "키 없음":
+                            snap["identity_ssid"] = None if value == "none" else value
+                        Store(self.dir).save_baseline(snap)
+                        cur = obs(ts="2026-01-01T00:00:05Z", ssid=SSID if nxt == "같은 SSID" else "OtherNet", gw_mac=GW_MAC_ALT)
+                        f = [x for x in self.engine().judge(cur, 5.0) if x.kind == "GW_MAC_CHANGED"]
+                        self.assertEqual([(x.severity, x.attribution) for x in f], [want])
+
+    def test_judging_a_gap_does_not_rewrite_the_observation(self):
+        """(AC-5, K-7) 공백 주기의 관측은 판정 뒤에도 그대로다 — 표본에는 SSID 없음과 사유(`helper_unavailable`)가 남는다."""
+        import copy
+        e = self.engine()
+        e.judge(obs(ts="2026-01-01T00:00:00Z", ssid=SSID), 0.0)
+        g = self.gap(ts="2026-01-01T00:00:05Z")
+        before = copy.deepcopy(g.data)
+        e.judge(g, 5.0)
+        self.assertEqual(g.data, before)
+        self.assertIsNone(g.data["wifi"]["ssid"])
+        self.assertTrue(g.data["wifi"]["helper_unavailable"])
 
     def test_turning_the_consent_off_and_restarting_drops_the_ssid_from_the_snapshot(self):
         """설정은 에이전트가 시작할 때 읽는다 — 동의를 끄고 재시작하면 되살린 값은 쓰이지 않고, 첫 완전한 판정 주기에 지워지며 그 주기에

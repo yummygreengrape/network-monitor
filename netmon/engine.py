@@ -67,6 +67,21 @@ BASELINE_SAVE_SECONDS = 60.0
 # (tools/location-helper/request_location.m). 바이트마다 4글자 표기가 되는 최악을 잡아 128자. 넘으면 없는 것으로 본다(지금까지의 동작).
 IDENTITY_SSID_MAX = 128
 
+
+def _restorable_ssid(value: Any) -> bool:
+    """스냅샷에서 되살려 쓸 수 있는 SSID 인가 — 문자열, 1~IDENTITY_SSID_MAX 자, UTF-8 로 다시 쓸 수 있음.
+
+    짝 없는 대리 문자(JSON `"\\ud800"`)는 읽히지만 다음 저장(`json.dump(ensure_ascii=False)` → UTF-8)에서 예외를 내 에이전트가 죽고,
+    되살아나면 같은 값을 다시 읽어 되풀이한다(DEV-4 검수 1회차). 수집 경로는 오류 글자를 바꿔 디코드하므로 파일을 고쳐야만 생긴다.
+    """
+    if not isinstance(value, str) or not 0 < len(value) <= IDENTITY_SSID_MAX:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
 # 이 끊김에 터널 엔드포인트로 몇 발 나갔는가. 상한(vpn.TUNNEL_PROBE_CAP)을
 # 세는 자리이고, 모양은 `{공급자: {"shots": 발 수, "capped": 상한에 닿았는가}}`
 # 다 — 세는 단위가 공급자 하나의 끊김 하나이기 때문이다(vpn.carry_probe_counts).
@@ -146,8 +161,7 @@ class Engine:
         ssid = saved.get("identity_ssid")
         # 키가 없는(이전 판이 남긴) 스냅샷이나 깨진 값이면 되살린 관측이 읽은 SSID 를 쓴다 — 지금까지처럼 앵커와 견주는 것과 같다.
         # 문자열이면(제어 문자·`|` 포함) 그대로 받는다 — 읽은 SSID 와의 동일성 비교에만 쓰인다.
-        self.identity_ssid = (ssid if isinstance(ssid, str) and 0 < len(ssid) <= IDENTITY_SSID_MAX
-                              else read_ssid(obs))
+        self.identity_ssid = ssid if _restorable_ssid(ssid) else read_ssid(obs)
         wall = saved.get("wall")
         self.prev_wall = float(wall) if isinstance(wall, (int, float)) else None
         # 에이전트가 멈춰 있던 시간은 측정 공백이다. 다음 주기에서 elapsed 가
