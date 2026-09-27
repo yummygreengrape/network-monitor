@@ -443,16 +443,31 @@ class TestAnSsidGapDoesNotCloseAnInvestigation(unittest.TestCase):
         self.assertEqual(eng.state.get("network"), network_key(gap))
 
     def test_an_investigation_opened_in_a_gap_records_the_observed_key(self):
-        """(k) 공백 주기에 열린 조사의 기록(`network`)도 관측 키(SSID 자리 "-")다 — 대체 키를 기록에 쓰지 않는다(DEV-2 검수 1회차 [낮음]).
-        기준 커밋은 공백 주기의 MAC 변화를 억제해 이 조사가 열리지 않으므로 새 코드 전용이다."""
+        """(k)(K-7) 공백 주기에 열린 조사의 기록(`network`)도 관측 키(SSID 자리 "-")다 — 대체 키를 기록에 쓰지 않는다(DEV-2 검수 1회차 [낮음]).
+        MAC 은 두 번째 공백 주기에서 바꾼다 — 첫 공백 주기에서 바꾸면 기준 커밋은 그 변화를 억제해 조사가 열리지 않는다(2회차 [낮음])."""
         from netmon.detect import network_key
         eng = self.engine()
-        for ob in (self.o(), self.o()):
+        for ob in (self.o(), self.o(), self.o(gap=True)):
             self.step(eng, ob)
         gap = self.o(gap=True, gw_mac=GW_MAC_ALT)
         self.assertIn("INVESTIGATION_OPENED", [f.kind for f in self.step(eng, gap)])
         self.assertEqual([i.get("network") for i in eng.state.get("investigations", []) if i.get("status") == "open"],
                          [network_key(gap)])
+
+    def test_an_investigation_opened_in_a_gap_survives_the_rest_of_the_gap(self):
+        """(d)(K-7) 공백 중에 연 조사는 이어지는 공백 주기들에도 닫히지 않는다 — 대체 키는 관측 키에 **더하는** 것이다(관측 키를 빼고 바꿔
+        넣으면 공백→공백 전환에 닫힌다 — DEV-2 검수 2회차 변이 X4). 기준 커밋과 같다(공백 주기끼리는 관측 키가 같음)."""
+        res = self.run_seq([self.o(), self.o(), self.o(gap=True), self.o(gap=True, gw_mac=GW_MAC_ALT),
+                            self.o(gap=True, gw_mac=GW_MAC_ALT), self.o(gap=True, gw_mac=GW_MAC_ALT)])
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_OPENED", "INVESTIGATION_ABANDONED"), [(3, "INVESTIGATION_OPENED")])
+
+    def test_after_forgetting_the_ssid_a_gap_investigation_closes_on_the_next_read_as_before(self):
+        """(K-7) 읽은 SSID 를 잊은 뒤(G5 모양) 공백 주기에 연 조사는 다음 읽기 주기에 지금처럼 닫힌다 — 잊은 뒤에는 "-" 대체 키를 만들지
+        않는다(갱신 전 읽은 SSID 가 없으면 "지금처럼" — DEV-2 검수 2회차 변이 X1)."""
+        moved = dict(my_ip="192.0.2.77", lease_start="2026-01-01 00:01:00")
+        res = self.run_seq([self.o(), self.o(), self.o(linkless=True), self.o(gap=True, **moved),
+                            self.o(gap=True, gw_mac=GW_MAC_ALT, **moved), self.o(gw_mac=GW_MAC_ALT, **moved)])
+        self.assertIn((5, "INVESTIGATION_ABANDONED"), self.kinds_of(res, "INVESTIGATION_ABANDONED"))
 
     def test_an_empty_wifi_block_still_closes_it_as_before(self):
         """(K-7) 수집기 예외로 Wi-Fi 블록이 빈 주기는 공백이 아니다 — 대체 키 없이 지금처럼 닫힌다(DEV-2 검수 1회차 [참고]: 대체 키에서
