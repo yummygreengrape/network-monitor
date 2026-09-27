@@ -380,6 +380,81 @@ class TestAnSsidGapIsNotAMove(unittest.TestCase):
         self.assertEqual((f.severity, f.attribution), ("high", None))
 
 
+class TestAnSsidGapDoesNotCloseAnInvestigation(unittest.TestCase):
+    """공백만으로 열린 조사가 "네트워크가 바뀌어 중단" 으로 닫히지 않는다(AC-4, QA-4, ADV-3 — 작업 2026-09-27-ssid-gap-network-change DEV-2).
+    판정·상태·조사 기록의 `network` 는 관측값 그대로이고, 중단 비교만 SSID 자리의 "-" 를 마지막으로 읽은 SSID 와 같은 것으로 본다.
+    GW_MAC_CHANGED(high, 귀속 없음)가 l2_identity 조사를 연다.
+    """
+
+    # 도우미만 가져온다(상속하면 위 클래스의 시험이 한 번 더 돈다)
+    setUp = TestAnSsidGapIsNotAMove.setUp
+    o = TestAnSsidGapIsNotAMove.o
+    run_seq = TestAnSsidGapIsNotAMove.run_seq
+    engine = TestAnSsidGapIsNotAMove.engine
+    step = staticmethod(TestAnSsidGapIsNotAMove.step)
+
+    @staticmethod
+    def kinds_of(res, *kinds):
+        return [(i, f.kind) for i, (_, fs) in enumerate(res) for f in fs if f.kind in kinds]
+
+    def test_an_investigation_opened_before_a_gap_survives_it(self):
+        """(d) 공백 전에 연 조사는 공백 동안도, 공백 뒤 같은 SSID 를 읽은 주기에도 닫히지 않는다."""
+        res = self.run_seq([self.o(), self.o(), self.o(gw_mac=GW_MAC_ALT), self.o(gap=True, gw_mac=GW_MAC_ALT),
+                            self.o(gap=True, gw_mac=GW_MAC_ALT), self.o(gw_mac=GW_MAC_ALT)])
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_OPENED"), [(2, "INVESTIGATION_OPENED")])
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_ABANDONED"), [])
+
+    def test_an_investigation_opened_in_a_gap_survives_the_same_ssid_after_it(self):
+        """(l) 공백 중에 연 조사(관측 키의 SSID 자리가 "-")는 공백이 끝나 같은 SSID 를 읽은 주기에 닫히지 않는다."""
+        res = self.run_seq([self.o(), self.o(), self.o(gap=True), self.o(gap=True, gw_mac=GW_MAC_ALT), self.o(gw_mac=GW_MAC_ALT)])
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_OPENED"), [(3, "INVESTIGATION_OPENED")])
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_ABANDONED"), [])
+
+    def test_another_ssid_after_a_gap_still_closes_it(self):
+        """부정 사례(K-7) — 공백 중에 연 조사는 공백 뒤 **다른** SSID(같은 서브넷)를 읽으면 닫힌다. 기준 커밋과 같다."""
+        res = self.run_seq([self.o(), self.o(), self.o(gap=True), self.o(gap=True, gw_mac=GW_MAC_ALT),
+                            self.o(ssid="OtherNet", gw_mac=GW_MAC_ALT)])
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_ABANDONED"), [(4, "INVESTIGATION_ABANDONED")])
+
+    def test_a_subnet_change_in_a_gap_cycle_still_closes_it(self):
+        """부정 사례(K-7) — 공백 주기에 서브넷이 바뀌면 공백 전에 연 조사는 닫힌다. 기준 커밋과 같다."""
+        res = self.run_seq([self.o(), self.o(), self.o(gw_mac=GW_MAC_ALT),
+                            self.o(gap=True, gateway=GW2, routers=(GW2,), my_ip="198.51.100.50", dhcp_server=DHCP_SRV2,
+                                   gw_mac=GW2_MAC)])
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_ABANDONED"), [(3, "INVESTIGATION_ABANDONED")])
+
+    def test_forgetting_the_ssid_in_a_gap_cycle_closes_it_as_before(self):
+        """(K-7) 공백 주기에 이동 귀속이 붙어 읽은 SSID 를 잊는 주기(G5 모양)에는 지금처럼 그 주기에 닫힌다 — 잊기가 비교보다 먼저다(K-2)."""
+        res = self.run_seq([self.o(), self.o(), self.o(gw_mac=GW_MAC_ALT), self.o(linkless=True),
+                            self.o(gap=True, gw_mac=GW_MAC_ALT, my_ip="192.0.2.77", lease_start="2026-01-01 00:01:00")])
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_ABANDONED"), [(4, "INVESTIGATION_ABANDONED")])
+
+    def test_the_network_value_stays_the_observed_one(self):
+        """(k)(K-7) 판정의 `network`·상태의 `network` 는 공백 주기에도 관측값(SSID 자리 "-") — 기존 키의 뜻을 바꾸지 않는다."""
+        from netmon.detect import network_key
+        eng = self.engine()
+        for ob in (self.o(), self.o()):
+            self.step(eng, ob)
+        gap = self.o(gap=True, gw_mac=GW_MAC_ALT)
+        fs = [f for f in self.step(eng, gap) if not f.kind.startswith("INVESTIGATION_")]   # 조사 판정은 원래 network 를 달지 않음
+        self.assertTrue(fs)
+        self.assertEqual({f.network for f in fs}, {network_key(gap)})
+        self.assertIn("|-|", network_key(gap))
+        self.assertEqual(eng.state.get("network"), network_key(gap))
+
+    def test_an_ssid_with_the_separator_does_not_join_two_networks(self):
+        """ADV-3 — SSID 는 AP 가 정하는 값이라 `|` 를 품을 수 있다. 조사 비교가 키를 쪼개지 않으므로, SSID 에 다른 네트워크의 키 조각을
+        넣어도 그 네트워크의 조사를 "같은 네트워크" 로 이어받지 못한다."""
+        from netmon.detect import network_key, network_key_with
+        home = self.o()
+        forged = "%s|%s" % (SSID, network_key(home).split("|")[-1])       # "ExampleNet|<서브넷>"
+        gap = self.o(gap=True, gateway=GW2, routers=(GW2,), my_ip="198.51.100.50", dhcp_server=DHCP_SRV2)
+        self.assertNotEqual(network_key_with(gap, forged), network_key(home))
+        res = self.run_seq([home, self.o(), self.o(gw_mac=GW_MAC_ALT), self.o(ssid=forged, gateway=GW2, routers=(GW2,),
+                                                                            my_ip="198.51.100.50", dhcp_server=DHCP_SRV2), gap])
+        self.assertEqual(len(self.kinds_of(res, "INVESTIGATION_ABANDONED")), 1)
+
+
 class TestIdentityRuleOverEveryBranch(unittest.TestCase):
     """`attributions_for` 의 정체성 규칙을 입력 갈래의 곱으로 돈다(작업 2026-09-27-ssid-gap-network-change K-6, 교훈
     2026-09-27-pin-values-and-boundaries). 기대는 코드가 아니라 명세 AC-1·AC-2·K-5 와 위협 모델 판단 표에서 옮긴 것이다:

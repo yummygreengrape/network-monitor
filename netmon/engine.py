@@ -16,7 +16,7 @@ from .detect import quality
 # 수집기 `netmon.vpn` 과 이름이 겹쳐 별칭으로 부른다.
 from .detect import vpn as vpn_detect
 from .detect import (Context, associated_without_ipv4, attributions_for, gap_exceeded,
-                     is_complete, network_key, next_last_ssid, read_ssid,
+                     is_complete, network_aliases, network_key, next_last_ssid, read_ssid,
                      run_all)
 from . import messages as msg
 from .model import CONFIRMED, INFO, INFO_SEV, Finding, Observation, unwrap
@@ -534,6 +534,8 @@ class Engine:
             state=self.state,
             attributions=attributions,
             network=network_key(obs),
+            # 열린 조사의 "같은 네트워크" 비교에만(갱신 전·뒤 값 — detect.network_aliases). 판정의 network 는 관측 키 그대로.
+            network_aliases=network_aliases(obs, last_ssid, self.identity_ssid),
             warp_daemon=daemon,
         )
         findings = run_all(self.prev, obs, ctx)

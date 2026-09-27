@@ -88,7 +88,9 @@ class Investigator:
         # 네트워크가 바뀌면 조사 대상 자체가 사라진다. 조용히 버리지 않고
         # "중단했다"고 남긴다 — 무엇을 못 보고 넘어갔는지가 기록에 있어야 한다.
         for inv in invs:
-            if inv.open and ctx.network and inv.network != ctx.network:
+            # SSID 를 못 읽은 공백 주기만으로는 닫지 않는다 — 비교는 관측 키와, SSID 자리를 마지막으로 읽은 SSID 와 맞춘 키로 한다
+            # (Context.network_aliases — 작업 2026-09-27-ssid-gap-network-change). 서브넷·인터페이스가 바뀌거나 다른 SSID 를 읽으면 지금처럼 닫는다.
+            if inv.open and ctx.network and inv.network not in (getattr(ctx, "network_aliases", None) or (ctx.network,)):
                 inv.close(cur.ts, ABANDONED, msg.INV_ABANDON_REASON_NETWORK, POSSIBLE)
                 out.append(Finding(
                     axis=INFO, kind="INVESTIGATION_ABANDONED",

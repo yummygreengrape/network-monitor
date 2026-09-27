@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import messages as msg
 from ..model import Finding, Observation, unwrap
@@ -48,6 +48,8 @@ class Context:
     network: Optional[str] = None
     # 이번 판정 주기의 WARP 데몬 로그 창(netmon/detect/vpn.py `warp_daemon_window`). 없으면 None.
     warp_daemon: Optional[Dict[str, Any]] = None
+    # 열린 조사의 "같은 네트워크" 비교에만 쓰는 키들(`network_aliases`). 비어 있으면 `network` 하나. 판정의 `network` 는 늘 관측 키다.
+    network_aliases: Tuple[str, ...] = ()
 
     def enabled(self, feature: str) -> bool:
         return bool(self.features.get(feature, True))
@@ -160,6 +162,25 @@ def _identity_changed(base: Observation, cur: Observation, last_ssid: Optional[s
     if c is not None and last_ssid is not None:
         return c != last_ssid
     return str(unwrap(base.get("wifi", "ssid")) or "-") != str(unwrap(cur.get("wifi", "ssid")) or "-")
+
+
+def network_aliases(cur: Observation, prior_ssid: Optional[str], last_ssid: Optional[str]) -> Tuple[str, ...]:
+    """열린 조사가 "같은 네트워크" 로 볼 키들 — 관측 키와, SSID 자리만 바꾼 키(작업 2026-09-27-ssid-gap-network-change AC-4).
+
+    `prior_ssid` 는 이 주기 갱신 **전**, `last_ssid` 는 갱신 **뒤**의 마지막으로 읽은 SSID 다.
+      - 공백 주기이고 갱신 뒤 값이 있으면: SSID 자리를 그 값으로 바꾼 키 — 공백 전에 연 조사를 공백 동안 잇는다. 이 주기에 이동 귀속이 붙어
+        잊었으면(`next_last_ssid`) 없다 — 지금처럼 닫힌다.
+      - SSID 를 읽었고 그 값이 갱신 전 값과 같으면: SSID 자리를 "-" 로 바꾼 키 — 공백 중에 연 조사를 같은 SSID 로 돌아온 주기에 잇는다.
+        갱신 뒤 값으로 견주면 읽은 주기마다 늘 같아져 공백 뒤 다른 SSID 로 옮겨도 닫히지 않는다.
+    판정·상태의 `network` 에는 쓰지 않는다 — 기존 키의 뜻(관측값)을 바꾸지 않는다. 키를 `|` 로 쪼개지 않는다(`network_key_with`).
+    """
+    keys = [network_key(cur)]
+    c = read_ssid(cur)
+    if ssid_gap(cur) and last_ssid:
+        keys.append(network_key_with(cur, last_ssid))
+    elif c is not None and prior_ssid is not None and c == prior_ssid:
+        keys.append(network_key_with(cur, "-"))
+    return tuple(keys)
 
 
 def next_last_ssid(last_ssid: Optional[str], cur: Observation, attributions: List[str]) -> Optional[str]:
