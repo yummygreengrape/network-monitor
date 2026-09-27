@@ -228,7 +228,8 @@ class TestTheLastReadSsidSurvivesARestartWithItsAnchor(unittest.TestCase):
                     e = self.engine()
                     self.assertIsNone(e.identity_ssid)
                     if name in ("목록", "문자열"):
-                        # 판정은 이 작업 전부터 그런 앵커에서 멈춘다(detect.link_restarted — 기준 커밋과 같음, NOTES 발견). 새 경로는 시작 단계뿐.
+                        # 첫 판정은 이 작업 전부터 그런 앵커에서 멈춘다 — attributions_for 가 앵커의 wifi 를 읽는 자리들(기준 커밋과 같음,
+                        # NOTES 발견). 새로 막은 경로는 엔진 생성 단계다.
                         continue
                     g = self.gap(ts="2026-01-01T00:00:05Z")
                     e.judge(g, 5.0)
@@ -328,14 +329,15 @@ class TestTheLastReadSsidSurvivesARestartWithItsAnchor(unittest.TestCase):
         store.save_baseline({"ts": g.ts, "data": g.data, "wall": 1000.0, "identity_ssid": marker})
         e = self.engine()
         self.assertEqual(e.identity_ssid, marker)
-        out = []
-        for i, o in enumerate((self.gap(ts="2026-01-01T00:00:05Z"), obs(ts="2026-01-01T00:00:10Z", ssid=SSID, gw_mac=GW_MAC_ALT),
-                               self.gap(ts="2026-01-01T00:00:15Z"))):
-            out += [f.as_dict() for f in e.judge(o, 5.0)]
+        # 조작 값이 남아 있는 공백 주기들을 먼저 돌고(읽은 주기가 오면 그 SSID 로 바뀐다), 매 주기 state.json 을 저장해 본다 — 실제
+        # 경로(`cycle` 뒤 `persist`)처럼. 세 주기 뒤 한 번만 저장하면 그사이 새는 것을 못 본다(DEV-4 검수 3회차).
+        for i, o in enumerate((self.gap(ts="2026-01-01T00:00:05Z"), self.gap(ts="2026-01-01T00:00:10Z", gw_mac=GW_MAC_ALT),
+                               obs(ts="2026-01-01T00:00:15Z", ssid=SSID), self.gap(ts="2026-01-01T00:00:20Z"))):
+            findings = [f.as_dict() for f in e.judge(o, 5.0)]
             e.prev = o
-        e.store.save_state(e.state)
-        blob = json.dumps(out, ensure_ascii=False) + open(os.path.join(self.dir, "state.json"), encoding="utf-8").read()
-        self.assertNotIn("ZZ-TAMPERED", blob)
+            e.store.save_state(e.state)
+            blob = json.dumps(findings, ensure_ascii=False) + open(os.path.join(self.dir, "state.json"), encoding="utf-8").read()
+            self.assertNotIn("ZZ-TAMPERED", blob, "주기 %d" % i)
 
 
 if __name__ == "__main__":
