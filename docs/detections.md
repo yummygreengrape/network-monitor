@@ -239,7 +239,7 @@ WARP 는 데몬 로그도 읽습니다(`data-sources.md` "WARP 데몬 로그"). 
 `VPN_PROTECTION_LOST` 는 지금 붙은 네트워크의 암호화 방식으로 갈립니다. 개인별 자격증명(Enterprise/EAP)이라는 근거가
 있으면 **내지 않고**, 개방형·공유 비밀번호면 medium(사용자가 직접 끊었으면 low), WPA3(SAE)나 방식을 모르면 low 입니다. 접미사
 없는 `WPA2` 도 사실상 공유 비밀번호이므로, **개인별 자격증명이라는 근거가 있을 때만** 보호 상실을 내지 않습니다. 데몬 로그로만
-잡힌 짧은 끊김도 같은 규칙으로 내거나 내지 않고, 낼 때의 등급만 늘 info 입니다(위 절).
+잡힌 짧은 끊김도 같은 규칙으로 내거나 내지 않고, 낼 때는 등급이 늘 info, 확신도가 `의심` 입니다(위 절).
 
 공급자 상태가 `connecting` 이면(Warp 의 연결 단계나 Tailscale 의 Starting 처럼 다시
 맺는 중인 상태가 여기로 옮겨집니다) `VPN_DISCONNECTED`·`VPN_PROTECTION_LOST` 둘 다

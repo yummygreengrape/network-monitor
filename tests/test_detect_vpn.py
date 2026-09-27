@@ -1997,6 +1997,10 @@ class _DaemonSequence:
     def run_seq(self, seq):
         res = enginemod_replay(self.cfg, seq)
         self.assertEqual([f.summary for _, fs in res for f in fs if f.kind == "DETECTOR_ERROR"], [])
+        # AC-17: 데몬 로그로만 잡힌 판정은 어느 열에서든 '의심'이다 — 링크 없는 주기의 끊김, 한 창의 여러 끊김, 창당 상한,
+        # 귀속이 붙은 주기 같은 경계 사례를 이 도우미를 쓰는 시험 전부가 함께 고정한다(DEV-16 1회차 검수 [낮음]).
+        self.assertEqual({f.confidence for _, fs in res for f in fs if f.evidence.get("timing_source") == "daemon"} - {"suspect"},
+                         set())
         return res
 
     def daemon_kinds(self, results, i):
