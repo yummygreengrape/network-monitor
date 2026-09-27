@@ -525,3 +525,62 @@ class TestLifecycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDaemonPathFindingsStayOutOfInvestigations(unittest.TestCase):
+    """데몬 로그로만 잡힌 판정(증거 `timing_source: "daemon"`)은 조사가 열지도 세지도 않는다(AC-16 — 작업
+    2026-09-23-warp-daemon-log, 사용자 결정 2026-09-27). 줄 맨 앞 위조를 막지 못하는 경로가 남은 info 판정이 열린
+    `vpn_drop` 의 되풀이 셈을 채워 medium 결론과 "끊길 때마다 첫 홉은 응답" 문구(첫 홉을 잰 끊김 일부만으로)를
+    만들지 않게 한다. 조회 경로 판정은 그대로 조사를 열고 센다."""
+
+    def finding(self, kind, daemon, attribution=None):
+        ev = {"provider": "warp", "provider_state": "disconnected"}
+        if daemon:
+            ev.update(timing_source="daemon", daemon_down_at="2026-01-01T00:00:01.000Z")
+        else:
+            ev.update(first_hop_alive=True, first_hop_method="icmp")
+        return Finding(axis="security" if kind == "VPN_PROTECTION_LOST" else "quality", kind=kind,
+                       confidence="confirmed", severity="info" if daemon else "medium", summary="",
+                       evidence=ev, attribution=attribution)
+
+    def cycle(self, inv, state, n, findings):
+        o = obs(ts=ts(n))
+        ctx = Context(elapsed=5.0, interval=5.0, features=FEATURES, state=state,
+                      attributions=[], network=network_key(o))
+        extra, _ = inv.run(None, o, ctx, findings, state)
+        return extra
+
+    def test_daemon_path_drops_are_not_counted_by_an_open_vpn_drop(self):
+        inv, state = investigate.Investigator({}), {}
+        self.assertIn("INVESTIGATION_OPENED",
+                      kinds(self.cycle(inv, state, 0, [self.finding("VPN_DISCONNECTED", daemon=False)])))
+        out = []
+        for n in (5, 10, 15):
+            out += self.cycle(inv, state, n, [self.finding("VPN_DISCONNECTED", daemon=True, attribution="vpn_change"),
+                                              self.finding("VPN_PROTECTION_LOST", daemon=True),
+                                              self.finding("VPN_RECONNECTED", daemon=True)])
+        self.assertNotIn("INVESTIGATION_CONCLUDED", kinds(out))
+        vd = [i for i in investigate.Investigator.load(state) if i.kind == "vpn_drop"]
+        self.assertEqual(len(vd), 1)
+        self.assertTrue(vd[0].open)
+        self.assertEqual((vd[0].criteria["drops"], vd[0].criteria["reconnects"]), (1, 0))
+        self.assertEqual(vd[0].criteria["first_hop_alive_at_drop"], [True])
+
+    def test_daemon_path_findings_never_open_one(self):
+        for conf in ({}, {"open_on": {"include_attributed": True}}):
+            for attribution in (None, "vpn_change"):
+                inv, state = investigate.Investigator(conf), {}
+                out = self.cycle(inv, state, 0, [self.finding("VPN_DISCONNECTED", daemon=True, attribution=attribution)])
+                self.assertNotIn("INVESTIGATION_OPENED", kinds(out), (conf, attribution))
+                self.assertEqual(investigate.Investigator.load(state), [], (conf, attribution))
+
+    def test_a_poll_path_drop_in_the_same_cycle_still_opens_it(self):
+        """대조: 같은 주기에 데몬 경로 끊김이 앞에 있어도, 조사는 조회 경로 끊김으로 열리고 그 첫 홉 값을 기준으로 삼는다."""
+        inv, state = investigate.Investigator({}), {}
+        out = self.cycle(inv, state, 0, [self.finding("VPN_DISCONNECTED", daemon=True),
+                                         self.finding("VPN_DISCONNECTED", daemon=False)])
+        self.assertEqual(kinds(out).count("INVESTIGATION_OPENED"), 1)
+        vd = investigate.Investigator.load(state)
+        self.assertEqual([i.kind for i in vd], ["vpn_drop"])
+        self.assertEqual(vd[0].criteria["first_hop_alive_at_drop"], [True])
+        self.assertFalse([e for e in vd[0].evidence if e["what"] == msg.INV_NOTE_SAME_SIGNAL])

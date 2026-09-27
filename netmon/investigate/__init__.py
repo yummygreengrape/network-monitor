@@ -4,7 +4,7 @@
 관측은 확정이지만 그것이 공격인지 접속점 교체인지는 **그 다음에 일어나는
 일**로만 갈린다. 조사는 그 다음을 계속 보다가 결론을 내고 닫는다.
 
-  1. triggers.is_meaningful 이 조사를 열 신호를 고른다
+  1. triggers.is_meaningful 이 조사를 열 신호를 고른다(데몬 로그로만 잡힌 판정은 먼저 뺀다 — 열지도 세지도 않음)
   2. playbook 이 조사마다 자기 기준(criteria)을 세운다
   3. 주기마다 step() 이 돌면서, 알게 된 것에 따라 **기준을 고친다**
   4. 결론이 나거나 예산을 다 쓰면 닫는다
@@ -69,6 +69,12 @@ class Investigator:
             ) -> Tuple[List[Finding], Dict[str, Any]]:
         if not self.conf.get("enabled", True):
             return [], {}
+
+        # 데몬 로그로만 잡힌 판정(`timing_source: "daemon"` — 조회 사이에 끝난 짧은 끊김)은 조사가 열지도 세지도 않는다.
+        # 줄 맨 앞 위조를 막지 못하는 경로가 남아 있어 info 로 내는 판정인데, 여기로 넘기면 열린 `vpn_drop` 의 되풀이 셈을
+        # 채워 품질 medium 결론과 "끊길 때마다 첫 홉은 응답" 문구(첫 홉을 잰 끊김 일부만으로)가 나온다. 판정 자체는 그대로
+        # 남는다(작업 2026-09-23-warp-daemon-log AC-16, 사용자 결정 2026-09-27).
+        findings = [f for f in findings if (f.evidence or {}).get("timing_source") != "daemon"]
 
         invs = self.load(state)
         out: List[Finding] = []
