@@ -29,7 +29,7 @@ from .. import wifi_security
 from ..baseline import VPN_REPORTED_KEY, reported_map
 from ..liveness import ICMP, evaluate, method_label
 from ..model import (CONFIRMED, INFO, INFO_SEV, LOW, MEDIUM, PROBE_TIMED_OUT,
-                     QUALITY, SECURITY, Finding, Observation)
+                     QUALITY, SECURITY, SUSPECT, Finding, Observation)
 from ..vpn import ENDPOINT_PROBES_KEY, scrub_daemon_text, warp_status_name
 
 FEATURE = "detect.vpn"
@@ -458,11 +458,13 @@ TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 def _protection_lost(name: str, now: Any, cur: Observation, prev: Optional[Observation],
                      user: bool, extra: Optional[Dict[str, Any]] = None,
-                     severity: Optional[str] = None) -> List[Finding]:
+                     severity: Optional[str] = None,
+                     confidence: str = CONFIRMED) -> List[Finding]:
     """공급자가 연결 상태를 벗어난 것을 보안 축에 남긴다. 조회 경로와 데몬 로그 경로가 같이 쓴다.
 
     등급은 이 네트워크의 암호화 방식으로 갈린다. 개인별 키(PER_USER)면 내지 않는다.
     `severity` 를 주면 그 등급으로 낸다(데몬 로그 경로는 info — 사용자 결정 2026-09-27).
+    `confidence` 는 데몬 로그 경로만 `SUSPECT` 로 준다(AC-17 — 사용자 결정 2026-09-27).
     """
     forced = severity
     kind = _security_kind(cur, prev)
@@ -488,7 +490,7 @@ def _protection_lost(name: str, now: Any, cur: Observation, prev: Optional[Obser
     evidence.update(extra or {})
     return [Finding(
         axis=SECURITY, kind="VPN_PROTECTION_LOST",
-        confidence=CONFIRMED, severity=severity if forced is None else forced,
+        confidence=confidence, severity=severity if forced is None else forced,
         summary=_protection_summary(name, now, body),
         evidence=evidence,
         attribution="user_action" if user else None,
@@ -1468,8 +1470,10 @@ def daemon_findings(cur: Observation, prev: Optional[Observation], ctx) -> List[
         evidence.update(daemon)
         # 세 판정 모두 info(사용자 결정 2026-09-27): 줄 맨 앞 위조를 막지 못하는 경로가 남아 있고
         # 공격자 범위가 같은 네트워크의 다른 기기까지라, 위조의 영향을 알림 소음으로 줄인다.
+        # 확신도도 셋 모두 '의심'(AC-17 — 사용자 결정 2026-09-27): 같은 이유로 양성 오류의 여지가 있어
+        # "관측만으로 사실" 이라고 말할 수 없다. 조회 경로 판정은 '확정' 그대로다.
         out.append(Finding(
-            axis=QUALITY, kind="VPN_DISCONNECTED", confidence=CONFIRMED, severity=INFO_SEV,
+            axis=QUALITY, kind="VPN_DISCONNECTED", confidence=SUSPECT, severity=INFO_SEV,
             summary=_down_between_polls_summary(name, first_state, down_s, down[0]),
             evidence=evidence,
             # 조회 경로는 같은 주기의 vpn_change 가 연 안정화 창 때문에 사실상 늘 귀속된다.
@@ -1480,10 +1484,10 @@ def daemon_findings(cur: Observation, prev: Optional[Observation], ctx) -> List[
         # 내지 않고, 그 끊김 동안의 네트워크를 판정 주기의 네트워크로 대신할 근거가 없다.
         if not drop.get("without_link"):
             out.extend(_protection_lost(name, first_state, cur, prev, False,
-                                        {"timing_source": "daemon"}, severity=INFO_SEV))
+                                        {"timing_source": "daemon"}, severity=INFO_SEV, confidence=SUSPECT))
         down_since = since[:19] + "Z"
         out.append(Finding(
-            axis=QUALITY, kind="VPN_RECONNECTED", confidence=CONFIRMED, severity=INFO_SEV,
+            axis=QUALITY, kind="VPN_RECONNECTED", confidence=SUSPECT, severity=INFO_SEV,
             summary=msg.VPN_RECONNECTED % (name, _down_phrase(down_since, down_s, 0.0)),
             evidence={"provider": name, "down_since": down_since, "down_seconds": down_s,
                       "unmeasured_seconds": 0.0, "prev_state": last_state, **daemon},

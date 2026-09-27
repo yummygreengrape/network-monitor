@@ -2087,6 +2087,26 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
             res = self.run_seq(seq)
             self.assertEqual([k for i in range(len(res)) for k in self.daemon_kinds(res, i)], [])
 
+    def test_the_daemon_path_findings_are_suspect_and_the_poll_path_stays_confirmed(self):
+        """AC-17(사용자 결정 2026-09-27): 데몬 로그로만 잡힌 세 판정의 확신도는 '의심' — 줄 맨 앞 위조를 막지 못한 경로라 양성 오류의
+        여지가 있다. 조회 경로(조회로 잡힌 끊김·보호 상실·복구, 링크 없는 주기의 끊김)는 '확정' 그대로이고 등급도 그대로다."""
+        res = self.run_seq(self.start() + [self.o(10, self.DROP)])
+        daemon = [f for f in res[2][1] if f.evidence.get("timing_source") == "daemon"]
+        self.assertEqual([(f.kind, f.confidence, f.severity) for f in daemon],
+                         [("VPN_DISCONNECTED", "suspect", "info"), ("VPN_PROTECTION_LOST", "suspect", "info"),
+                          ("VPN_RECONNECTED", "suspect", "info")])
+        kinds = ("VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED")
+        for label, seq, want in (
+                ("조회 경로", self.start() + [self.o(10, self.DROP[:3], state="disconnected"), self.o(15, self.DROP[3:])], kinds),
+                ("링크 없는 주기", self.start() + [self.o(10, self.DROP[:3], state="disconnected", link=False),
+                                                self.o(15, self.DROP[3:])], ("VPN_DISCONNECTED", "VPN_RECONNECTED"))):
+            poll = [f for _, fs in self.run_seq(seq) for f in fs if f.kind in kinds]
+            self.assertEqual(sorted({f.kind for f in poll}), sorted(want), label)
+            self.assertEqual({(f.confidence, f.evidence.get("timing_source")) for f in poll}, {("confirmed", None)}, label)
+        self.assertEqual({f.severity for _, fs in self.run_seq(self.start() + [self.o(10, self.DROP[:3], state="disconnected"),
+                                                                             self.o(15, self.DROP[3:])])
+                          for f in fs if f.kind == "VPN_PROTECTION_LOST"}, {"medium"})
+
     def test_a_drop_across_a_window_boundary_counts_once(self):
         res = self.run_seq(self.start() + [self.o(10, self.DROP[:3]), self.o(15, self.DROP[3:])])
         self.assertEqual(self.daemon_kinds(res, 2), [])

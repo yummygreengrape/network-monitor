@@ -536,7 +536,7 @@ class TestDaemonPathFindingsStayOutOfInvestigations(unittest.TestCase):
         else:
             ev.update(first_hop_alive=True, first_hop_method="icmp")
         return Finding(axis="security" if kind == "VPN_PROTECTION_LOST" else "quality", kind=kind,
-                       confidence="confirmed", severity="info" if daemon else "medium", summary="",
+                       confidence="suspect" if daemon else "confirmed", severity="info" if daemon else "medium", summary="",
                        evidence=ev, attribution=attribution)
 
     def cycle(self, inv, state, n, findings):
