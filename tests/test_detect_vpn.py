@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import os
 import shutil
@@ -2123,6 +2124,26 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
             res = self.run_seq(seq)
             got = [(f.kind, f.confidence, f.severity) for f in res[2][1] if f.evidence.get("timing_source") == "daemon"]
             self.assertEqual(got, [(k, "suspect", "info") for k in kinds], security)
+
+    def test_the_protection_loss_confidence_depends_only_on_the_path(self):
+        """AC-17: 보호 상실의 확신도는 경로로만 갈린다 — `_protection_lost` 가 읽는 입력 전부(암호화 방식 다섯, 직접 끊음 여부,
+        재협상 중, 직전 관측 유무)에서 조회 경로(인자 없는 호출)는 `confirmed`·등급 규칙대로, 데몬 경로(등급 info·확신도 suspect 를
+        넘긴 호출)는 `suspect`·info. 개인별 자격증명이면 둘 다 내지 않는다. 두 경로가 같은 함수를 쓰므로 확신도를 입력에 걸어 바꾸는
+        변이를 잡는다(DEV-16 3회차 검수 [낮음])."""
+        want_sev = {"none": ("low", "medium"), "WPA2_PSK": ("low", "medium"), "WPA3_SAE": ("low", "low"), None: ("low", "low")}
+        for security in ("none", "WPA2_PSK", "WPA3_SAE", None, "WPA2_Enterprise"):
+            cur = obs(security=security)
+            for user, now, prev in itertools.product((True, False), ("disconnected", "connecting"), (None, cur)):
+                case = (security, user, now, prev is None)
+                poll = vpn_rules._protection_lost("warp", now, cur, prev, user)
+                daemon = vpn_rules._protection_lost("warp", now, cur, prev, user, {"timing_source": "daemon"},
+                                                    severity="info", confidence="suspect")
+                if security == "WPA2_Enterprise":
+                    self.assertEqual((poll, daemon), ([], []), case)
+                    continue
+                self.assertEqual([(f.confidence, f.severity) for f in poll], [("confirmed", want_sev[security][0 if user else 1])],
+                                 case)
+                self.assertEqual([(f.confidence, f.severity) for f in daemon], [("suspect", "info")], case)
 
     def test_a_drop_across_a_window_boundary_counts_once(self):
         res = self.run_seq(self.start() + [self.o(10, self.DROP[:3]), self.o(15, self.DROP[3:])])
