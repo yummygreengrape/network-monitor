@@ -596,5 +596,28 @@ class TestDaemonPathFindingsStayOutOfInvestigations(unittest.TestCase):
         self.assertEqual(vd[0].criteria["drops"], 1)
 
 
+    def test_attributed_poll_path_drops_are_still_counted_and_can_open_one(self):
+        """대조: 실제 조회 경로 끊김은 대개 귀속이 붙는다(09-23 하루 12건 중 vpn_change 11). 그런 판정은 거르지 않는다 — 열린 조사에서
+        세어지고, `include_attributed` 를 켜면 조사를 연다(DEV-15 검수 2회차: 귀속 있는 판정까지 거르는 변이가 살아남았다)."""
+        inv, state = investigate.Investigator({}), {}
+        self.cycle(inv, state, 0, [self.finding("VPN_DISCONNECTED", daemon=False)])
+        for n in (5, 10):
+            self.cycle(inv, state, n, [self.finding("VPN_DISCONNECTED", daemon=False, attribution="vpn_change")])
+        vd = [i for i in investigate.Investigator.load(state) if i.kind == "vpn_drop"]
+        self.assertEqual([i.criteria["drops"] for i in vd], [3])
+        inv, state = investigate.Investigator({"open_on": {"include_attributed": True}}), {}
+        out = self.cycle(inv, state, 0, [self.finding("VPN_DISCONNECTED", daemon=False, attribution="vpn_change")])
+        self.assertIn("INVESTIGATION_OPENED", kinds(out))
+
+    def test_a_daemon_path_drop_during_cooldown_leaves_no_record(self):
+        """냉각 중에도 데몬 경로 끊김은 조사 쪽에 아무 기록도 남기지 않는다 — `INVESTIGATION_COOLDOWN` 이 나거나 `_cooldown_noted` 가 켜지면
+        뒤에 오는 조회 경로 끊김의 냉각 기록이 가려진다(DEV-15 검수 2회차 [정보], 수정 전 코드가 그랬다)."""
+        inv = investigate.Investigator({"open_on": {"include_attributed": True}})
+        state = {"investigation_cooldown": {"vpn_drop": 10}}
+        out = self.cycle(inv, state, 0, [self.finding("VPN_DISCONNECTED", daemon=True, attribution="vpn_change")])
+        self.assertEqual([k for k in kinds(out) if k.startswith("INVESTIGATION")], [])
+        self.assertFalse(state.get("_cooldown_noted"))
+
+
 if __name__ == "__main__":
     unittest.main()
