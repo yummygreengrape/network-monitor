@@ -2126,10 +2126,11 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
             self.assertEqual(got, [(k, "suspect", "info") for k in kinds], security)
 
     def test_the_protection_loss_confidence_depends_only_on_the_path(self):
-        """AC-17: 보호 상실의 확신도는 경로로만 갈린다 — `_protection_lost` 가 읽는 입력 전부(암호화 방식 다섯, 직접 끊음 여부,
-        재협상 중, 직전 관측 유무)에서 조회 경로(인자 없는 호출)는 `confirmed`·등급 규칙대로, 데몬 경로(등급 info·확신도 suspect 를
-        넘긴 호출)는 `suspect`·info. 개인별 자격증명이면 둘 다 내지 않는다. 두 경로가 같은 함수를 쓰므로 확신도를 입력에 걸어 바꾸는
-        변이를 잡는다(DEV-16 3회차 검수 [낮음])."""
+        """AC-17: 보호 상실의 확신도는 경로로만 갈린다 — `_protection_lost` 가 가르는 갈래(이번 관측의 암호화 방식 다섯, 직접 끊음
+        여부, 재협상 중 머리, 직전 관측 유무)의 곱에서 조회 경로(인자 없는 호출)는 `confirmed`·등급 규칙대로, 데몬 경로(등급 info·확신도
+        suspect 를 넘긴 호출)는 `suspect`·info. 개인별 자격증명이면 둘 다 내지 않는다. 두 경로가 같은 함수를 쓰므로 확신도를 이 갈래에
+        걸어 바꾸는 변이를 잡는다(DEV-16 3회차 검수 [낮음]). 직전 관측이 다른 암호화 방식을 채우는 경우·유선·인터페이스 바뀜은 바꾸지
+        않는다 — 확신도는 그 입력으로 갈리지 않는다(4회차 검수 [정보])."""
         want_sev = {"none": ("low", "medium"), "WPA2_PSK": ("low", "medium"), "WPA3_SAE": ("low", "low"), None: ("low", "low")}
         for security in ("none", "WPA2_PSK", "WPA3_SAE", None, "WPA2_Enterprise"):
             cur = obs(security=security)
