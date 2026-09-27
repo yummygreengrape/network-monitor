@@ -443,6 +443,13 @@ class TestAddressesInsideFreeText(unittest.TestCase):
             t6 = redactmod.token(self.salt, "ipv6", v6)
             self.assertEqual(self.red({"reason": "to " + v6 + rest})["reason"], "to " + t6 + rest, v6)
 
+    def test_an_upper_case_prefix_with_an_ipv4_tail_is_masked_whole(self):
+        """대문자 16진 접두도 IPv4 를 품은 IPv6 으로 통째로 가린다(FINAL 1회차 [낮음] R1: 접두를 소문자로 좁힌 변이가 전체 시험을
+        통과했다 — 좁히면 뒤의 IPv4 만 가려 IPv6 앞부분이 남는다)."""
+        for v6 in ("2001:DB8::192.0.2.1", "::FFFF:192.0.2.1", "64:FF9B::192.0.2.1"):
+            t6 = redactmod.token(self.salt, "ipv6", v6)
+            self.assertEqual(self.red({"reason": "to " + v6 + " x"})["reason"], "to " + t6 + " x", v6)
+
     def test_an_embedded_ipv4_is_masked_when_only_ipv4_is_asked(self):
         t4 = redactmod.token(self.salt, "ipv4", "192.0.2.1")
         out = self.red({"reason": "to 2001:db8::192.0.2.1 x"}, kinds={"ipv4"})["reason"]

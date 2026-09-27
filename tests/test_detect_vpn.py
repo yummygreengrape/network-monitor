@@ -2215,6 +2215,20 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         self.assertNotIn("192.0.2.1", json.dumps(d.evidence))
         self.assertEqual([x["kind"] for x in d.evidence["daemon_lines"]], ["status", "status", "status"])
 
+    def test_every_path_that_reads_stored_lines_rechecks_them(self):
+        """재검사(`_daemon_line`)를 부르는 세 경로 — 상태 파일의 줄 목록(`_daemon_lines`), 넘어온 창(`_carry_items`), 링크 없는
+        주기의 표본 줄(`daemon_evidence_without_link`) — 가 각자 조작된 줄을 버린다(FINAL 1회차 [낮음]: 한 경로에서만 재검사를
+        뺀 변이 셋이 전체 시험을 통과했다)."""
+        good = dl("07.493", "status", "Disconnected(InternalTunnelError)")
+        bad = [dl("07.490", "error", "to 192.0.2.1 x"), dl("07.491", "status", "Connected\n")]
+        self.assertEqual(vpn_rules._daemon_lines(bad + [good], 10), [good])
+        self.assertEqual(vpn_rules._carry_items(bad + [{"kind": "reset"}, good]), [{"kind": "reset"}, good])
+        state = {vpn_rules.DAEMON_STATE_KEY: {"state": "Connected", "pending": [], "open_since": None,
+                                              "open_lines": [], "open_dropped": 0}}
+        ev = vpn_rules.daemon_evidence_without_link(state, self.o(10, bad + [good], state="disconnected", link=False))
+        self.assertNotIn("192.0.2.1", json.dumps(ev))
+        self.assertEqual(ev["daemon_lines"], [good])
+
     # ADV-6 (판정 쪽 키) ─────────────────────────────────────────────────────
     def test_broken_state_keys_restart_from_unknown_without_an_exception(self):
         broken = [{"warp_daemon_state": "x"}, {"warp_daemon_state": {"state": 5, "pending": "x"}},
@@ -2807,6 +2821,14 @@ class TestDaemonEvidenceOnPollFindings(_DaemonSequence, unittest.TestCase):
         res = self.run_seq(self.start() + [self.o(10, self.many_drops(30) + self.DROP[:3], state="disconnected")])
         d = self.poll(res, 2, "VPN_DISCONNECTED")[0]
         self.assertEqual((len(d.evidence["daemon_lines"]), d.evidence["daemon_lines_dropped"]), (40, 23))
+
+    def test_the_other_documented_caps_keep_their_values(self):
+        """문서가 적은 나머지 상한 값(FINAL 1회차 [낮음]: 시험이 상수를 이름으로만 읽어 값을 바꾼 변이가 통과했다) —
+        창당 새 경로 끊김 10건(docs/detections.md, 사용자 확인 값), 원인 줄 대기 20줄·넘어온 창 200항목(같은 문서),
+        읽기 4MiB·저장 글 300자·수집 쪽 보류 20줄(docs/data-sources.md)."""
+        self.assertEqual((vpn_rules.DAEMON_DROPS_MAX, vpn_rules.DAEMON_PENDING_MAX, vpn_rules.DAEMON_CARRY_MAX), (10, 20, 200))
+        self.assertEqual((vpnmod.WARP_DAEMON_READ_CAP, vpnmod.WARP_DAEMON_TEXT_CAP, vpnmod.WARP_DAEMON_HELD_MAX),
+                         (4 * 1024 * 1024, 300, 20))
 
     def test_no_count_key_stays_in_the_state_when_nothing_was_dropped(self):
         """K-6 "버린 것이 없으면 키가 없다" 는 상태 파일에도 해당한다(DEV-12 2회차 검수 [정보]: 0 값 키를 남기는 변이가 살아남았다)."""
