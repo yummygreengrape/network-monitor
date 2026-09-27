@@ -442,6 +442,26 @@ class TestAnSsidGapDoesNotCloseAnInvestigation(unittest.TestCase):
         self.assertIn("|-|", network_key(gap))
         self.assertEqual(eng.state.get("network"), network_key(gap))
 
+    def test_an_investigation_opened_in_a_gap_records_the_observed_key(self):
+        """(k) 공백 주기에 열린 조사의 기록(`network`)도 관측 키(SSID 자리 "-")다 — 대체 키를 기록에 쓰지 않는다(DEV-2 검수 1회차 [낮음]).
+        기준 커밋은 공백 주기의 MAC 변화를 억제해 이 조사가 열리지 않으므로 새 코드 전용이다."""
+        from netmon.detect import network_key
+        eng = self.engine()
+        for ob in (self.o(), self.o()):
+            self.step(eng, ob)
+        gap = self.o(gap=True, gw_mac=GW_MAC_ALT)
+        self.assertIn("INVESTIGATION_OPENED", [f.kind for f in self.step(eng, gap)])
+        self.assertEqual([i.get("network") for i in eng.state.get("investigations", []) if i.get("status") == "open"],
+                         [network_key(gap)])
+
+    def test_an_empty_wifi_block_still_closes_it_as_before(self):
+        """(K-7) 수집기 예외로 Wi-Fi 블록이 빈 주기는 공백이 아니다 — 대체 키 없이 지금처럼 닫힌다(DEV-2 검수 1회차 [참고]: 대체 키에서
+        공백 판별을 뺀 변이 M3 가 살아남았다)."""
+        empty = self.o(gw_mac=GW_MAC_ALT)
+        empty.data["wifi"] = {}
+        res = self.run_seq([self.o(), self.o(), self.o(gw_mac=GW_MAC_ALT), empty])
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_ABANDONED"), [(3, "INVESTIGATION_ABANDONED")])
+
     def test_an_ssid_with_the_separator_does_not_join_two_networks(self):
         """ADV-3 — SSID 는 AP 가 정하는 값이라 `|` 를 품을 수 있다. 조사 비교가 키를 쪼개지 않으므로, SSID 에 다른 네트워크의 키 조각을
         넣어도 그 네트워크의 조사를 "같은 네트워크" 로 이어받지 못한다."""
@@ -452,7 +472,8 @@ class TestAnSsidGapDoesNotCloseAnInvestigation(unittest.TestCase):
         self.assertNotEqual(network_key_with(gap, forged), network_key(home))
         res = self.run_seq([home, self.o(), self.o(gw_mac=GW_MAC_ALT), self.o(ssid=forged, gateway=GW2, routers=(GW2,),
                                                                             my_ip="198.51.100.50", dhcp_server=DHCP_SRV2), gap])
-        self.assertEqual(len(self.kinds_of(res, "INVESTIGATION_ABANDONED")), 1)
+        # 다른 네트워크의 첫 주기(3)에 닫힌다 — 키를 `|` 로 쪼개 앞 조각만 견주면 한 주기 이어받는다(DEV-2 검수 1회차 변이 M2)
+        self.assertEqual(self.kinds_of(res, "INVESTIGATION_ABANDONED"), [(3, "INVESTIGATION_ABANDONED")])
 
 
 class TestIdentityRuleOverEveryBranch(unittest.TestCase):
