@@ -210,6 +210,46 @@ class TestTheLastReadSsidSurvivesARestartWithItsAnchor(unittest.TestCase):
         with open(store.baseline_path, "w", encoding="utf-8") as fh:
             json.dump(snap, fh)
 
+    def test_an_unwritable_anchor_ssid_is_not_restored_either(self):
+        """ADV-1 대체값도 같은 검사를 거친다 — 키가 없거나 깨졌을 때 되살린 앵커의 SSID 가 짝 없는 대리 문자(원문·ident 로 감싼 것)이면
+        되살리지 않는다. 되살리면 다음 저장에서 UTF-8 예외로 에이전트가 멈추고 되풀이한다(DEV-4 검수 2회차 [중간] — 기준 커밋에는 없던 경로).
+        스냅샷의 `wifi` 가 목록·문자열이어도 엔진을 만드는 순간 죽지 않는다(2회차 [낮음])."""
+        for name, wifi in (("원문", {"applicable": True, "ssid": "\ud800"}),
+                           ("ident", {"applicable": True, "ssid": {"id": "ssid", "v": "\ud800"}}),
+                           ("목록", ["x"]), ("문자열", "x")):
+            for key in ("키 없음", 5):
+                with self.subTest(wifi=name, key=key):
+                    a = obs(ts="2026-01-01T00:00:00Z", ssid=SSID)
+                    data = dict(a.data, wifi=wifi)
+                    snap = {"ts": a.ts, "data": data, "wall": 1000.0}
+                    if key != "키 없음":
+                        snap["identity_ssid"] = key
+                    self.write_raw(Store(self.dir), snap)
+                    e = self.engine()
+                    self.assertIsNone(e.identity_ssid)
+                    if name in ("목록", "문자열"):
+                        # 판정은 이 작업 전부터 그런 앵커에서 멈춘다(detect.link_restarted — 기준 커밋과 같음, NOTES 발견). 새 경로는 시작 단계뿐.
+                        continue
+                    g = self.gap(ts="2026-01-01T00:00:05Z")
+                    e.judge(g, 5.0)
+                    e._keep_baseline(g, 1005.0)
+                    self.assertIsNone(Store(self.dir).load_baseline().get("identity_ssid"))
+
+    def test_a_broken_key_falls_back_to_a_read_anchor(self):
+        """깨진 키(키 없음만이 아니라)도 되살린 앵커가 SSID 를 읽은 관측이면 그 SSID 로 — 재시작 뒤 공백 → 같은 SSID 는 이동이 아니다
+        (DEV-4 검수 2회차 [낮음]: 깨진 값 시험이 모두 공백 앵커라 "깨졌으면 None" 변이 M-k 가 살아남았다)."""
+        for name, value in (("None", None), ("숫자", 5), ("목록", ["x"]), ("빈 값", ""), ("상한+1", "a" * 129), ("대리 문자", "\ud800")):
+            with self.subTest(name):
+                a = obs(ts="2026-01-01T00:00:00Z", ssid=SSID)
+                self.write_raw(Store(self.dir), {"ts": a.ts, "data": a.data, "wall": 1000.0, "identity_ssid": value})
+                e = self.engine()
+                self.assertEqual(e.identity_ssid, SSID)
+                e.judge(self.gap(ts="2026-01-01T00:00:05Z"), 5.0)
+                e.prev = e.anchor
+                cycles = e.state.get("cycles_on_network")
+                e.judge(obs(ts="2026-01-01T00:00:10Z", ssid=SSID), 5.0)
+                self.assertGreater(e.state.get("cycles_on_network"), cycles, "이동으로 읽었다면 기준선이 지워져 1 부터 센다")
+
     def run_cycles(self, e, seq):
         """`Engine.cycle` 을 그대로 돈다(관측만 바꿔 끼움) — 판정과 스냅샷 저장의 순서까지 실제 경로로."""
         out = []

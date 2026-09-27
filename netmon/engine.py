@@ -161,7 +161,16 @@ class Engine:
         ssid = saved.get("identity_ssid")
         # 키가 없는(이전 판이 남긴) 스냅샷이나 깨진 값이면 되살린 관측이 읽은 SSID 를 쓴다 — 지금까지처럼 앵커와 견주는 것과 같다.
         # 문자열이면(제어 문자·`|` 포함) 그대로 받는다 — 읽은 SSID 와의 동일성 비교에만 쓰인다.
-        self.identity_ssid = ssid if _restorable_ssid(ssid) else read_ssid(obs)
+        if _restorable_ssid(ssid):
+            self.identity_ssid = ssid
+        else:
+            # 대체값도 같은 검사를 거친다 — 앵커 관측도 사람이 고친 파일에서 온다(짝 없는 대리 문자면 다음 저장에서 예외, `wifi` 가
+            # 목록·문자열이면 읽는 순간 예외 — DEV-4 검수 2회차). 못 쓰면 없음(지금까지의 동작).
+            try:
+                fallback = read_ssid(obs)
+            except Exception:
+                fallback = None
+            self.identity_ssid = fallback if _restorable_ssid(fallback) else None
         wall = saved.get("wall")
         self.prev_wall = float(wall) if isinstance(wall, (int, float)) else None
         # 에이전트가 멈춰 있던 시간은 측정 공백이다. 다음 주기에서 elapsed 가
