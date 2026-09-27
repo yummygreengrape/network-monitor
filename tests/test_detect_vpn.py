@@ -2067,6 +2067,14 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
         res = self.run_seq(self.start() + [self.o(10, self.DROP)] + [self.o(15 + 5 * i) for i in range(6)])
         self.assertFalse([f.kind for _, fs in res for f in fs if f.kind.startswith("INVESTIGATION")])
 
+    def test_the_daemon_path_opens_no_investigation_even_with_attributed_included(self):
+        """AC-16(DEV-15): 새 경로 끊김은 귀속이 늘 붙어(`vpn_change` 기본) 기본 규칙에서는 조사를 열지 않지만, 조사 설정
+        `include_attributed` 를 켜면 수정 전에는 `vpn_drop` 을 열었다 — 실제 판정기 출력으로 고정한다(DEV-15 검수 1회차)."""
+        self.cfg.data["investigate"] = {"open_on": {"include_attributed": True}}
+        res = self.run_seq(self.start() + [self.o(10, self.DROP)] + [self.o(15 + 5 * i) for i in range(6)])
+        self.assertEqual(self.daemon_kinds(res, 2), ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"])
+        self.assertFalse([f.kind for _, fs in res for f in fs if f.kind.startswith("INVESTIGATION")])
+
     def test_a_drop_the_poll_saw_gets_nothing_from_this_path(self):
         seqs = [
             # 창 N 에서 열리고 N+1 에서 닫힘, 조회는 비연결 → 연결

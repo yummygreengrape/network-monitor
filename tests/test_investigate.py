@@ -523,10 +523,6 @@ class TestLifecycle(unittest.TestCase):
         self.assertEqual(h.needs.get("open"), 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestDaemonPathFindingsStayOutOfInvestigations(unittest.TestCase):
     """데몬 로그로만 잡힌 판정(증거 `timing_source: "daemon"`)은 조사가 열지도 세지도 않는다(AC-16 — 작업
     2026-09-23-warp-daemon-log, 사용자 결정 2026-09-27). 줄 맨 앞 위조를 막지 못하는 경로가 남은 info 판정이 열린
@@ -584,3 +580,21 @@ class TestDaemonPathFindingsStayOutOfInvestigations(unittest.TestCase):
         self.assertEqual([i.kind for i in vd], ["vpn_drop"])
         self.assertEqual(vd[0].criteria["first_hop_alive_at_drop"], [True])
         self.assertFalse([e for e in vd[0].evidence if e["what"] == msg.INV_NOTE_SAME_SIGNAL])
+
+
+    def test_an_open_one_gets_no_same_signal_notes_from_the_daemon_path(self):
+        """`include_attributed` 를 켜 데몬 경로 끊김이 트리거 규칙에 들 때도, 열린 `vpn_drop` 에 "같은 신호" 메모를 남기지 않는다
+        (DEV-15 검수 1회차: 트리거 루프만 거르기 전 목록을 도는 변이가 살아남았다 — 메모 3건이 조사 기록에 남음)."""
+        inv, state = investigate.Investigator({"open_on": {"include_attributed": True}}), {}
+        self.cycle(inv, state, 0, [self.finding("VPN_DISCONNECTED", daemon=False)])
+        for n in (5, 10, 15):
+            self.cycle(inv, state, n, [self.finding("VPN_DISCONNECTED", daemon=True, attribution="vpn_change"),
+                                       self.finding("VPN_RECONNECTED", daemon=True)])
+        vd = [i for i in investigate.Investigator.load(state) if i.kind == "vpn_drop"]
+        self.assertEqual(len(vd), 1)
+        self.assertEqual([e for e in vd[0].evidence if e["what"] == msg.INV_NOTE_SAME_SIGNAL], [])
+        self.assertEqual(vd[0].criteria["drops"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

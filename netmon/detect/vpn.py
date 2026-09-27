@@ -1434,8 +1434,8 @@ def _down_between_polls_summary(name: str, now: str, down_s: Optional[float], fi
 def daemon_findings(cur: Observation, prev: Optional[Observation], ctx) -> List[Finding]:
     """조회 사이에 끝난 WARP 끊김마다 끊김 → 보호 상실 → 복구 판정(SPEC AC-6, TODO K-3).
 
-    순서가 중요하다: 열린 `vpn_drop` 조사는 판정 목록을 차례로 읽어 `still_down` 을 켜고
-    끈다(netmon/investigate/playbooks.py) — 복구가 앞에 오면 조사가 "끊긴 채" 로 남는다.
+    이벤트 기록을 읽는 순서(끊김 → 보호 상실 → 복구)대로 낸다. 조사는 이 판정들을 보지 않는다 — 열지도 세지도
+    않는다(AC-16, netmon/investigate/__init__.py `Investigator.run`).
     """
     window = getattr(ctx, "warp_daemon", None)
     if not isinstance(window, dict) or not window.get("eligible"):
