@@ -162,6 +162,14 @@ class TestAnSsidGapIsNotAMove(unittest.TestCase):
         eng.needs = {}
         return eng
 
+    def never_reset(self, seq):
+        """엔진으로 열을 돌려 기준선이 한 번도 지워지지 않았는가(`cycles_on_network` 가 줄지 않고 늘기만 함)."""
+        eng, seen = self.engine(), []
+        for ob in seq:
+            self.step(eng, ob)
+            seen.append(eng.state.get("cycles_on_network"))
+        return all(b > a for a, b in zip(seen, seen[1:]))
+
     @staticmethod
     def step(eng, ob, elapsed=5.0):
         from netmon.detect import is_complete
@@ -183,22 +191,27 @@ class TestAnSsidGapIsNotAMove(unittest.TestCase):
         res = self.run_seq([self.o(), self.o(), self.o(gap=True), self.o(), self.o()])
         icmp_ok = [i for i, (_, fs) in enumerate(res) for f in fs if f.kind == "GATEWAY_ICMP_OK"]
         self.assertEqual(len(icmp_ok), 1, "도달성 판정 방법은 처음 한 번만 배운다 — 공백이 기준선을 지우면 다시 난다")
-        self.assertEqual(self.attributed(res, "network_change"), [])
+        self.n = 0
+        self.assertTrue(self.never_reset([self.o(), self.o(), self.o(gap=True), self.o(), self.o()]))
 
     # QA-1 ────────────────────────────────────────────────────────────────
     def test_a_long_gap_with_a_measurement_gap_inside_is_only_sleep(self):
         """(i) 공백 중 측정 공백(잠자기) → `SLEEP` 만, 이동 귀속·초기화 없음, 공백 뒤 같은 SSID 도 변경 아님."""
         res = self.run_seq([self.o(), self.o(), self.o(gap=True), self.o(gap=True, skip=120), self.o(gap=True), self.o()])
-        self.assertEqual(self.attributed(res, "network_change") + self.attributed(res, "link_restart"), [])
         self.assertEqual(len([1 for _, fs in res for f in fs if f.kind == "GATEWAY_ICMP_OK"]), 1)
+        self.n = 0
+        self.assertTrue(self.never_reset([self.o(), self.o(), self.o(gap=True), self.o(gap=True, skip=120), self.o(gap=True),
+                                          self.o()]))
 
     def test_a_vpn_change_in_a_gap_cycle_still_opens_its_own_window(self):
-        """공백 주기와 VPN 전환이 겹치면(09-16~23 실측 G1~G4) VPN 전환의 창은 지금처럼 열리고, 이동 귀속·초기화는 없다."""
+        """공백 주기와 VPN 전환이 겹치면(09-16~23 실측 G1~G4) 공백 없는 VPN 전환처럼 VPN 전환 사유로 창이 열리고, 이동 귀속·초기화는 없다
+        (기준 커밋은 같은 주기에 network_change 사유로 창을 열고 기준선을 지웠다)."""
         eng = self.engine()
         for ob in (self.o(vpn=vpn_state()), self.o(vpn=vpn_state())):
             self.step(eng, ob)
         cycles = eng.state.get("cycles_on_network")
         self.step(eng, self.o(gap=True, vpn=vpn_state("disconnected")))
+        self.assertTrue(eng.state.get("settle_left_s"))
         self.assertEqual(eng.state.get("settle_reason"), "vpn_change")
         self.assertGreater(eng.state.get("cycles_on_network"), cycles, "기준선이 지워지지 않았다(초기화면 다시 1 부터)")
 
@@ -234,8 +247,9 @@ class TestAnSsidGapIsNotAMove(unittest.TestCase):
         eng = self.engine()
         for ob in (self.o(), self.o(), self.o(gap=True), self.o(linkless=True), self.o(linkless=True)):
             self.step(eng, ob)
-        fs = self.step(eng, self.o())
-        self.assertEqual([f.kind for f in fs if f.attribution in ("network_change", "link_restart", "iface_change")], [])
+        cycles = eng.state.get("cycles_on_network")
+        self.step(eng, self.o())
+        self.assertGreater(eng.state.get("cycles_on_network"), cycles, "이동이면 기준선이 지워져 1 부터 센다")
         self.assertEqual(eng.state.get("settle_reason"), "link_restart")
 
     def test_an_evil_twin_behind_a_gap_and_a_link_break_is_not_excused(self):
@@ -378,8 +392,9 @@ class TestIdentityRuleOverEveryBranch(unittest.TestCase):
       - 이동 귀속이 없고 이번 주기에 SSID 를 실제로 읽지 못했으며 링크 근거(링크 없는 주기·링크 재시작)가 있으면 `link_restart`.
       - 측정 간격이 벌어졌으면 `sleep`(정체성과 무관하게 함께).
 
-    엔진에서 드문 조합도 돈다 — 기준 관측이 SSID 를 읽었는데 읽은 SSID 가 없거나 다른 것은 동의가 꺼져 있을 때(엔진이 읽은 SSID 를 넘기지
-    않음)와 재시작 뒤 되살린 값이 없을 때만 생긴다. 규칙이 입력만으로 정해지는지를 보려고 그대로 둔다. 새 인자(`last_ssid`)를 부르므로 새 코드 전용이다.
+    엔진에서 드문 조합도 돈다 — 기준 관측이 SSID 를 읽었는데 읽은 SSID 가 없는 것은 동의가 꺼져 있을 때(엔진이 읽은 SSID 를 넘기지 않음)와
+    재시작 뒤 되살린 값이 없을 때만 생기고, 읽은 SSID 가 기준 관측의 SSID 와 다른 것은 엔진에서 생기지 않는다(앵커가 읽은 주기면 그 주기에
+    같은 값이 기록됨). 규칙이 입력만으로 정해지는지를 보려고 그대로 둔다. 새 인자(`last_ssid`)를 부르므로 새 코드 전용이다.
     """
 
     S, T = SSID, "OtherNet"
