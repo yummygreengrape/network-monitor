@@ -115,9 +115,10 @@ class TestFirstSample(unittest.TestCase):
 class TestAnSsidGapIsNotAMove(unittest.TestCase):
     """위치 헬퍼가 SSID 를 못 준 주기(공백 주기)를 네트워크 이동으로 읽지 않는다(작업 2026-09-27-ssid-gap-network-change).
 
-    2026-09-27 실측: 헬퍼가 실패한 공백 9개(1주기~약 5시간)는 앞뒤 인터페이스·SSID·서브넷이 모두 같았는데, 진입·이탈 때마다
-    `network_change` 가 붙어 기준선이 초기화되고 도달성 판정(`GATEWAY_ICMP_OK`)이 다시 났다(20건). 공백 주기는 SSID 로 변경을
+    실측(09-16~09-27): 헬퍼가 실패한 공백 가운데 앞뒤 인터페이스·SSID·서브넷이 같고 연결이 끊기지 않은 10개(1주기~약 5시간)가
+    진입·이탈 때마다 `network_change` 가 붙어 기준선이 초기화되고 도달성 판정(`GATEWAY_ICMP_OK`)이 다시 났다(20건). 공백 주기는 SSID 로 변경을
     가리지 않고, 다시 읽은 SSID 는 마지막으로 읽은 SSID 와 견준다 — 위협 모델 판단 표(docs/threat-model.md)를 그대로 쓴다.
+    (20건은 09-16~09-27 전체 — 09-27 의 9개가 18건, 09-23 의 1개가 2건.)
     """
 
     def setUp(self):
@@ -202,14 +203,15 @@ class TestAnSsidGapIsNotAMove(unittest.TestCase):
         self.assertGreater(eng.state.get("cycles_on_network"), cycles, "기준선이 지워지지 않았다(초기화면 다시 1 부터)")
 
     def test_a_gap_does_not_repeat_the_silent_gateway_decision(self):
-        """ICMP 에 응답하지 않는 게이트웨이 — 공백이 기준선을 지우지 않으므로 `GATEWAY_ICMP_SILENT` 도 공백 없는 열과 같은 횟수."""
+        """ICMP 에 응답하지 않는 게이트웨이 — 공백이 기준선을 지우지 않으므로 `GATEWAY_ICMP_SILENT` 는 한 번만 난다. 출구 뒤에 도달성 판정을
+        다시 배울 만큼 주기를 둔다(DEV-1 검수 1회차: 12주기로는 기준 커밋도 1번이라 이 조건을 검사하지 못했다 — 30주기에서 기준 커밋은 2번)."""
         def count(seq):
             return len([1 for _, fs in self.run_seq(seq) for f in fs if f.kind == "GATEWAY_ICMP_SILENT"])
         self.n = 0
-        plain = count([self.o(icmp_ok=False) for _ in range(12)])
+        plain = count([self.o(icmp_ok=False) for _ in range(30)])
         self.n = 0
-        gapped = count([self.o(icmp_ok=False, gap=(i in (6, 7))) for i in range(12)])
-        self.assertEqual(gapped, plain)
+        gapped = count([self.o(icmp_ok=False, gap=(i in (6, 7))) for i in range(30)])
+        self.assertEqual((plain, gapped), (1, 1))
 
     # QA-2 ────────────────────────────────────────────────────────────────
     def test_another_ssid_after_a_gap_is_a_move(self):
@@ -264,20 +266,42 @@ class TestAnSsidGapIsNotAMove(unittest.TestCase):
         self.step(eng, self.o(gw_mac=GW_MAC_ALT, my_ip="192.0.2.77", lease_start="2026-01-01 00:01:00"))
         self.assertEqual(eng.state.get("cycles_on_network"), 1, "잊은 뒤 첫 읽기는 공백 주기의 \"-\" 와 견줘 이동(지금과 같음)")
 
-    def test_turning_the_location_consent_off_forgets_the_ssid(self):
-        """(e 뒷부분) 동의를 끄면 읽은 SSID 를 잊고, 다시 켠 뒤 첫 읽기는 지금처럼 기준 관측과 견준다."""
-        eng = self.engine()
+    def consent_off_and_back(self, eng):
         for ob in (self.o(), self.o()):
             self.step(eng, ob)
-        self.assertEqual(getattr(eng, "identity_ssid", None), SSID)
+        before = getattr(eng, "identity_ssid", None)
         self.cfg.revoke("location")
         withheld = self.o(gap=False, ssid=None)
         withheld.data["wifi"]["identity_withheld"] = True
         self.step(eng, withheld)
-        self.assertIsNone(getattr(eng, "identity_ssid", None))
+        during = getattr(eng, "identity_ssid", None)
         self.cfg.grant("location")
         self.step(eng, self.o())
-        self.assertEqual(eng.state.get("cycles_on_network"), 1, "동의 없이 기록한 \"-\" 와 견줘 이동 — 지금과 같다")
+        return before, during
+
+    def test_turning_the_location_consent_off_forgets_the_ssid(self):
+        """(e 뒷부분) 동의를 끄면 읽은 SSID 를 잊는다(새 내부 값 — 기준 커밋에는 없음)."""
+        self.assertEqual(self.consent_off_and_back(self.engine()), (SSID, None))
+
+    def test_the_first_read_after_the_consent_comes_back_is_judged_as_before(self):
+        """(e 뒷부분, K-7) 동의를 다시 켠 뒤 첫 읽기는 지금처럼 기준 관측(동의 없이 기록한 "-")과 견줘 이동이다 — 기준 커밋과 같다."""
+        eng = self.engine()
+        self.consent_off_and_back(eng)
+        self.assertEqual(eng.state.get("cycles_on_network"), 1)
+
+    def test_a_gap_is_a_gap_whatever_the_reason(self):
+        """공백 판별은 사유를 보지 않는다(SPEC 가정 2, K-3) — 헬퍼가 빈 SSID 를 줌(`helper_unavailable` 없음, 위치 헬퍼로 읽힘 표지)이나
+        ipconfig 가 빈 값을 줌(권한 있음)도 헬퍼 실패와 같게 이동이 아니다(DEV-1 검수 1회차: 모든 픽스처가 helper_unavailable 을 붙여
+        공백 판별을 그 표지로 바꾼 변이가 살아남았다)."""
+        for name, mark in (("헬퍼 빈 SSID", {"location": "granted-via-helper", "source": "location-helper"}),
+                           ("ipconfig 빈 값", {"location": "granted", "source": "ipconfig"})):
+            with self.subTest(name):
+                self.n = 0
+                gap = self.o(ssid=None)
+                gap.data["wifi"].update(mark)
+                self.assertNotIn("helper_unavailable", gap.data["wifi"])
+                res = self.run_seq([self.o(), self.o(), gap, self.o()])
+                self.assertEqual(len([1 for _, fs in res for f in fs if f.kind == "GATEWAY_ICMP_OK"]), 1)
 
     def test_without_the_consent_the_last_read_ssid_is_not_used(self):
         """동의가 꺼져 있으면 마지막으로 읽은 SSID 를 쓰지 않고 지금처럼 기준 관측과 견준다 — 동의 없이 표본을 다시 판정해도(표본에
@@ -354,8 +378,8 @@ class TestIdentityRuleOverEveryBranch(unittest.TestCase):
       - 이동 귀속이 없고 이번 주기에 SSID 를 실제로 읽지 못했으며 링크 근거(링크 없는 주기·링크 재시작)가 있으면 `link_restart`.
       - 측정 간격이 벌어졌으면 `sleep`(정체성과 무관하게 함께).
 
-    엔진에서는 도달하지 않는 조합도 돈다 — 기준 관측이 SSID 를 읽었는데 읽은 SSID 가 없거나 다른 것은 동의가 꺼져 있을 때만(엔진이 읽은
-    SSID 를 넘기지 않음) 생긴다. 규칙이 입력만으로 정해지는지를 보려고 그대로 둔다. 새 인자(`last_ssid`)를 부르므로 새 코드 전용이다.
+    엔진에서 드문 조합도 돈다 — 기준 관측이 SSID 를 읽었는데 읽은 SSID 가 없거나 다른 것은 동의가 꺼져 있을 때(엔진이 읽은 SSID 를 넘기지
+    않음)와 재시작 뒤 되살린 값이 없을 때만 생긴다. 규칙이 입력만으로 정해지는지를 보려고 그대로 둔다. 새 인자(`last_ssid`)를 부르므로 새 코드 전용이다.
     """
 
     S, T = SSID, "OtherNet"

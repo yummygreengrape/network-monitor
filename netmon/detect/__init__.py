@@ -92,7 +92,10 @@ class Context:
 
 
 def network_key(obs: Observation) -> str:
-    """네트워크 정체성. 이것이 바뀌면 다른 네트워크로 옮긴 것이다.
+    """네트워크 정체성(판정·상태·조사 기록의 `network` 값 — 관측값 그대로).
+
+    옮겼는지는 이 키를 견주지 않고 `_identity_changed` 가 판단한다 — SSID 를 못 읽은 공백 주기는 키의 SSID 자리가 "-" 가 되지만
+    이동이 아니다(작업 2026-09-27-ssid-gap-network-change).
 
     **우리가 감시하는 값은 여기 들어가지 않는다.** 게이트웨이 MAC, BSSID,
     DHCP 서버, 게이트웨이 IP 는 전부 공격자가 바꿀 수 있는 값이고, 정체성에
