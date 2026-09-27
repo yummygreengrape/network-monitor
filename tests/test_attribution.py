@@ -575,6 +575,45 @@ class TestIdentityRuleOverEveryBranch(unittest.TestCase):
         self.assertEqual(n, 720)
 
 
+class TestTheInvestigationAliasRule(unittest.TestCase):
+    """조사 중단 비교의 대체 키(detect.network_aliases — 작업 2026-09-27-ssid-gap-network-change K-4)를 입력 갈래의 곱으로 돈다. 기대는 명세
+    AC-4·K-4 에서 옮긴 것이다: 관측 키는 늘 있다. 공백 주기이고 갱신 뒤 값이 있으면 SSID 자리를 그 값으로 바꾼 키를 더한다. SSID 를 읽은 주기이고
+    그 값이 갱신 전 값과 같으면 SSID 자리를 "-" 로 바꾼 키를 더한다. 그 밖(동의 없음·Wi-Fi 아님·빈 Wi-Fi 블록, 갱신 전 값 없음·다름, 잊음)은 관측 키
+    하나. 새 함수를 부르므로 새 코드 전용이다."""
+
+    def test_every_branch(self):
+        import itertools
+        from netmon.detect import network_aliases, network_key, network_key_with
+        S, T = SSID, "OtherNet"
+        n = 0
+        for kind, prior, last in itertools.product(("읽음S", "읽음T", "공백", "동의 없음", "Wi-Fi 아님", "빈 Wi-Fi"), (None, S, T), (None, S, T)):
+            if kind == "읽음S":
+                cur = obs(ssid=S)
+            elif kind == "읽음T":
+                cur = obs(ssid=T)
+            elif kind == "공백":
+                cur = obs(ssid=None)
+                cur.data["wifi"]["helper_unavailable"] = True
+            elif kind == "동의 없음":
+                cur = obs(ssid=None)
+                cur.data["wifi"]["identity_withheld"] = True
+            elif kind == "Wi-Fi 아님":
+                cur = obs(ssid=None, iface_kind="ethernet")
+            else:
+                cur = obs(ssid=None)
+                cur.data["wifi"] = {}
+            want = [network_key(cur)]
+            read = {"읽음S": S, "읽음T": T}.get(kind)
+            if kind == "공백" and last:
+                want.append(network_key_with(cur, last))
+            elif read is not None and prior is not None and read == prior:
+                want.append(network_key_with(cur, "-"))
+            with self.subTest(kind=kind, prior=prior, last=last):
+                self.assertEqual(list(network_aliases(cur, prior, last)), want)
+            n += 1
+        self.assertEqual(n, 54)
+
+
 class TestTheLastReadSsidUpdateRule(unittest.TestCase):
     """마지막으로 읽은 SSID 의 갱신 규칙(detect.next_last_ssid — 작업 2026-09-27-ssid-gap-network-change K-6). 기대는 명세 AC-3 에서:
     읽었으면 그 값, 공백 주기에 이동 귀속(iface_change·network_change·link_restart)이면 잊음, 공백 주기에 잠자기·VPN 전환만이면 유지,
