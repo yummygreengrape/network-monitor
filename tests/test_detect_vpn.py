@@ -2111,6 +2111,19 @@ class TestShortDropsFromTheDaemonLog(_DaemonSequence, unittest.TestCase):
                                                                              self.o(15, self.DROP[3:])])
                           for f in fs if f.kind == "VPN_PROTECTION_LOST"}, {"medium"})
 
+    def test_the_daemon_path_follows_the_same_rules_on_every_kind_of_network(self):
+        """AC-6·AC-17: 데몬 경로 세 판정은 네트워크 암호화 방식과 무관하게 '의심'·info 이고, 보호 상실은 조회 경로와 같은 규칙으로
+        내거나(개방형·SAE·방식 모름) 내지 않는다(개인별 자격증명). 다른 데몬 시험은 WPA2 개인(공유 비밀번호) 하나로만 돌아, 다른
+        갈래의 확신도·등급·발생 여부를 고정하지 않았다(DEV-16 2회차 검수 [낮음] X5, [범위 밖] Y1·Y2)."""
+        three = ["VPN_DISCONNECTED", "VPN_PROTECTION_LOST", "VPN_RECONNECTED"]
+        for security, kinds in (("none", three), ("WPA3_SAE", three), (None, three),
+                                ("WPA2_Enterprise", ["VPN_DISCONNECTED", "VPN_RECONNECTED"])):
+            seq = [self.o(0, [dl("00.000", "status", "Connected")], security=security), self.o(5, security=security),
+                   self.o(10, self.DROP, security=security)]
+            res = self.run_seq(seq)
+            got = [(f.kind, f.confidence, f.severity) for f in res[2][1] if f.evidence.get("timing_source") == "daemon"]
+            self.assertEqual(got, [(k, "suspect", "info") for k in kinds], security)
+
     def test_a_drop_across_a_window_boundary_counts_once(self):
         res = self.run_seq(self.start() + [self.o(10, self.DROP[:3]), self.o(15, self.DROP[3:])])
         self.assertEqual(self.daemon_kinds(res, 2), [])
