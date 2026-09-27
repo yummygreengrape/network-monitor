@@ -105,14 +105,73 @@ def network_key(obs: Observation) -> str:
       서브넷       다른 대역을 받았으면 옮긴 것이다. 같은 대역을 유지하는
                    것이 rogue DHCP 의 조건이므로 공격에 악용되기 어렵다
     """
+    return network_key_with(obs, str(unwrap(obs.get("wifi", "ssid")) or "-"))
+
+
+def network_key_with(obs: Observation, ssid_part: str) -> str:
+    """`network_key` 의 SSID 자리만 바꾼 키. 조사의 "같은 네트워크" 비교가 쓴다.
+
+    키를 `|` 로 쪼개서 성분을 바꾸지 않는다 — SSID 는 AP 가 정하는 값이라 `|` 를 품을 수 있다.
+    """
+    return "|".join([str(obs.get("iface", "primary") or "-"), ssid_part, _subnet_part(obs)])
+
+
+def _subnet_part(obs: Observation) -> str:
     addr = unwrap(obs.get("dhcp", "yiaddr")) or _first_inet(obs)
     mask = obs.get("dhcp", "subnet_mask") or obs.get("iface", "primary_netmask")
-    parts = [
-        str(obs.get("iface", "primary") or "-"),
-        str(unwrap(obs.get("wifi", "ssid")) or "-"),
-        str(subnet_of(str(addr) if addr else None, mask) or "-"),
-    ]
-    return "|".join(parts)
+    return str(subnet_of(str(addr) if addr else None, mask) or "-")
+
+
+def read_ssid(obs: Observation) -> Optional[str]:
+    """이 주기에 실제로 읽은 SSID. 못 읽었으면 None."""
+    v = unwrap(obs.get("wifi", "ssid"))
+    return v if isinstance(v, str) and v else None
+
+
+def ssid_gap(obs: Observation) -> bool:
+    """SSID 를 읽을 수 있어야 하는데 못 읽은 주기인가(공백 주기).
+
+    주 인터페이스가 Wi-Fi 이고(`applicable`) 위치 정보를 쓸 수 있는데(`identity_withheld` 없음) SSID 가 없다 — 위치 헬퍼가 실패했거나
+    "Wi-Fi 연결 없음" 을 줬다(collect/wifi.py 가 `helper_unavailable` 을 붙임). 사유는 가리지 않는다. 동의가 없거나 주 인터페이스가
+    Wi-Fi 가 아니면 SSID 가 늘 없어 깜빡이지 않으므로 공백이 아니다. `wifi.is_primary` 는 보지 않는다 — 2026-09-21 이전 표본에 없다.
+    """
+    wifi = obs.get("wifi") or {}
+    return bool(wifi.get("applicable")) and not wifi.get("identity_withheld") and read_ssid(obs) is None
+
+
+def _identity_changed(base: Observation, cur: Observation, last_ssid: Optional[str]) -> bool:
+    """인터페이스가 같은 두 관측의 네트워크 정체성(서브넷·SSID)이 바뀌었는가.
+
+    SSID 는 위협 모델 판단 표(docs/threat-model.md)대로 견준다(작업 2026-09-27-ssid-gap-network-change):
+      - 공백 주기(`ssid_gap`)는 SSID 로 변경을 가리지 않는다 — "SSID 모름" 이다. 모르는 것을 "다른 네트워크" 로 읽으면 기준선이
+        지워지고 같은 주기의 보안 판정이 낮아진다(2026-09-27 실측: 앞뒤가 같은 공백 9개가 진입·이탈마다 `network_change`).
+      - SSID 를 읽은 주기는 **마지막으로 읽은 SSID**(`last_ssid`)와 견준다 — 기준 관측이 공백 주기여도. 기준 관측의 "-" 와 견주면
+        공백 뒤 재접속이 늘 "다른 네트워크" 가 되어, deauth → 공백 → 같은 SSID·다른 게이트웨이 MAC 의 모양이 억제된다.
+      - 읽은 SSID 가 없으면(한 번도 못 읽음, 잊음) 지금까지처럼 기준 관측의 SSID 자리와 견준다.
+    """
+    if _subnet_part(base) != _subnet_part(cur):
+        return True
+    if ssid_gap(cur):
+        return False
+    c = read_ssid(cur)
+    if c is not None and last_ssid is not None:
+        return c != last_ssid
+    return str(unwrap(base.get("wifi", "ssid")) or "-") != str(unwrap(cur.get("wifi", "ssid")) or "-")
+
+
+def next_last_ssid(last_ssid: Optional[str], cur: Observation, attributions: List[str]) -> Optional[str]:
+    """이 판정 주기 뒤의 "마지막으로 읽은 SSID".
+
+    읽었으면 그 값. 공백 주기에 이동 귀속(`IFACE_CHANGE`·`NETWORK_CHANGE`·`LINK_RESTART`)이 붙으면 잊는다 — 그 공백 주기의 네트워크가
+    다를 수 있다(2026-09-23 실측: 링크 재시작 뒤 공백 주기에 게이트웨이 MAC·IP 가 이미 바뀌어 있었다). 측정 공백·잠자기만으로는 잊지 않는다.
+    그 밖에는 그대로 둔다.
+    """
+    c = read_ssid(cur)
+    if c is not None:
+        return c
+    if ssid_gap(cur) and any(a in attributions for a in (IFACE_CHANGE, NETWORK_CHANGE, LINK_RESTART)):
+        return None
+    return last_ssid
 
 
 def is_complete(obs: Observation) -> bool:
@@ -199,8 +258,12 @@ def gap_exceeded(elapsed: float, interval: float) -> bool:
 def attributions_for(prev: Optional[Observation], cur: Observation,
                      elapsed: float, interval: float,
                      anchor: Optional[Observation] = None,
-                     link_gap: bool = False) -> List[str]:
-    """이번 주기의 변화 중 사용자 행동·환경으로 설명되는 것."""
+                     link_gap: bool = False,
+                     last_ssid: Optional[str] = None) -> List[str]:
+    """이번 주기의 변화 중 사용자 행동·환경으로 설명되는 것.
+
+    `last_ssid` 는 판정한 주기 가운데 SSID 를 마지막으로 읽은 주기의 SSID 다(엔진이 넘김 — `_identity_changed`).
+    """
     if prev is None:
         return [FIRST_SAMPLE]
     out: List[str] = []
@@ -219,7 +282,7 @@ def attributions_for(prev: Optional[Observation], cur: Observation,
     if b_if and c_if:
         if b_if != c_if:
             out.append(IFACE_CHANGE)
-        elif network_key(base) != network_key(cur):
+        elif _identity_changed(base, cur, last_ssid):
             out.append(NETWORK_CHANGE)
     # 같은 사설 대역을 쓰는 다른 장소로 옮기면 network_key 가 그대로다.
     # 192.168.0.0/24 에 게이트웨이 .1 은 세상에서 가장 흔한 조합이라, 집과

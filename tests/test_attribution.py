@@ -11,7 +11,7 @@ import unittest
 
 from netmon.detect import Context, attributions_for, network_key, run_all
 from tests.helpers import (DHCP_SRV, DHCP_SRV2, GW, GW2, GW2_MAC, GW_MAC,
-                           GW_MAC_ALT, by_kind, kinds, obs)
+                           GW_MAC_ALT, SSID, by_kind, kinds, obs, vpn_state)
 
 FEATURES = {"detect.l2": True, "detect.dhcp": True, "detect.dns": True,
             "detect.route": True, "detect.wifi": True, "detect.quality": True}
@@ -110,6 +110,353 @@ class TestFirstSample(unittest.TestCase):
         findings, attrs = judge(None, obs())
         self.assertEqual(attrs, ["first_sample"])
         self.assertEqual([f for f in findings if f.axis == "security"], [])
+
+
+class TestAnSsidGapIsNotAMove(unittest.TestCase):
+    """위치 헬퍼가 SSID 를 못 준 주기(공백 주기)를 네트워크 이동으로 읽지 않는다(작업 2026-09-27-ssid-gap-network-change).
+
+    2026-09-27 실측: 헬퍼가 실패한 공백 9개(1주기~약 5시간)는 앞뒤 인터페이스·SSID·서브넷이 모두 같았는데, 진입·이탈 때마다
+    `network_change` 가 붙어 기준선이 초기화되고 도달성 판정(`GATEWAY_ICMP_OK`)이 다시 났다(20건). 공백 주기는 SSID 로 변경을
+    가리지 않고, 다시 읽은 SSID 는 마지막으로 읽은 SSID 와 견준다 — 위협 모델 판단 표(docs/threat-model.md)를 그대로 쓴다.
+    """
+
+    def setUp(self):
+        import os
+        import shutil
+        import tempfile
+        from netmon import config as configmod
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.cfg = configmod.load(os.path.join(d, "c.json"))
+        # SSID 는 위치 정보 동의가 있을 때만 수집된다(engine.py 의 allow_location = detect.evil_twin)
+        self.cfg.set_feature("detect.evil_twin", True)
+        self.cfg.grant("location")
+        self.n = 0
+
+    def o(self, ssid=SSID, gap=False, skip=0, linkless=False, **kw):
+        """5초 간격 관측. gap=True 는 헬퍼가 값을 못 준 주기(수집기가 남기는 모양 — collect/wifi.py). skip 은 앞에 더 벌어진 초
+        (측정 공백), linkless 는 주 인터페이스가 없는 주기(엔진이 판정하지 않음 — 수집기는 SSID 를 남기지 않음)."""
+        self.n += skip // 5
+        ob = obs(ts="2026-01-01T%02d:%02d:%02dZ" % (self.n * 5 // 3600, self.n * 5 // 60 % 60, self.n * 5 % 60),
+                 ssid=None if (gap or linkless) else ssid, **kw)
+        if gap:
+            ob.data["wifi"]["helper_unavailable"] = True
+        if linkless:
+            ob.data["iface"]["primary"] = None
+            ob.data["wifi"]["identity_withheld"] = True
+        self.n += 1
+        return ob
+
+    def engine(self):
+        """replay 와 같게 만든 엔진(주기마다 상태를 들여다보려고)."""
+        from netmon import engine as enginemod
+        from netmon import investigate
+        eng = enginemod.Engine.__new__(enginemod.Engine)
+        eng.cfg, eng.store = self.cfg, None
+        eng.prev = eng.anchor = eng.prev_wall = None
+        eng.link_gap = False
+        eng.state = {}
+        eng._baseline_saved_at = eng._arp_log_read_at = None
+        eng.investigator = investigate.Investigator(self.cfg.data.get("investigate"))
+        eng.needs = {}
+        return eng
+
+    @staticmethod
+    def step(eng, ob, elapsed=5.0):
+        from netmon.detect import is_complete
+        fs = eng.judge(ob, elapsed)
+        if is_complete(ob):
+            eng.prev = ob
+        return fs
+
+    def run_seq(self, seq):
+        from netmon import engine as enginemod
+        return enginemod.replay(self.cfg, seq)
+
+    @staticmethod
+    def attributed(res, reason):
+        return [(i, f.kind) for i, (_, fs) in enumerate(res) for f in fs if f.attribution == reason]
+
+    def test_a_gap_on_the_same_network_is_not_a_move(self):
+        """(a) SSID 있음 → 공백 → 있음, 나머지 같음. 지금은 진입·이탈에 network_change 와 기준선 초기화(도달성 판정 재발)."""
+        res = self.run_seq([self.o(), self.o(), self.o(gap=True), self.o(), self.o()])
+        icmp_ok = [i for i, (_, fs) in enumerate(res) for f in fs if f.kind == "GATEWAY_ICMP_OK"]
+        self.assertEqual(len(icmp_ok), 1, "도달성 판정 방법은 처음 한 번만 배운다 — 공백이 기준선을 지우면 다시 난다")
+        self.assertEqual(self.attributed(res, "network_change"), [])
+
+    # QA-1 ────────────────────────────────────────────────────────────────
+    def test_a_long_gap_with_a_measurement_gap_inside_is_only_sleep(self):
+        """(i) 공백 중 측정 공백(잠자기) → `SLEEP` 만, 이동 귀속·초기화 없음, 공백 뒤 같은 SSID 도 변경 아님."""
+        res = self.run_seq([self.o(), self.o(), self.o(gap=True), self.o(gap=True, skip=120), self.o(gap=True), self.o()])
+        self.assertEqual(self.attributed(res, "network_change") + self.attributed(res, "link_restart"), [])
+        self.assertEqual(len([1 for _, fs in res for f in fs if f.kind == "GATEWAY_ICMP_OK"]), 1)
+
+    def test_a_vpn_change_in_a_gap_cycle_still_opens_its_own_window(self):
+        """공백 주기와 VPN 전환이 겹치면(09-16~23 실측 G1~G4) VPN 전환의 창은 지금처럼 열리고, 이동 귀속·초기화는 없다."""
+        eng = self.engine()
+        for ob in (self.o(vpn=vpn_state()), self.o(vpn=vpn_state())):
+            self.step(eng, ob)
+        cycles = eng.state.get("cycles_on_network")
+        self.step(eng, self.o(gap=True, vpn=vpn_state("disconnected")))
+        self.assertEqual(eng.state.get("settle_reason"), "vpn_change")
+        self.assertGreater(eng.state.get("cycles_on_network"), cycles, "기준선이 지워지지 않았다(초기화면 다시 1 부터)")
+
+    def test_a_gap_does_not_repeat_the_silent_gateway_decision(self):
+        """ICMP 에 응답하지 않는 게이트웨이 — 공백이 기준선을 지우지 않으므로 `GATEWAY_ICMP_SILENT` 도 공백 없는 열과 같은 횟수."""
+        def count(seq):
+            return len([1 for _, fs in self.run_seq(seq) for f in fs if f.kind == "GATEWAY_ICMP_SILENT"])
+        self.n = 0
+        plain = count([self.o(icmp_ok=False) for _ in range(12)])
+        self.n = 0
+        gapped = count([self.o(icmp_ok=False, gap=(i in (6, 7))) for i in range(12)])
+        self.assertEqual(gapped, plain)
+
+    # QA-2 ────────────────────────────────────────────────────────────────
+    def test_another_ssid_after_a_gap_is_a_move(self):
+        """(b) 공백 뒤 다른 SSID(같은 서브넷) → 마지막으로 읽은 SSID 와 달라 `NETWORK_CHANGE` — 기준선을 지운다."""
+        eng = self.engine()
+        for ob in (self.o(), self.o(), self.o(gap=True)):
+            self.step(eng, ob)
+        self.assertGreater(eng.state.get("cycles_on_network"), 1)
+        self.step(eng, self.o(ssid="OtherNet"))
+        self.assertEqual(eng.state.get("cycles_on_network"), 1, "다른 네트워크로 옮겼으니 기준선을 새로 배운다")
+
+    def test_a_subnet_change_in_a_gap_cycle_is_a_move(self):
+        """(c) 공백 주기에 서브넷이 바뀜 → `NETWORK_CHANGE`(SSID 를 몰라도 서브넷은 본다)."""
+        res = self.run_seq([self.o(), self.o(), self.o(gap=True, gateway=GW2, routers=(GW2,), my_ip="198.51.100.50",
+                                                        dhcp_server=DHCP_SRV2, gw_mac=GW2_MAC)])
+        self.assertTrue(any(f.attribution == "network_change" for f in res[2][1]))
+
+    def test_the_same_ssid_after_a_gap_and_a_link_break_is_not_a_move(self):
+        """(g) G2 모양 — 공백 주기 → 링크 없는 주기 → 같은 SSID·서브넷: 이동 귀속 없음(공백 없는 재접속과 같음), 창은 링크 단절로 열림."""
+        eng = self.engine()
+        for ob in (self.o(), self.o(), self.o(gap=True), self.o(linkless=True), self.o(linkless=True)):
+            self.step(eng, ob)
+        fs = self.step(eng, self.o())
+        self.assertEqual([f.kind for f in fs if f.attribution in ("network_change", "link_restart", "iface_change")], [])
+        self.assertEqual(eng.state.get("settle_reason"), "link_restart")
+
+    def test_an_evil_twin_behind_a_gap_and_a_link_break_is_not_excused(self):
+        """(h)·ADV-2(1) deauth 모양 — 공백 주기 → 링크 없는 주기 → 같은 SSID·서브넷·다른 게이트웨이 MAC: 공백 없는 같은 재접속과 같은
+        등급(억제 안 함 — 판단 표 "SSID 같음, MAC 바뀜"). 지금까지는 출구가 공백 주기의 "-" 와 견줘 network_change 로 low 였다."""
+        def exit_mac_change(with_gap):
+            self.n = 0
+            seq = [self.o(), self.o()] + ([self.o(gap=True)] if with_gap else []) + \
+                  [self.o(linkless=True), self.o(linkless=True), self.o(gw_mac=GW_MAC_ALT)]
+            f = by_kind(self.run_seq(seq)[-1][1], "GW_MAC_CHANGED")
+            return (f.severity, f.attribution) if f else None
+        self.assertEqual(exit_mac_change(True), exit_mac_change(False))
+        self.assertEqual(exit_mac_change(True), ("high", None))
+
+    # QA-3 ────────────────────────────────────────────────────────────────
+    def test_a_gap_right_after_a_link_break_is_a_possible_move_and_forgets_the_ssid(self):
+        """(f)·ADV-2(2) G5 모양 — 링크 없는 주기 뒤 첫 판정 주기가 공백이고 게이트웨이 MAC·IP 가 바뀜: 판단 표 "SSID 모름·링크 재시작" 줄
+        대로 등급을 낮춘다(지금과 같은 low — 귀속 이름만 network_change → link_restart). 읽은 SSID 를 잊어, 다음 읽기는 지금처럼 이동이다
+        (남는 한계 두 주기)."""
+        eng = self.engine()
+        for ob in (self.o(), self.o(), self.o(linkless=True), self.o(linkless=True)):
+            self.step(eng, ob)
+        f = by_kind(self.step(eng, self.o(gap=True, gw_mac=GW_MAC_ALT, my_ip="192.0.2.77", lease_start="2026-01-01 00:01:00")),
+                    "GW_MAC_CHANGED")
+        self.assertEqual(f.severity, "low")
+        self.assertIsNotNone(f.attribution)
+        self.assertIsNone(getattr(eng, "identity_ssid", None))
+        self.step(eng, self.o(gw_mac=GW_MAC_ALT, my_ip="192.0.2.77", lease_start="2026-01-01 00:01:00"))
+        self.assertEqual(eng.state.get("cycles_on_network"), 1, "잊은 뒤 첫 읽기는 공백 주기의 \"-\" 와 견줘 이동(지금과 같음)")
+
+    def test_turning_the_location_consent_off_forgets_the_ssid(self):
+        """(e 뒷부분) 동의를 끄면 읽은 SSID 를 잊고, 다시 켠 뒤 첫 읽기는 지금처럼 기준 관측과 견준다."""
+        eng = self.engine()
+        for ob in (self.o(), self.o()):
+            self.step(eng, ob)
+        self.assertEqual(getattr(eng, "identity_ssid", None), SSID)
+        self.cfg.revoke("location")
+        withheld = self.o(gap=False, ssid=None)
+        withheld.data["wifi"]["identity_withheld"] = True
+        self.step(eng, withheld)
+        self.assertIsNone(getattr(eng, "identity_ssid", None))
+        self.cfg.grant("location")
+        self.step(eng, self.o())
+        self.assertEqual(eng.state.get("cycles_on_network"), 1, "동의 없이 기록한 \"-\" 와 견줘 이동 — 지금과 같다")
+
+    def test_without_the_consent_the_last_read_ssid_is_not_used(self):
+        """동의가 꺼져 있으면 마지막으로 읽은 SSID 를 쓰지 않고 지금처럼 기준 관측과 견준다 — 동의 없이 표본을 다시 판정해도(표본에
+        SSID 가 남아 있어도) 동의의 경계를 넘지 않는다. 공백 주기 뒤 읽은 SSID 가 공백 전과 같아도 기준 관측("-")과 달라 이동이다."""
+        eng = self.engine()
+        for ob in (self.o(), self.o(), self.o(gap=True)):
+            self.step(eng, ob)
+        self.cfg.revoke("location")
+        self.step(eng, self.o())
+        self.assertEqual(eng.state.get("cycles_on_network"), 1)
+
+    def test_a_first_gap_cycle_without_any_link_evidence_is_judged_as_the_same_network(self):
+        """남는 한계 (나) — 링크 근거가 남지 않은 첫 판정 주기가 공백이면(예: 링크가 없는 동안 에이전트가 재시작해 링크 공백 표지를 잃음)
+        판단 표 "SSID 모름·링크 멀쩡" 줄대로 게이트웨이 MAC 변화를 억제하지 않는다. 기준 커밋은 공백 주기를 "-" 대 앵커 SSID 로 견줘
+        network_change·low 로 냈다 — 실제로 옮긴 경우라면 새 동작은 경보(high)가 된다. 의도한 변경이고, 문서(AC-8)에 적는다."""
+        eng = self.engine()
+        for ob in (self.o(), self.o()):
+            self.step(eng, ob)
+        eng.link_gap = False                    # 재시작으로 표지를 잃은 모양(엔진은 링크 공백 표지를 저장하지 않는다)
+        f = by_kind(self.step(eng, self.o(gap=True, gw_mac=GW_MAC_ALT), elapsed=5.0), "GW_MAC_CHANGED")
+        self.assertEqual((f.severity, f.attribution), ("high", None))
+
+    # QA-6 (K-7 — 기준 커밋에서도 통과해야 한다: replay·관측만 쓴다) ────────────────
+    def test_paths_without_a_gap_keep_their_attribution(self):
+        """(e) 동의 없음·주 인터페이스가 Wi-Fi 아님·SSID 를 한 번도 못 읽음·공백 없는 이동·공백 없는 재접속의 게이트웨이 MAC 변화는
+        기준 커밋과 같은 (등급, 귀속)이다."""
+        def withheld(**kw):
+            ob = self.o(ssid=None, **kw)
+            ob.data["wifi"]["identity_withheld"] = True
+            return ob
+        cases = {
+            "동의 없음": (lambda: [withheld(), withheld(), withheld(gw_mac=GW_MAC_ALT)], ("high", None)),
+            "Wi-Fi 아님": (lambda: [self.o(ssid=None, iface_kind="ethernet"), self.o(ssid=None, iface_kind="ethernet"),
+                                     self.o(ssid=None, iface_kind="ethernet", gw_mac=GW_MAC_ALT)], ("high", None)),
+            "한 번도 못 읽음": (lambda: [self.o(gap=True), self.o(gap=True), self.o(gap=True, gw_mac=GW_MAC_ALT)], ("high", None)),
+            "공백 없는 SSID 이동": (lambda: [self.o(), self.o(), self.o(ssid="OtherNet", gw_mac=GW_MAC_ALT)],
+                                    ("low", "network_change")),
+            "공백 없는 재접속": (lambda: [self.o(), self.o(), self.o(linkless=True), self.o(gw_mac=GW_MAC_ALT)], ("high", None)),
+        }
+        for name, (make, want) in cases.items():
+            with self.subTest(name):
+                self.n = 0
+                f = by_kind(self.run_seq(make())[-1][1], "GW_MAC_CHANGED")
+                self.assertEqual((f.severity, f.attribution), want)
+
+    def test_an_interface_or_subnet_move_without_a_gap_is_still_a_move(self):
+        for name, last in (("인터페이스", dict(iface="en1")),
+                           ("서브넷", dict(gateway=GW2, routers=(GW2,), my_ip="198.51.100.50", dhcp_server=DHCP_SRV2,
+                                         gw_mac=GW2_MAC))):
+            with self.subTest(name):
+                eng = self.engine()
+                self.n = 0
+                for ob in (self.o(), self.o(), self.o(**last)):
+                    self.step(eng, ob)
+                self.assertEqual(eng.state.get("cycles_on_network"), 1, "옮겼으니 기준선을 새로 배운다")
+
+    def test_a_mac_change_inside_a_gap_without_a_link_break_is_not_excused(self):
+        """판단 표 넷째 줄 — SSID 모름, 링크 멀쩡, MAC 바뀜 → 억제하지 않음. 지금은 공백 주기가 network_change 로 읽혀 low."""
+        res = self.run_seq([self.o(), self.o(), self.o(gap=True, gw_mac=GW_MAC_ALT)])
+        f = by_kind(res[2][1], "GW_MAC_CHANGED")
+        self.assertIsNotNone(f)
+        self.assertEqual((f.severity, f.attribution), ("high", None))
+
+
+class TestIdentityRuleOverEveryBranch(unittest.TestCase):
+    """`attributions_for` 의 정체성 규칙을 입력 갈래의 곱으로 돈다(작업 2026-09-27-ssid-gap-network-change K-6, 교훈
+    2026-09-27-pin-values-and-boundaries). 기대는 코드가 아니라 명세 AC-1·AC-2·K-5 와 위협 모델 판단 표에서 옮긴 것이다:
+
+      - 인터페이스가 다르면 `iface_change`(정체성은 그것으로 끝).
+      - 인터페이스가 같으면: 서브넷이 다르면 `network_change`. 서브넷이 같을 때 SSID 는
+          · 이번 주기가 공백 주기 → 모름(판단 표 "SSID 모름") — SSID 로는 변경이 아니다.
+          · 이번 주기에 SSID 를 읽었고 마지막으로 읽은 SSID 가 있음 → 그것과 다르면 이동.
+          · 그 밖(읽은 SSID 없음, 동의 없음·Wi-Fi 아님) → 기준 관측의 SSID 자리("-" 포함)와 다르면 이동(지금까지의 규칙).
+      - 이동 귀속이 없고 이번 주기에 SSID 를 실제로 읽지 못했으며 링크 근거(링크 없는 주기·링크 재시작)가 있으면 `link_restart`.
+      - 측정 간격이 벌어졌으면 `sleep`(정체성과 무관하게 함께).
+
+    엔진에서는 도달하지 않는 조합도 돈다 — 기준 관측이 SSID 를 읽었는데 읽은 SSID 가 없거나 다른 것은 동의가 꺼져 있을 때만(엔진이 읽은
+    SSID 를 넘기지 않음) 생긴다. 규칙이 입력만으로 정해지는지를 보려고 그대로 둔다. 새 인자(`last_ssid`)를 부르므로 새 코드 전용이다.
+    """
+
+    S, T = SSID, "OtherNet"
+
+    def cur_obs(self, kind, iface, subnet, restarted):
+        kw = dict(iface=iface, link_active="TRUE")
+        if subnet == "다름":
+            kw.update(gateway=GW2, routers=(GW2,), my_ip="198.51.100.50", dhcp_server=DHCP_SRV2)
+        if kind == "읽음S":
+            o = obs(ssid=self.S, **kw)
+        elif kind == "읽음T":
+            o = obs(ssid=self.T, **kw)
+        elif kind == "공백":
+            o = obs(ssid=None, **kw)
+            o.data["wifi"]["helper_unavailable"] = True
+        elif kind == "동의 없음":
+            o = obs(ssid=None, **kw)
+            o.data["wifi"]["identity_withheld"] = True
+        else:                                   # Wi-Fi 아님
+            o = obs(ssid=None, iface_kind="ethernet", **kw)
+        return o
+
+    def base_obs(self, kind, restarted):
+        o = obs(ssid=self.S if kind == "읽음S" else None, link_active="FALSE" if restarted else "TRUE")
+        if kind == "공백":
+            o.data["wifi"]["helper_unavailable"] = True
+        return o
+
+    def expected(self, cur_kind, base_kind, last, link, subnet, iface, sleep):
+        want = set()
+        if sleep:
+            want.add("sleep")
+        if iface == "다름":
+            want.add("iface_change")
+            return want
+        cur_ssid = {"읽음S": self.S, "읽음T": self.T}.get(cur_kind)
+        base_part = self.S if base_kind == "읽음S" else "-"
+        if subnet == "다름":
+            moved = True
+        elif cur_kind == "공백":
+            moved = False
+        elif cur_ssid is not None and last is not None:
+            moved = cur_ssid != last
+        else:
+            moved = base_part != (cur_ssid or "-")
+        if moved:
+            want.add("network_change")
+        elif cur_ssid is None and link != "없음":
+            want.add("link_restart")
+        return want
+
+    def test_every_branch(self):
+        import itertools
+        from netmon.detect import attributions_for
+        n = 0
+        for cur_kind, base_kind, last, link, subnet, iface, sleep in itertools.product(
+                ("읽음S", "읽음T", "공백", "동의 없음", "Wi-Fi 아님"), ("읽음S", "공백"), (None, self.S, self.T),
+                ("없음", "링크 없는 주기", "링크 재시작"), ("같음", "다름"), ("같음", "다름"), (False, True)):
+            base = self.base_obs(base_kind, link == "링크 재시작")
+            cur = self.cur_obs(cur_kind, "en1" if iface == "다름" else "en0", subnet, link == "링크 재시작")
+            got = set(attributions_for(base, cur, 120.0 if sleep else 5.0, 5.0, anchor=base,
+                                       link_gap=(link == "링크 없는 주기"), last_ssid=last))
+            got &= {"sleep", "iface_change", "network_change", "link_restart"}
+            with self.subTest(cur=cur_kind, base=base_kind, last=last, link=link, subnet=subnet, iface=iface, sleep=sleep):
+                self.assertEqual(got, self.expected(cur_kind, base_kind, last, link, subnet, iface, sleep))
+            n += 1
+        self.assertEqual(n, 720)
+
+
+class TestTheLastReadSsidUpdateRule(unittest.TestCase):
+    """마지막으로 읽은 SSID 의 갱신 규칙(detect.next_last_ssid — 작업 2026-09-27-ssid-gap-network-change K-6). 기대는 명세 AC-3 에서:
+    읽었으면 그 값, 공백 주기에 이동 귀속(iface_change·network_change·link_restart)이면 잊음, 공백 주기에 잠자기·VPN 전환만이면 유지,
+    공백도 아니고 읽지도 않은 주기(동의 없음·Wi-Fi 아님)는 유지. 동의가 꺼졌을 때 지우는 것은 엔진의 몫(TestAnSsidGapIsNotAMove).
+    """
+
+    def test_every_branch(self):
+        import itertools
+        from netmon.detect import next_last_ssid
+        moves = ("iface_change", "network_change", "link_restart")
+        for kind, last, attrs in itertools.product(
+                ("읽음", "공백", "동의 없음", "Wi-Fi 아님"), (None, SSID),
+                ([], ["sleep"], ["vpn_change"], ["sleep", "vpn_change"], ["iface_change"], ["network_change"], ["link_restart"],
+                 ["sleep", "link_restart"])):
+            if kind == "읽음":
+                cur = obs(ssid="OtherNet")
+            elif kind == "공백":
+                cur = obs(ssid=None)
+                cur.data["wifi"]["helper_unavailable"] = True
+            elif kind == "동의 없음":
+                cur = obs(ssid=None)
+                cur.data["wifi"]["identity_withheld"] = True
+            else:
+                cur = obs(ssid=None, iface_kind="ethernet")
+            if kind == "읽음":
+                want = "OtherNet"
+            elif kind == "공백" and any(a in attrs for a in moves):
+                want = None
+            else:
+                want = last
+            with self.subTest(kind=kind, last=last, attrs=attrs):
+                self.assertEqual(next_last_ssid(last, cur, attrs), want)
 
 
 if __name__ == "__main__":

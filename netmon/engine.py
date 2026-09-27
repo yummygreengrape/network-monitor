@@ -16,7 +16,7 @@ from .detect import quality
 # 수집기 `netmon.vpn` 과 이름이 겹쳐 별칭으로 부른다.
 from .detect import vpn as vpn_detect
 from .detect import (Context, associated_without_ipv4, attributions_for, gap_exceeded,
-                     is_complete, network_key,
+                     is_complete, network_key, next_last_ssid,
                      run_all)
 from . import messages as msg
 from .model import CONFIRMED, INFO, INFO_SEV, Finding, Observation, unwrap
@@ -111,6 +111,10 @@ class Engine:
         # launchd 가 KeepAlive 로 되살리므로 의도치 않은 재시작도 잦다.
         self._baseline_saved_at: Optional[float] = None
         self._arp_log_read_at: Optional[float] = None
+        # 판정한 주기 가운데 SSID 를 마지막으로 읽은 주기의 SSID(detect.next_last_ssid). 메모리에만 둔다 — 재시작 뒤에는 "없음" 으로
+        # 지금까지처럼 앵커와 견준다. state.json 에 두면 안 된다: state.json 은 매 주기, 앵커(baseline.json)는 60초마다 저장돼
+        # 재시작 뒤 둘이 어긋난다(같은 서브넷에서 SSID 만 바뀐 이동이 "같은 네트워크" 로 읽혀 high).
+        self.identity_ssid: Optional[str] = None
         self._restore_baseline()
         self.investigator = investigate.Investigator(cfg.data.get("investigate"))
         # 조사가 요청한 측정 변화. 다음 주기에 반영된다.
@@ -461,9 +465,13 @@ class Engine:
             return out
 
         link_gap = self.link_gap
+        # 마지막으로 읽은 SSID 는 위치 정보 동의가 있을 때만 쓴다(수집기와 같은 값 — observe 의 allow_location). 동의가 꺼지면 잊는다.
+        consented = self.cfg.effective("detect.evil_twin")
+        last_ssid = getattr(self, "identity_ssid", None) if consented else None
         attributions = attributions_for(self.prev, obs, elapsed, interval,
-                                        self.anchor, link_gap)
+                                        self.anchor, link_gap, last_ssid)
         self.link_gap = False
+        self.identity_ssid = next_last_ssid(last_ssid, obs, attributions) if consented else None
         # 링크가 새로 붙었으면 다른 장소일 수 있다. 이전 기준선을 그대로 쓰면
         # 새 장소의 첫 몇 분이 통째로 오탐이 된다.
         changed = any(a in attributions for a in
@@ -545,6 +553,7 @@ def replay(cfg: Config, observations: List[Observation]) -> List[Tuple[Observati
     eng.store = None
     eng.prev = None
     eng.anchor = None
+    eng.identity_ssid = None
     eng.link_gap = False
     eng._baseline_saved_at = None
     eng._arp_log_read_at = None
