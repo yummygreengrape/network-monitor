@@ -30,3 +30,17 @@ venv/
 
 # 빌드된 헬퍼 앱은 설정 디렉터리에 두고 저장소에 넣지 않는다
 *.app/
+
+# 에이전트용 지침·설정 파일 — 공개 저장소에 커밋하지 않는다.
+# 맨 끝에 둔다: 뒤에 오는 `!` 패턴이 이 줄들을 뒤집지 않게.
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+# .local·.override 같은 접미사 변종
+CLAUDE.*.md
+AGENTS.*.md
+GEMINI.*.md
+.claude/
+.cursor/
+.agents/
+_work/
