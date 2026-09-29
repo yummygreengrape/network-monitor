@@ -272,6 +272,8 @@ class TestTheFourTextsSayTheSameThing(unittest.TestCase):
             return fh.read()
 
     def test_the_readme_carries_the_sentence(self):
+        """README 는 영어 본문과 한국어 요약으로 되어 있다 — 두 언어 모두 같은 문장을 싣는다."""
+        self.assertIn(CANON_EN, _flat(self._readme()))
         self.assertIn(CANON_KO, _flat(self._readme()))
 
     def test_the_consent_text_carries_the_sentence(self):
@@ -304,6 +306,9 @@ class TestTheFourTextsSayTheSameThing(unittest.TestCase):
         for text in texts:
             for wrong in ("VPN 이 끊긴 동안", "VPN 이 끊긴 주기", "끊겨 있는 주기에만"):
                 self.assertNotIn(wrong, text)
+        # README 영어 본문도 같다 — 재협상 주기를 빠뜨린 영어 표현을 막는다.
+        for wrong in ("while the vpn is down", "while a vpn is down", "only while disconnected"):
+            self.assertNotIn(wrong, _flat(self._readme()).lower())
 
     def test_the_summary_row_names_the_condition(self):
         """한 줄 요약도 언제 나가는지는 밝힌다."""
@@ -317,6 +322,8 @@ class TestTheFourTextsSayTheSameThing(unittest.TestCase):
         readme = _flat(self._readme())
         self.assertNotIn("ICMP 한 발", readme)
         self.assertIn("ping_count 만큼", readme)
+        self.assertNotIn("a single icmp", readme.lower())
+        self.assertIn("ping_count packets", readme)
 
 
 class TestTunnelEndpointIsWrapped(unittest.TestCase):
@@ -343,7 +350,7 @@ class TestTunnelEndpointIsWrapped(unittest.TestCase):
 
         앞선 작업은 이 필드가 내보낼 때도 그대로 남는다고 시험으로 고정했는데,
         결정 기록은 기록 시점만 가리지 않기로 했다 — 내보낸 기록에 주소가 남으면
-        README "개인정보" 의 약속과 어긋난다.
+        README "Privacy" 의 약속과 어긋난다.
         """
         o = endpoint_probe(obs(vpn=vpn_state("disconnected", reason=ENDPOINT_REASON)))
         red = redactmod.redact(o.as_dict(), self.salt)

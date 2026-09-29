@@ -1,312 +1,387 @@
 # network-monitor
 
-현재 연결된 네트워크에서 **내 연결과 보안에 영향을 주는 일**이 생겼는지 알려주는
-macOS용 감시 도구입니다.
+A monitor for macOS that tells you whether something happened on the network you are connected to
+that **affects your connection or your security**.
 
-- **연결 품질과 보안을 따로 확인합니다** 하나의 관측이 두 축 모두에서 판정될 수 있습니다.
-  품질 사건이 보안 사건을 가리지 않습니다.
-- **판정마다 근거와 확신도가 붙습니다.** `확정`·`의심`·`가능`을 섞지 않습니다.
-- **내 행동으로 생긴 변화는 억제하되 지우지 않습니다.** 억제된 판정도 기록에 남습니다.
-- **기본값은 최소 권한입니다.** sudo를 쓰지 않고, 외부로 요청을 보내지 않으며,
-  VPN 감시와 위치 권한은 꺼진 상태로 시작합니다.
+- **Connection quality and security are judged separately.** One observation can produce findings
+  on both axes; a quality event never hides a security event.
+- **Every finding carries its evidence and a confidence level.** `confirmed`, `suspect` and
+  `possible` are never mixed.
+- **Changes you caused yourself are suppressed, not deleted.** Suppressed findings stay in the record.
+- **Least privilege by default.** No sudo, no outbound requests, and VPN monitoring and location
+  access start switched off.
 
-## 요구 사항
+> Most of the text in new findings, reports, the live view and the setup wizard follows the language
+> setting: Korean by default, English after the wizard's first question or `netmon lang en`. Some
+> labels and some command-line output are still Korean only — see
+> [Language and wording](#language-and-wording). The documents in `docs/` are written in
+> Korean. A Korean summary of this README is at the end (한국어 요약).
 
-macOS와 Python 3.9 이상. 추가 설치는 없습니다. `python3`가 없으면 Xcode Command Line
-Tools를 설치하면 `/usr/bin/python3`가 생깁니다.
+## Requirements
 
-## 실행 위치
+macOS and Python 3.9 or later. Nothing else to install. If `python3` is missing, installing the Xcode
+Command Line Tools provides `/usr/bin/python3`.
 
-받은 직후에는 **저장소 안에서만** 실행됩니다.
+## Where to run it
+
+Right after cloning, it only runs **from inside the repository**:
+
 ```
 $ cd ~
 $ ./netmon.sh setup
-zsh: no such file or directory: ./netmon.sh     ← 저장소 밖이라서 그렇습니다
+zsh: no such file or directory: ./netmon.sh     ← because you are outside the repository
 ```
 
-세 가지 방법이 있습니다.
+There are three ways:
 
 ```
-cd <저장소>/network-monitor && ./netmon.sh setup    저장소로 이동해서
-/전체/경로/netmon.sh setup                          전체 경로로
-./netmon.sh link                                    링크를 걸어 어디서나 netmon 으로
+cd <repository>/network-monitor && ./netmon.sh setup    move into the repository
+/full/path/to/netmon.sh setup                           use the full path
+./netmon.sh link                                        link it, then run netmon from anywhere
 ```
 
-`link` 는 PATH 에 있는 쓸 수 있는 디렉터리에 심볼릭 링크를 만듭니다. sudo 는
-쓰지 않고, `netmon link remove` 로 되돌립니다. PATH 에 없는 곳밖에 없으면
-PATH 에 추가하는 방법을 알려 줍니다. 설정 마법사에서도 물어보며, 기본값은
-"건다" 입니다.
+`link` creates a symbolic link in a writable directory on your `PATH`. It does not use sudo, and
+`netmon link remove` undoes it. If no directory on `PATH` is writable, it tells you how to add one.
+The setup wizard asks about this too, and the default is to create the link.
 
 ```
-netmon link           어디서나 netmon 으로 실행되게 걸기
-netmon link status    지금 어디에 걸려 있는지
-netmon link remove    되돌리기
+netmon link           make netmon runnable from anywhere
+netmon link status    where the link is and what it points to
+netmon link remove    undo
 ```
 
-아래 예시는 링크를 건 뒤를 기준으로 `netmon` 이라고 씁니다. 링크를 걸지
-않았다면 저장소 안에서 `./netmon.sh` 로 바꿔 읽으세요.
+The examples below write `netmon`, assuming the link exists. Without it, read them as `./netmon.sh`
+run inside the repository.
 
-## 첫 실행
+## First run
 
 ```
 netmon setup
 ```
 
-무엇을 켜고 끌지 하나씩 물어봅니다. 측정 간격, 기록 위치와 보존 기간, 위치 권한,
-VPN 감시, 외부 점검 요청, 상시 실행 여부입니다. **엔터만 눌러도 안전한 값**입니다 —
-sudo를 쓰지 않고, 외부로 요청을 보내지 않고, 상시 실행으로 등록하지도 않습니다.
+The wizard asks, one at a time: the language first, then what to turn on — measurement interval,
+where to keep records and for how long, location access, VPN monitoring, outbound checks, and whether to run always-on.
+**Pressing Enter at every prompt gives safe values** — no sudo, no outbound requests, and no
+always-on registration.
 
-아무 인자 없이 `netmon`를 실행해도 설정이 없으면 마법사를 권합니다.
-묻지 않고 기본값만 쓰려면 `netmon setup --defaults`입니다.
+Running `netmon` with no arguments also suggests the wizard when there is no configuration yet.
+To take the defaults without questions, use `netmon setup --defaults`.
 
-## 사용법
-
-```
-netmon doctor           이 기계에서 무엇이 되고 무엇이 안 되는지
-netmon once             한 주기만 측정
-netmon run              계속 측정 (Ctrl+C로 종료)
-netmon report           오늘 요약
-netmon report --redact  식별자를 가려서 출력 (남에게 보낼 때)
-netmon location setup   위치 권한 헬퍼를 만들고 권한 요청 (evil twin 탐지)
-netmon service install  항상 켜 두기 (로그인할 때 자동 시작)
-netmon investigate list 이어지는 조사 보기
-netmon watch            실시간 화면 (감시는 에이전트가 계속합니다)
-```
-
-## 실시간 확인
+## Usage
 
 ```
-netmon watch                    지금 상태·열린 조사·최근 판정
-netmon watch --redact           식별자를 가려서 (화면 공유할 때)
-netmon watch -v                 억제된 판정도 함께
+netmon doctor           what works and what does not on this machine
+netmon once             measure a single cycle
+netmon run              measure continuously (Ctrl+C to stop)
+netmon report           today's summary
+netmon report --redact  print with identifiers masked (for sending to someone)
+netmon location setup   build the location helper and request access (evil twin detection)
+netmon service install  keep it running (starts automatically at login)
+netmon investigate list ongoing investigations
+netmon watch            live view (the agent keeps monitoring)
 ```
 
-`watch`는 **스스로 측정하지 않습니다.** 상시 실행 에이전트가 남긴 기록을 읽어
-보여 줄 뿐이라, 창을 띄운다고 측정이 두 번 일어나지 않습니다. 창을 닫아도
-감시는 계속됩니다. 에이전트가 멈추면 화면이 "멈춘 듯"이라고 알려 줍니다.
-
-## 유의미한 신호는 계속 조사합니다
-
-"게이트웨이 MAC이 바뀌었다"는 확정이지만, 그것이 공격인지 접속점 교체인지는
-**그 다음에 일어나는 일**로만 갈립니다. 유의미한 신호가 잡히면 조사를 열고,
-더 자주 측정하면서 결론이 날 때까지 봅니다.
-
-무엇을 유의미하다고 볼지는 바꿀 수 있고, **조사가 스스로도 바꿉니다.** MAC
-변경에 DHCP 변조가 겹치면 감시 범위를 넓히고, VPN 끊김이 되풀이되면 무선 구간
-품질까지 함께 봅니다. 기준이 바뀔 때마다 이유와 이전·이후 값이 기록에 남습니다.
+## Live view
 
 ```
-netmon.sh investigate rules                        지금 기준 보기
-netmon.sh investigate rules --set severities=high  좁히기
-netmon.sh investigate show <id>                    기준이 어떻게 움직였는지
+netmon watch                    current state, open investigations, recent findings
+netmon watch --redact           with identifiers masked (for screen sharing)
+netmon watch -v                 include suppressed findings
 ```
 
-자세한 것은 [docs/detections.md](docs/detections.md)의 "이어지는 조사"에 있습니다.
+`watch` **does not measure anything itself.** It only reads what the always-on agent recorded, so
+opening a window does not double the measurements, and closing it does not stop monitoring. If the
+agent stops, the screen says it looks stalled.
 
-## 항상 실행
+## Meaningful signals are followed up
 
-```
-netmon service install     등록
-netmon service status      상태 확인
-netmon service uninstall   해제 (기록은 남습니다)
-```
+"The gateway MAC changed" is a confirmed fact, but whether it is an attack or a replaced access point
+can only be told **from what happens next**. When a meaningful signal appears, an investigation opens
+and keeps measuring more often until it reaches a conclusion.
 
-`~/Library/LaunchAgents/io.github.network-monitor.plist` 파일 하나를 만듭니다.
-**sudo를 쓰지 않고**, 시스템 설정을 바꾸지 않으며, `uninstall`로 되돌립니다.
-`setup` 마법사에서도 고를 수 있고, 기본값은 등록하지 않는 것입니다.
-
-등록하면 로그인할 때 시작하고 멈추면 다시 뜹니다. 우선순위를 낮춰(`nice 5`,
-`Background`, `LowPriorityIO`) 다른 작업을 방해하지 않습니다. 실측에서 CPU 0.0%,
-메모리 약 17MB였습니다. `launchd`의 출력 파일은 회전되지 않으므로 5MB를 넘으면
-앞부분을 잘라 냅니다.
-
-저장소를 다른 곳으로 옮기면 등록된 실행 경로가 깨집니다. `service status`와
-`doctor`가 그 상태를 알려 주고, `service install`로 다시 등록하면 됩니다.
-
-먼저 `doctor`를 실행하세요. 기종과 macOS 버전, 권한에 따라 쓸 수 있는 탐지가 다르고,
-`doctor`는 **무엇이 왜 안 되는지**를 함께 알려줍니다. 남의 기계에서 탐지가 조용히
-빠지는 것이 이 도구의 가장 위험한 실패 방식이라, 안 되는 것을 숨기지 않습니다.
-
-설정은 `~/.config/network-monitor/config.json`에, 기록은 기본적으로 그 옆
-`data/`에 둡니다. 기록 위치는 마법사에서 고르거나 `--log-dir`·`NETMON_LOG_DIR`로
-바꿉니다. 상시 실행으로 등록하면 고른 위치가 설정 파일에도 기록되므로,
-`netmon report`가 에이전트와 같은 곳을 봅니다.
-
-## 권한과 동의
-
-두 가지는 **동의해야만** 켜집니다. 동의하지 않으면 관련 기능은 꺼진 채로 남고,
-나머지 탐지는 그대로 동작합니다.
+What counts as meaningful is configurable, and **investigations adjust it themselves.** If a MAC change
+coincides with DHCP tampering, the watch widens; if VPN drops keep recurring, wireless link quality is
+watched as well. Every change of criteria records its reason and the before and after values.
 
 ```
-netmon consent list                       무엇을 왜 요구하는지 읽기
-netmon location setup                     위치 권한 헬퍼 생성 + 권한 요청
-netmon location status                    현재 권한 상태
-netmon consent revoke location            철회 (관련 기능도 함께 꺼집니다)
+netmon.sh investigate rules                        show the current criteria
+netmon.sh investigate rules --set severities=high  narrow them
+netmon.sh investigate show <id>                    how the criteria moved
 ```
 
-### 위치 권한이 별도 앱을 거치는 이유
-macOS의 위치 권한은 **앱 단위**입니다. 터미널에서 돌리는 스크립트는 권한을 요청할
-주체가 없어 요청 창이 뜨지 않고, 권한을 받은 다른 앱의 승인을 물려받지도 못합니다.
-그래서 `location setup`이 작은 헬퍼 앱(`NetworkMonitorLocation.app`)을 만들어
-설정 디렉터리에 두고, 그 앱이 권한을 받아 **SSID와 BSSID만** 돌려줍니다.
+Details are in the "이어지는 조사" (ongoing investigations) section of
+[docs/detections.md](docs/detections.md).
 
-헬퍼는 위치 좌표를 읽지 않고(`startUpdatingLocation`을 호출하지 않습니다),
-주변 AP 목록도 훑지 않습니다. 필요한 두 값이 전부입니다. 소스는
-[tools/location-helper/request_location.m](tools/location-helper/request_location.m)에
-있습니다.
+## Always-on
 
-| 항목 | 무엇에 쓰나 | 밖으로 나가는 것 |
+```
+netmon service install     register
+netmon service status      check the state
+netmon service uninstall   unregister (records are kept)
+```
+
+This creates a single file, `~/Library/LaunchAgents/io.github.network-monitor.plist`. It **does not use
+sudo**, does not change system settings, and `uninstall` undoes it. The `setup` wizard offers it as
+well; the default is not to register.
+
+Once registered, it starts at login and restarts if it stops. It runs at low priority (`Nice 5`,
+`Background`, `LowPriorityIO`) so it does not get in the way of other work — measured at 0.0% CPU and
+about 17 MB of memory. `launchd` does not rotate its output files, so once they pass 5 MB the oldest
+part is trimmed.
+
+Moving the repository elsewhere breaks the registered path. `service status` and `doctor` report
+that state, and running `service install` again fixes it.
+
+Run `doctor` first. Which detections are available depends on the model, the macOS version and the
+permissions granted, and `doctor` tells you **what does not work and why**. A detection silently
+missing on someone else's machine is this tool's most dangerous failure mode, so nothing unavailable is
+hidden.
+
+Configuration lives in `~/.config/network-monitor/config.json`, and records go to `data/` next to it
+by default. Choose another location in the wizard, or with `--log-dir` or `NETMON_LOG_DIR`. When you
+register the always-on agent, the chosen location is also written to the configuration file, so
+`netmon report` reads the same place the agent writes to.
+
+## Permissions and consent
+
+Two things turn on **only with your consent**. Without it, the related features stay off and every
+other detection keeps working.
+
+```
+netmon consent list                       read what is requested and why
+netmon location setup                     build the location helper and request access
+netmon location status                    current permission state
+netmon consent revoke location            revoke (the related features are turned off as well)
+```
+
+### Why location access goes through a separate app
+
+macOS grants location access **per app**. A script run from a terminal has no app to ask on its
+behalf, so no prompt appears, and it cannot inherit another app's approval. So `location setup` builds
+a small helper app (`NetworkMonitorLocation.app`) in the configuration directory; that app holds the
+permission and returns **only the SSID and BSSID**.
+
+The helper does not read coordinates (it never calls `startUpdatingLocation`) and does not scan
+nearby access points. Those two values are all it needs. The source is in
+[tools/location-helper/request_location.m](tools/location-helper/request_location.m).
+
+| Item | What it is for | What leaves the machine |
 |---|---|---|
-| `location` | SSID·BSSID를 읽어 evil twin과 정상 로밍을 구분 | 없음 |
-| VPN 감시 | 연결 상태와 끊김 원인. WARP 는 데몬 로그(`/Library/Application Support/Cloudflare/cfwarp_service_log.txt`)의 상태 방송·끊김 원인 줄을 주소·구조체를 도려내 로컬 표본에 저장합니다 (동의 항목은 아니지만 기본 꺼짐) | 없음. 단 터널 엔드포인트 측정(`vpn.tunnel_probe`)을 켜면 아래 `external_probes` 를 따릅니다 |
-| `external_probes` | DNS 가로채기·TLS 발급자·공인 IP 확인, VPN 이 연결돼 있지 않은 주기의 터널 상대편 도달성 | 고정된 조회 이름과 내 출발지 IP. 터널 엔드포인트 측정을 켜면 VPN 이 연결돼 있지 않은 동안(끊김·재협상) 공급자가 사유에 적어 준 터널 상대편(엔드포인트) 주소로 ICMP 를 보냅니다(ping_count 만큼, 기본 1발). 보낼지는 직전 주기의 상태로 정하므로 다시 연결된 직후 첫 주기에도 나갈 수 있고, 공급자마다 한 끊김에 최대 12발까지만 보냅니다. 주소는 **공급자가 사유 문자열에 적어 준 것**이고, 공인 유니캐스트가 아니면 보내지 않습니다 |
+| `location` | Reads the SSID and BSSID to tell an evil twin from normal roaming | Nothing |
+| VPN monitoring | Connection state and the cause of drops. For WARP, state broadcasts and drop-cause lines from the daemon log (`/Library/Application Support/Cloudflare/cfwarp_service_log.txt`) are stored in local samples with addresses and structures cut out (not a consent item, but off by default) | Nothing. Turning on tunnel endpoint probing (`vpn.tunnel_probe`) follows `external_probes` below |
+| `external_probes` | Reachability of the tunnel's far end in cycles where the VPN is not connected. DNS hijack, TLS issuer and public IP checks are planned under the same consent but not implemented yet ([docs/detections.md](docs/detections.md)) | Today only ICMP to the tunnel endpoint, and only when tunnel endpoint probing (`vpn.tunnel_probe`) is also turned on. While a VPN is not connected (down or renegotiating) it sends ICMP to the tunnel endpoint address the provider reported — ping_count packets, 1 by default. The decision uses the previous cycle's state, so a probe may also go out on the first cycle after reconnecting, and at most 12 packets go out per provider per outage. The address is **the one the provider wrote into its reason string**, and nothing is sent unless it is a public unicast address. The planned checks would send a fixed set of lookup names and your source IP |
 
-동의하기 전에는 SSID·BSSID를 **기록조차 하지 않습니다.** 위치 권한이 우연히 열려
-있어도 마찬가지입니다.
+Before you consent, the SSID and BSSID are **not even recorded** — even if location access happens to
+be open.
 
-## 언어와 문구
+## Language and wording
 
-한국어와 영어를 지원합니다.
-
-```
-netmon lang           지금 언어와 쓸 수 있는 언어 보기
-netmon lang en        영어로
-netmon lang ko        한국어로
-NETMON_LANG=en netmon report    한 번만 다른 언어로
-```
-
-**화면에 나오는 문구는 전부 한 곳에 있습니다.**
+Korean and English are supported.
 
 ```
-netmon/messages/ko.py   한국어
+netmon lang           show the current language and the available ones
+netmon lang en        switch to English
+netmon lang ko        switch to Korean
+NETMON_LANG=en netmon report    another language for one run only
+```
+
+**Most of the text that follows the language setting lives in one place.**
+
+```
+netmon/messages/ko.py   Korean
 netmon/messages/en.py   English
 ```
 
-판정 요약문, 보고서 제목, 실시간 화면, 조사 문구, CLI 출력, 설정 마법사 질문이
-모두 여기 있습니다. 문구를 고치려면 이 파일만 열면 됩니다. 새 언어를 넣으려면
-같은 이름의 파일을 하나 더 만들고 `netmon/messages/__init__.py`의 `CATALOGUES`에
-등록하면 됩니다.
+Finding summaries (investigation findings included), report headings, the live view, the setup
+wizard's questions and part of the CLI output are all there. To change that wording, open only these
+files. To add a language, create another file with the same names and register it in `CATALOGUES` in
+`netmon/messages/__init__.py`.
 
-어투 규칙은 카탈로그 파일 맨 위에 적어 두었고, 테스트
-(`tests/test_messages.py`)가 지킵니다.
+Not everything goes through the catalogues yet. These are hard-coded in Korean and do not follow
+`netmon lang`:
 
-- 한국어: 결과·상태는 **명사형으로 끝냅니다** — "게이트웨이 왕복 시간이
-  112ms 로 크게 증가함 (평균 20ms)." 묻는 말과 시키는 말은 그대로 둡니다.
+- the command-line `--help` text;
+- most of the output of `doctor`, `consent` (including the consent descriptions),
+  `investigate list`/`show`/`rules`, `service status`/`install` and `location`;
+- the reasons and errors `link` prints, the suppression note and network line printed by
+  `once`/`run`/`replay`, and the setup wizard's link failure message;
+- some labels inside reports, the live view and finding summaries — axis names, counts, relative
+  times ("…초 전"), the investigation criteria summary and the first-hop method name.
+
+The style rules are written at the top of each catalogue file and enforced by a test
+(`tests/test_messages.py`).
+
+- Korean: results and states **end in a noun form** — "게이트웨이 왕복 시간이 112ms 로 크게 증가함
+  (평균 20ms)." Questions and instructions stay as they are.
 - English: terse and declarative, no first or second person.
-- 두 카탈로그의 **이름과 자리표시자가 정확히 같아야** 합니다. 테스트가 확인합니다.
+- Both catalogues must have **exactly the same names and placeholders**. A test checks this.
 
-언어를 바꿔도 **이미 기록된 판정의 문구는 그대로**입니다. 기록은 사후에 바꾸지
-않습니다. 보고서 제목과 실시간 화면처럼 볼 때 만들어지는 부분은 바로 바뀝니다.
+Changing the language **does not change findings already recorded.** Records are never rewritten
+afterwards. Parts built when you view them, such as report headings and the live view, switch at once
+(apart from the Korean-only labels above).
 
-## 개인정보
+## Privacy
 
-로그에는 식별자 원문이 남습니다. 기록 시점에 해시하면 "MAC이 a에서 b로 바뀜"은 남지만
-그 `b`가 어제 본 AP인지 내 폰인지 사람이 판단할 수 없게 되어 조사 가치가 사라집니다.
-로그는 본인 기계에만 남으므로 원문을 두고, **남에게 보낼 때 `--redact`로 가립니다.**
+Logs keep identifiers verbatim. Hashing them at record time would keep "the MAC changed from a to b"
+but make it impossible to tell whether that `b` is the access point you saw yesterday or your phone,
+which destroys the value of an investigation. Logs stay on your own machine, so the originals are
+kept, and **you mask them with `--redact` when sending them to someone.**
 
-**보고서와 실시간 화면에는 식별자가 나오지 않습니다.** 요약문은 식별자를 담지
-않고, 근거(`evidence`)는 화면에 출력하지 않기 때문입니다. 실데이터로 확인했고
-테스트로 지킵니다 — 가리지 않은 보고서도 그대로 보여 줄 수 있습니다.
+**Reports and the live view never show identifiers.** Summaries carry no identifiers, and evidence
+(`evidence`) is not printed on screen. This was checked on real data and is kept by tests — an
+unmasked report can be shown as is.
 
-`--redact`가 필요한 곳은 **관측을 파일로 내보낼 때**(`capture`)입니다. 식별자로
-감싼 필드는 통째로 토큰이 됩니다. VPN 공급자가 준 사유 문자열처럼 모양을 정할 수
-없는 자유 문자열(WARP 데몬 로그에서 도려낸 줄 포함)은 그 안의 IPv4·IPv6 주소만 찾아 같은
-토큰으로 바꿉니다(포트는 남깁니다 — 대괄호 없는 압축 IPv6 에 포트가 붙으면 주소와 포트가 한 토큰이
-됩니다. IPv4 를 품은 IPv6 표기 `2001:db8::192.0.2.1:2408` 은 주소만 한 토큰이 되고 포트가 남습니다 — 이 표기는 IPv6
-토큰이라 같은 IPv4 를 감싼 값의 토큰과 다릅니다). IPv4 까지 합쳐 IPv6 로 유효하지 않은 표기(`:::192.0.2.1`, 그룹이 모자란
-`2001:db8:192.0.2.1`, 그룹이 다 찼는데 `::` 가 붙은 `2001:db8:1:2:3:4::192.0.2.1` 등)는 IPv4 만 가리고 앞부분은 남깁니다 — 남은
-앞부분이 그 자체로 IPv6 표기일 수 있습니다. IPv4 를 품은 IPv6 뒤에 점과 영문자가 붙은 모양(`2001:db8::192.0.2.1.example`)도 IPv4 만
-가립니다. 반대로 16진 낱말이 앞에 붙은 모양(`cafe::192.0.2.1`)과 MAC 뒤에 콜론으로 IPv4 가 붙은 모양은 그 낱말·MAC 까지 한 토큰으로
-가립니다. 주소의 숫자는
-ASCII 숫자만 봅니다 — 전각·아랍-인도 숫자는 주소의 일부로 치지 않고 남깁니다(그 옆의 ASCII 주소는 가립니다). 자유 문자열에서 가리지 못하는 것도 있습니다: **주소가 아닌 식별자**(이름
-등), 앞뒤가 영문자·숫자나 점(IPv6 은 콜론까지)으로 이어진 주소(`ip192.0.2.1`,
-`host.192.0.2.1`, `addr:2001:db8::7` 같은 모양), 잘린 주소 조각, 0으로 시작하는
-옥텟(`192.0.2.001`), 포트가 콜론으로 바로 붙은 8그룹 IPv6, 역방향 조회 이름의 IPv6
-니블 표기.
+`--redact` matters **when exporting observations to a file** (`capture`). Fields wrapped as identifiers
+become a token as a whole. Free-form strings whose shape cannot be fixed, such as the reason string a
+VPN provider supplies (including lines cut from the WARP daemon log), are searched for IPv4 and IPv6
+addresses only, and those are replaced with the same tokens:
 
-가리기는 로컬 솔트 HMAC이라 같은 값이 같은 토큰이 됩니다. "바뀌었다가 원래대로
-돌아왔다" 같은 관계는 가린 뒤에도 보입니다. 솔트는
-`~/.config/network-monitor/salt`에 소유자 전용(600)으로 둡니다.
+- Ports are kept. When a port follows a compressed IPv6 address without brackets, the address and the
+  port become one token. In the IPv4-embedded IPv6 form `2001:db8::192.0.2.1:2408` only the address
+  becomes a token and the port stays — that form is an IPv6 token, so it differs from the token of a
+  value wrapping the same IPv4 address.
+- Forms that are not valid IPv6 once the IPv4 part is included (`:::192.0.2.1`, `2001:db8:192.0.2.1`
+  with too few groups, `2001:db8:1:2:3:4::192.0.2.1` with `::` after all groups are used, and so on)
+  have only the IPv4 part masked and the leading part left — and that leading part may itself be an
+  IPv6 form. An IPv4-embedded IPv6 address followed by a dot and letters
+  (`2001:db8::192.0.2.1.example`) also has only its IPv4 part masked.
+- Conversely, a hex word in front (`cafe::192.0.2.1`) and an IPv4 address joined to a MAC by a colon
+  are masked together with that word or MAC as one token.
+- Only ASCII digits count as part of an address — full-width and Arabic-Indic digits are not treated as
+  part of it and are left (an ASCII address next to them is masked).
 
-## 하지 않는 것
+Some things in free-form strings are not masked: **identifiers that are not addresses** (names and
+the like), addresses joined to letters, digits or dots on either side (and colons, for IPv6) such as
+`ip192.0.2.1`, `host.192.0.2.1` and `addr:2001:db8::7`, truncated address fragments, octets with a
+leading zero (`192.0.2.001`), eight-group IPv6 with a port attached directly by a colon, and the IPv6
+nibble form of reverse-lookup names.
 
-- 다른 호스트를 스캔하지 않습니다. ARP 위조·deauth 같은 공격을 재현하지 않습니다.
-- sudo를 쓰지 않습니다. 시스템 설정을 바꾸지 않습니다. 상시 실행으로 등록하지 않습니다.
-- 네트워크 식별자를 외부로 보내지 않습니다.
+Masking is an HMAC with a local salt, so the same value becomes the same token, and relationships such
+as "changed and then changed back" remain visible after masking. The salt is kept in
+`~/.config/network-monitor/salt`, readable by the owner only (600).
 
-## 구조
+## What it does not do
+
+- It does not scan other hosts. It does not reproduce attacks such as ARP spoofing or deauth.
+- It does not use sudo, change system settings, or register itself to run always-on.
+- It does not send network identifiers anywhere.
+
+## Layout
 
 ```
-netmon/collect/   각 데이터원. parse_*(문자열)은 순수 함수, collect()가 명령을 실행
-netmon/detect/    판정. (이전 관측, 현재 관측, 문맥) → 판정 목록. 순수 함수
-netmon/liveness.py  첫 홉 도달성을 ICMP에 기대지 않고 판정
-netmon/baseline.py  기준선. 판정 전/후로 나눠 갱신
-netmon/redact.py    식별자 가리기
+netmon/collect/     one module per data source. parse_*(string) are pure functions; collect() runs the commands
+netmon/detect/      judgement. (previous observation, current observation, context) → findings. Pure functions
+netmon/liveness.py  first-hop reachability without relying on ICMP
+netmon/baseline.py  baselines, updated before and after judgement
+netmon/redact.py    identifier masking
 ```
 
-수집과 판정을 나눈 이유는 테스트입니다. 현장에서 관측을 떠 오면
-(`netmon.sh capture N --redact`) 이후 판정 수정은 네트워크 없이 재현합니다.
+Collection and judgement are split for testing. Once observations are captured in the field
+(`netmon.sh capture N --redact`), later changes to judgement are reproduced without a network.
 
 ```
 netmon capture 60 -o /tmp/cafe.jsonl --redact
 netmon replay /tmp/cafe.jsonl
 ```
 
-## 개발
+## Development
 
 ```
 PYTHONPATH=. python3 -m unittest discover -s tests -t .
-tools/leak-check.sh          커밋될 내용에 환경 식별자가 섞였는지 검사
+tools/leak-check.sh          check whether what is about to be committed contains environment identifiers
 ```
 
-테스트는 전부 합성 입력입니다. 실제 환경에서 뜬 값을 저장소에 넣지 않습니다.
+All tests use synthetic input. Values captured from real environments are never put in the repository.
 
-## 어디까지 확인됐나
+## What has been verified
 
-macOS 두 대(무선 노트북, 유선 데스크톱)에서 상시 실행하며 다듬고 있습니다.
-**지금까지 찾은 결함은 거의 전부 오탐과 과잉 단정이었습니다.**
+It runs always-on on two Macs (a wireless laptop and a wired desktop) and is being refined there.
+**Almost every defect found so far has been a false positive or an overstatement.**
 
-확인된 것
+Verified
 
-- 1단계 탐지 전부가 실기계에서 동작합니다. 유선 기계에서는 Wi-Fi 탐지가
-  "해당 없음"으로, VPN 도구가 없으면 "없음"으로 **이유를 말하며** 빠집니다.
-- VPN 끊김을 실제로 잡았습니다. 다만 **어느 구간 문제인지는 가리지 못합니다** —
-  첫 홉이 응답했다는 사실까지만 적습니다(ICMP 한 묶음으로는 로컬 구간과 터널
-  상대편 구간을 나눌 수 없습니다).
-- 잠자기·재접속·링크 깜빡임·네트워크 이동이 판정을 어지럽히지 않습니다. 다만 SSID 를 못 읽는 주기를 사이에 두고
-  같은 서브넷·같은 IP 의 다른 네트워크로 옮기면 경보가 날 수 있습니다([docs/threat-model.md](docs/threat-model.md) "SSID 를 읽다가 못 읽게 된 주기" 의 남는 한계).
-- 가리기(`--redact`)가 실데이터에서 감싼 식별자를 남기지 않았습니다(2026-09-16 측정). 2026-09-27 에 자유 문자열 가림까지
-  다시 쟀습니다 — 실측 표본·이벤트(9-16~9-26)의 자유 문자열 30만 개 가운데 주소가 든 146개에서 가린 뒤 남은 주소 후보 0(앞뒤가
-  영숫자·점으로 이어진 IPv4·IPv6 과 포트가 붙은 8그룹 IPv6 도 세는 검출기 — 0으로 시작하는 옥텟·잘린 조각·주소가 아닌 식별자는
-  세지 않습니다). WARP 데몬 로그는 상태 방송을 이름만 남기므로 가리기 전에도 주소가 없습니다(보존본 약 5시간: 상태 방송
-  3,451줄 가운데 메시지에 주소가 든 것 3,282줄. 반복 방송은 저장하지 않아 저장되는 상태 줄은 192개, 그중 주소가 든 방송에서
-  온 것 56개이고 저장 글에 남은 주소 0). 분류·오류 줄은 같은 판별로 주소를 도려내게 했지만 보존본의 그 줄
-  26개에는 도려낼 주소가 없어 실제 자료로는 확인하지 못했습니다(합성 시험으로만 — 위 "개인정보" 절의 못 가리는 모양은 저장 글에도
-  남습니다). 자유 문자열에서 가리지 못하는 모양은 위 "개인정보" 절.
-  보고서는 요약문만 출력하므로 가리지 않아도 식별자가 나오지 않습니다.
+- Every stage-1 detection works on real machines. On the wired machine the Wi-Fi detections drop out
+  as "not applicable", and without a VPN tool the VPN ones drop out as "none" — **stating the reason**.
+- It has caught real VPN drops. It **cannot tell which segment was at fault**, though — it records only
+  that the first hop answered (a single batch of ICMP cannot separate the local segment from the far
+  end of the tunnel).
+- Sleep, reconnects, link flaps and moving between networks do not throw off the findings. The
+  exception: moving to a different network on the same subnet with the same IP, across cycles where the
+  SSID could not be read, can raise an alert (the remaining limits under "SSID 를 읽다가 못 읽게 된
+  주기" in [docs/threat-model.md](docs/threat-model.md)).
+- Masking (`--redact`) left no wrapped identifiers on real data (measured 2026-09-16). Masking of
+  free-form strings was measured again on 2026-09-27: among 300,000 free-form strings in real samples
+  and events (09-16 to 09-26), 146 contained an address, and after masking 0 address candidates
+  remained (the detector also counts IPv4 and IPv6 joined to letters, digits or dots on either side and
+  eight-group IPv6 with a port; it does not count octets with a leading zero, truncated fragments or
+  identifiers that are not addresses). State broadcasts from the WARP daemon log are stored by name only,
+  so the stored state lines have no addresses even before masking (about 5 hours of retained log: of 3,451 state
+  broadcast lines, 3,282 carried an address in the message; repeated broadcasts are not stored, so 192
+  state lines were stored, 56 of them from broadcasts that carried an address, and 0 addresses remained
+  in the stored text). Classification and error lines have their addresses cut out with the same
+  address matching that masking uses, but the 26 such lines in the retained log had no address to cut, so this is not confirmed
+  on real data (only by synthetic tests — the forms that cannot be masked, listed under
+  [Privacy](#privacy), remain in stored text as well). Reports print only summaries, so identifiers do
+  not appear even without masking.
 
-아직 확인되지 않은 것
+Not yet verified
 
-- **evil twin 판정(`EVIL_TWIN_CANDIDATE`)은 실제 상황으로 검증된 적이 없습니다.**
-  같은 SSID 안의 정상 로밍은 실측으로 확인했습니다.
-- 보존 정리와 로그 회전은 단위 테스트로만 확인했습니다. UTC 자정과 5MB
-  초과에서만 도는 경로입니다.
-- 2·3단계 탐지는 미구현입니다. 무엇이 없는지는
-  [docs/detections.md](docs/detections.md)에 적어 두었습니다.
+- **The evil twin finding (`EVIL_TWIN_CANDIDATE`) has never been verified against a real situation.**
+  Normal roaming within one SSID has been confirmed on real data.
+- Retention cleanup and log rotation are confirmed by unit tests only. Those paths run only at UTC
+  midnight and past 5 MB.
+- Stage-2 and stage-3 detections are not implemented. What is missing is written down in
+  [docs/detections.md](docs/detections.md).
 
-임계값의 상당수는 **아직 근거가 얇습니다.** ARP 응답 급증의 "초당 10건",
-왕복 시간 급변의 "연속 3주기", 조사 냉각의 "30주기" 같은 값은 실제 공격이나
-장애를 충분히 겪어 보고 정한 것이 아닙니다.
+Many thresholds **still rest on thin evidence.** Values such as "10 per second" for an ARP reply
+spike, "3 consecutive cycles" for a round-trip time jump and "30 cycles" for investigation cooldown
+were not set after living through enough real attacks or outages.
 
-쓰시다가 오탐이나 놓친 것을 만나면 `netmon capture N --redact` 로 그 구간을 떠서
-알려 주시면 도움이 됩니다. 식별자를 가린 관측만으로 재현할 수 있습니다.
+If you run into a false positive or a missed event, capturing that stretch with
+`netmon capture N --redact` and sending it helps. It can be reproduced from the masked observations
+alone.
 
-## 라이선스
+## Documents
 
-MIT. [LICENSE](LICENSE) 참조.
+Written in Korean.
 
-## 문서
+- [docs/threat-model.md](docs/threat-model.md) — what networks are assumed, and who can do what
+- [docs/data-sources.md](docs/data-sources.md) — the commands used and the pitfalls measured
+- [docs/detections.md](docs/detections.md) — the detections and their confidence ceilings
 
-- [docs/threat-model.md](docs/threat-model.md) — 어떤 네트워크를 가정하고, 누가 무엇을 할 수 있나
-- [docs/data-sources.md](docs/data-sources.md) — 쓰는 명령과 실측한 함정
-- [docs/detections.md](docs/detections.md) — 탐지 항목과 확신도 상한
+## 한국어 요약
+
+현재 연결된 네트워크에서 **내 연결과 보안에 영향을 주는 일**이 생겼는지 알려 주는 macOS용 감시
+도구입니다. 판정·보고서·실시간 화면·설정 마법사 문구의 기본 언어는 한국어이고 `netmon lang en` 으로
+영어로 바꿀 수 있습니다. 다만 `--help`, `doctor`·`consent`·`investigate` 등 일부 CLI 출력, 보고서·실시간
+화면의 일부 이름표는 아직 한국어만 나옵니다. `docs/` 문서도 한국어로 씁니다.
+
+- **연결 품질과 보안을 따로 판정합니다.** 한 관측이 두 축 모두에서 판정될 수 있고, 품질 사건이 보안
+  사건을 가리지 않습니다.
+- **판정마다 근거와 확신도가 붙습니다.** `확정`·`의심`·`가능`을 섞지 않습니다. 내 행동으로 생긴
+  변화는 억제하되 지우지 않습니다.
+- **기본값은 최소 권한입니다.** sudo를 쓰지 않고, 외부로 요청을 보내지 않으며, VPN 감시와 위치
+  권한은 꺼진 상태로 시작합니다. `netmon setup` 마법사에서 엔터만 눌러도 안전한 값입니다.
+- **유의미한 신호는 조사로 이어 봅니다.** 게이트웨이 MAC 변경처럼 그다음 일로만 갈리는 신호가
+  잡히면 더 자주 측정하며 결론이 날 때까지 보고, 조사가 기준을 바꾸면 이유와 이전·이후 값을
+  남깁니다.
+- **동의해야만 켜지는 것이 둘입니다.** `location`(SSID·BSSID 로 evil twin 과 정상 로밍 구분, 밖으로
+  나가는 것 없음)과 `external_probes`(VPN 이 연결돼 있지 않은 주기의 터널 상대편 도달성 — DNS 가로채기·
+  TLS 발급자·공인 IP 확인은 같은 동의에 묶일 예정이며 아직 구현 전)입니다. 터널 엔드포인트 측정을 켜면 VPN 이 연결돼 있지 않은 동안(끊김·재협상)
+  공급자가 사유에 적어 준 터널 상대편(엔드포인트) 주소로 ICMP 를 보냅니다(ping_count 만큼, 기본 1발).
+  보낼지는 직전 주기의 상태로 정하므로 다시 연결된 직후 첫 주기에도 나갈 수 있고, 공급자마다 한
+  끊김에 최대 12발까지만 보냅니다. 동의하기 전에는 SSID·BSSID를 기록조차 하지 않습니다.
+- **로그에는 식별자 원문이 남고, 남에게 보낼 때 `--redact` 로 가립니다.** 보고서와 실시간 화면에는
+  식별자가 나오지 않습니다. 가리기는 로컬 솔트 HMAC 이라 같은 값이 같은 토큰이 되며, 자유 문자열에서
+  가리지 못하는 모양은 위 [Privacy](#privacy) 절에 적었습니다.
+- **하지 않는 것**: 다른 호스트 스캔, 공격 재현, sudo, 시스템 설정 변경, 네트워크 식별자 외부 전송.
+- **어디까지 확인됐나**: 두 대(무선 노트북, 유선 데스크톱)에서 상시 실행 중이며, 지금까지 찾은 결함은
+  거의 전부 오탐과 과잉 단정이었습니다. evil twin 판정은 실제 상황으로 검증된 적이 없고, 임계값의
+  상당수는 아직 근거가 얇습니다. 오탐이나 놓친 것을 만나면 `netmon capture N --redact` 로 그 구간을
+  떠서 알려 주세요.
+
+## License / 라이선스
+
+MIT. See [LICENSE](LICENSE).
+
+MIT 라이선스입니다. [LICENSE](LICENSE)를 참조하세요.
