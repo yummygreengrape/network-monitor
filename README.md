@@ -203,10 +203,14 @@ Not everything goes through the catalogues yet. These are hard-coded in Korean a
 - the command-line `--help` text;
 - most of the output of `doctor`, `consent` (including the consent descriptions),
   `investigate list`/`show`/`rules`, `service status`/`install` and `location`;
-- the reasons and errors `link` prints, the suppression note and network line printed by
-  `once`/`run`/`replay`, and the setup wizard's link failure message;
+- the reasons and errors `link` prints (the wizard's link step shows them too), the suppression note
+  and network line printed by `once`/`run`/`replay`, and the setup wizard's link failure message;
+- the first-run prompt shown when `netmon` runs with no configuration, and the "가림 대상:" line at the
+  end of `report --redact`;
 - some labels inside reports, the live view and finding summaries — axis names, counts, relative
-  times ("…초 전"), the investigation criteria summary and the first-hop method name.
+  times ("…초 전"), the investigation criteria summary and the first-hop method name;
+- outside the Python package: the location helper's app name and the macOS permission prompt text
+  (`tools/location-helper/Info.plist`), and the messages of `netmon.sh` and the helper's build script.
 
 The style rules are written at the top of each catalogue file and enforced by a test
 (`tests/test_messages.py`).
@@ -354,7 +358,7 @@ Written in Korean.
 현재 연결된 네트워크에서 **내 연결과 보안에 영향을 주는 일**이 생겼는지 알려 주는 macOS용 감시
 도구입니다. 판정·보고서·실시간 화면·설정 마법사 문구의 기본 언어는 한국어이고 `netmon lang en` 으로
 영어로 바꿀 수 있습니다. 다만 `--help`, `doctor`·`consent`·`investigate` 등 일부 CLI 출력, 보고서·실시간
-화면의 일부 이름표는 아직 한국어만 나옵니다. `docs/` 문서도 한국어로 씁니다.
+화면·판정 요약의 일부 이름표, 위치 헬퍼의 권한 요청 창 문구는 아직 한국어만 나옵니다. `docs/` 문서도 한국어로 씁니다.
 
 - **연결 품질과 보안을 따로 판정합니다.** 한 관측이 두 축 모두에서 판정될 수 있고, 품질 사건이 보안
   사건을 가리지 않습니다.
