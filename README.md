@@ -299,7 +299,8 @@ All tests use synthetic input. Values captured from real environments are never 
 
 ## What has been verified
 
-It runs always-on on two Macs (a wireless laptop and a wired desktop) and is being refined there.
+It was refined while running always-on on two Macs (a wireless laptop and a wired desktop); of the
+two, only the laptop still runs it.
 **Almost every defect found so far has been a false positive or an overstatement.**
 
 Verified
@@ -382,8 +383,9 @@ Written in Korean.
 - **다른 호스트를 스캔하거나 공격을 재현하지 않습니다.** sudo 를 쓰지 않고, 시스템 설정을 바꾸지
   않으며, 네트워크 식별자를 밖으로 보내지 않아요.
 - **지금까지 찾은 결함은 거의 전부 오탐과 과잉 단정이었습니다.** 두 대(무선 노트북, 유선 데스크톱)에서
-  상시 실행 중이에요. evil twin 판정은 실제 상황으로 검증된 적이 없고, 임계값의 상당수도 아직 근거가
-  얇아요. 오탐이나 놓친 것을 만나면 `netmon capture N --redact` 로 그 구간을 떠서 알려 주세요.
+  상시 실행하며 다듬었고, 지금은 그중 노트북 한 대에서만 실행해요. evil twin 판정은 실제 상황으로 검증된
+  적이 없고, 임계값의 상당수도 아직 근거가 얇아요. 오탐이나 놓친 것을 만나면
+  `netmon capture N --redact` 로 그 구간을 떠서 알려 주세요.
 
 ## License / 라이선스
 
