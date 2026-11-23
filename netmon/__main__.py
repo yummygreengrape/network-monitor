@@ -169,7 +169,9 @@ def cmd_consent(args) -> int:
             print("  무엇      %s" % meta["title"])
             print("  왜        %s" % meta["why"])
             print("  밖으로    %s" % meta["sends_out"])
-            print("  켜지는 것 %s" % ", ".join(meta["enables"]))
+            print("  켜지는 것 %s" % ", ".join(
+                f + (" (예정, 아직 동작하지 않음)" if f in configmod.PLANNED_FEATURES else "")
+                for f in meta["enables"]))
             print()
         return 0
 
@@ -189,6 +191,8 @@ def cmd_consent(args) -> int:
                     cfg.set_feature(feat, True)
         cfg.save()
         print("동의를 기록했습니다 → %s" % cfg.path)
+        # 동의를 **주는** 것은 실행 중인 netmon 에 바로 적용되지 않는다 — 철회만 다음 주기부터 읽는다(Engine._refresh_consent).
+        print("이미 실행 중인 netmon 에는 다시 시작해야 적용됩니다 — 상시 실행 에이전트는 netmon service restart")
         if not args.enable:
             print("관련 기능은 아직 꺼져 있습니다. --enable 을 붙이거나 설정에서 켜세요:")
             for feat in meta["enables"]:
@@ -197,6 +201,8 @@ def cmd_consent(args) -> int:
         cfg.revoke(args.item)
         cfg.save()
         print("동의를 철회하고 관련 기능도 껐습니다 → %s" % cfg.path)
+        print("이 설정 파일을 읽는 실행 중인 netmon(상시 실행 에이전트·run·capture)에는 다음 측정 주기부터 적용됩니다. "
+              "이미 기록된 값은 지우지 않습니다.")
     return 0
 
 

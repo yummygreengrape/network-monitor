@@ -1265,5 +1265,55 @@ class TestKeyParsing(unittest.TestCase):
             self.assertIsNone(f.network, f.kind)
 
 
+class TestCliWording(unittest.TestCase):
+    """QA-8: CLI 가 적용 시점을 사실대로 말한다."""
+
+    def test_revoke_says_next_cycle_and_the_file(self):
+        L = Live(self)
+        out = L.revoke("location")
+        self.assertIn("다음 측정 주기", out)
+        self.assertIn(L.path, out)
+
+    def test_revoke_says_recorded_values_stay(self):
+        L = Live(self)
+        self.assertIn("이미 기록된 값은 지우지 않습니다", L.revoke("location"))
+
+    def test_grant_says_restart(self):
+        L = Live(self, grant=False)
+        rc, out = _cli("--config", L.path, "consent", "grant", "location")
+        self.assertEqual(rc, 0)
+        self.assertIn("netmon service restart", out)
+        self.assertIn("다시 시작", out)
+
+    def test_consent_list_marks_unimplemented_checks(self):
+        L = Live(self, grant=False)
+        rc, out = _cli("--config", L.path, "consent", "list")
+        self.assertEqual(rc, 0)
+        enables = [line for line in out.splitlines() if line.strip().startswith("켜지는 것")]
+        ext = [line for line in enables if "vpn.tunnel_probe" in line]
+        self.assertEqual(len(ext), 1)
+        for feat in ("detect.dns_intercept", "detect.tls_intercept", "detect.public_ip"):
+            seg = ext[0].split(feat, 1)[1].split(",", 1)[0]
+            self.assertIn("예정", seg, feat)
+        self.assertNotIn("예정", ext[0].split("vpn.tunnel_probe", 1)[1].split(",", 1)[0])
+
+    def test_consent_text_does_not_claim_the_checks_run(self):
+        ext = configmod.CONSENTS["external_probes"]
+        for field in ("why", "sends_out"):
+            self.assertIn("예정", ext[field], field)
+        # 목적 문장이 지금 동작하는 터널 엔드포인트 측정으로 시작한다 — 구현 전 점검을 먼저 말하지 않는다.
+        self.assertTrue(ext["why"].startswith("VPN"))
+        self.assertIn("ICMP 뿐", ext["sends_out"])
+
+    def test_wizard_text_does_not_claim_the_checks_run(self):
+        from netmon import messages
+        for lang, word in (("ko", "예정"), ("en", "planned")):
+            head = messages.get("WZ_EXTERNAL_HEAD", lang)
+            body = messages.get("WZ_EXTERNAL_BODY", lang)
+            row = messages.get("WZ_ROW_EXTERNAL", lang)
+            self.assertIn(word, head + body, lang)
+            self.assertIn(word, row, lang)
+
+
 if __name__ == "__main__":
     unittest.main()

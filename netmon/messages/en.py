@@ -417,17 +417,20 @@ WZ_VPN_BODY = "  Records connection state and drops. Nothing is sent outside."
 WZ_VPN_Q = "  Monitor VPNs?"
 WZ_VPN_NONE = "[VPN] No VPN found, skipping."
 
-WZ_EXTERNAL_HEAD = "[Outbound checks] Compares DNS answers against a reference (hijack detection),"
+WZ_EXTERNAL_HEAD = "[Outbound checks] Checks whether the tunnel's far end is reachable while a VPN is not connected."
 # The tunnel endpoint sentence matches the Korean catalogue, the README and the
-# consent text word for word; only the line breaks differ (AC-4, revised).
-WZ_EXTERNAL_BODY = ("  and watches TLS issuers for fixed hosts plus public IP changes.\n"
-                    "  While a VPN is not connected (down or renegotiating) it sends ICMP\n"
+# consent text word for word; only the line breaks differ (AC-4, revised). DNS,
+# TLS and public IP checks are not implemented yet, so this text does not say
+# they run (task 2026-09-28-consent-revoke-running-agent AC-4).
+WZ_EXTERNAL_BODY = ("  While a VPN is not connected (down or renegotiating) it sends ICMP\n"
                     "  to the tunnel endpoint address the provider reported — ping_count\n"
                     "  packets, 1 by default. The decision uses the previous cycle's state,\n"
                     "  so a probe may also go out on the first cycle after reconnecting,\n"
                     "  and at most 12 packets go out per provider per outage.\n"
-                    "  A fixed set of lookup names and this machine's source IP leave the\n"
-                    "  machine. Network identifiers such as SSID, BSSID and MAC are not sent.")
+                    "  DNS hijack, TLS issuer and public IP checks are planned under the same\n"
+                    "  consent but not implemented yet. Once they are, a fixed set of lookup\n"
+                    "  names and this machine's source IP will leave the machine. Network\n"
+                    "  identifiers such as SSID, BSSID and MAC are not sent.")
 WZ_EXTERNAL_Q = "  Enable outbound checks?"
 
 WZ_AGENT_HEAD = "[Always on] Starts at login and restarts if it stops."
@@ -449,7 +452,7 @@ WZ_ROW_LOGDIR = "records         %s"
 WZ_ROW_RETENTION = "retention       %d days"
 WZ_ROW_LOCATION = "location        %s  (evil twin detection)"
 WZ_ROW_VPN = "VPN monitoring  %s  (%s)"
-WZ_ROW_EXTERNAL = "outbound checks %s  (DNS/TLS hijack, public IP, tunnel endpoint if not connected)"
+WZ_ROW_EXTERNAL = "outbound checks %s  (tunnel endpoint if not connected; DNS/TLS/public IP planned)"
 WZ_ROW_AGENT = "always on       %s  (start at login)"
 WZ_ROW_LINK = "command         %s  (run netmon from anywhere)"
 WZ_ON = "on"
