@@ -1315,5 +1315,32 @@ class TestCliWording(unittest.TestCase):
             self.assertIn(word, row, lang)
 
 
+class TestConfigObjectShapes(unittest.TestCase):
+    """메모리의 `Config` 가 모양이 틀린 데이터를 품어도 예외 없이 "동의 없음·기능 기본값" 으로 읽는다(DEV-1 검수 [낮음] — `load` 를 거치지
+    않고 만든 설정. 지금은 `load` 가 먼저 고쳐 두므로 이 방어만으로 지켜지는 경로는 없다)."""
+
+    def _cfg(self, data):
+        return configmod.Config(path="/nonexistent/config.json", data=data)
+
+    def test_granted_must_be_boolean_true(self):
+        for value in ("false", "true", 1, 0, None, [], {}):
+            with self.subTest(value):
+                self.assertFalse(self._cfg({"consents": {"location": {"granted": value}}}).consented("location"))
+        self.assertTrue(self._cfg({"consents": {"location": {"granted": True}}}).consented("location"))
+
+    def test_bad_containers_mean_no_consent(self):
+        for consents in (None, [], "x", 5, {"location": True}, {"location": "yes"}, {"location": None}):
+            with self.subTest(consents):
+                self.assertFalse(self._cfg({"consents": consents}).consented("location"))
+
+    def test_bad_features_mean_defaults(self):
+        for feats in (None, [], "x", 5):
+            with self.subTest(feats):
+                cfg = self._cfg({"features": feats, "consents": {"location": {"granted": True}}})
+                self.assertFalse(cfg.feature("detect.evil_twin"))
+                self.assertTrue(cfg.feature("detect.wifi"), "기본으로 켜지는 기능은 기본값 그대로")
+                self.assertFalse(cfg.effective("detect.evil_twin"))
+
+
 if __name__ == "__main__":
     unittest.main()
