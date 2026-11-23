@@ -882,5 +882,302 @@ class TestUnreadableConfigFiles(unittest.TestCase):
             self.assertIsNotNone(configmod.read_consent_view(L.path), good)
 
 
+class TestRevokingLocationWhileRunning(unittest.TestCase):
+    """QA-1: 위치 동의를 물리면 다음 주기부터 SSID·BSSID 가 새로 기록되지 않는다."""
+
+    def test_the_precondition_the_ssid_is_recorded_while_consented(self):
+        """재료 확인 — 이 갈래에서 동의가 있으면 정말 SSID 가 기록된다. 여기가 깨지면 아래 "없음" 단언은 헛통과다."""
+        L = Live(self)
+        o, _ = L.cycle()
+        self.assertIsNotNone(_wifi_ident(o.data["wifi"])[0])
+        self.assertTrue(L.ctxs["wifi"]["allow_location"])
+        self.assertEqual(L.engine.identity_ssid, SSID)
+        self.assertEqual(_ssid_part(L.state_on_disk().get("network")), SSID)
+
+    def test_the_next_cycle_after_revoking_records_no_ssid_or_bssid(self):
+        L = Live(self)
+        L.cycle()
+        L.cycle()
+        out = L.revoke("location")
+        before = L.lines()
+        o, findings = L.cycle()
+        self.assertFalse(L.ctxs["wifi"]["allow_location"])
+        self.assertEqual(_wifi_ident(o.data["wifi"]), (None, None))
+        self.assertTrue(o.data["wifi"].get("identity_withheld"))
+        self.assertIsNone(L.engine.identity_ssid)
+        for f in findings:
+            self.assertIn(_ssid_part(f.network), ("-", None), f.kind)
+        self.assertEqual(_ssid_part(L.state_on_disk().get("network")), "-")
+        added = L.new_lines(before)
+        self.assertTrue(added, "표본이 기록돼야 한다")
+        for line in added:
+            self.assertNotIn(SSID, line)
+            self.assertNotIn(BSSID, line)
+        self.assertIn(L.path, out)
+
+    def test_the_snapshot_drops_the_ssid_at_its_next_save(self):
+        """스냅샷(baseline.json)은 60초마다 저장된다 — 철회 뒤 저장이 돌아온 완전한 주기에 SSID 가 빠진다."""
+        L = Live(self)
+        L.cycle()
+        self.assertEqual(L.baseline_on_disk().get("identity_ssid"), SSID)
+        L.revoke("location")
+        L.cycle(step=61.0)
+        saved = L.baseline_on_disk()
+        self.assertIsNone(saved.get("identity_ssid"))
+        self.assertEqual(_wifi_ident(saved["data"]["wifi"]), (None, None))
+        self.assertNotIn(SSID, json.dumps(saved, ensure_ascii=False))
+
+    def test_turning_off_only_the_feature_also_applies_next_cycle(self):
+        """동의는 두고 위치가 필요한 기능(`detect.evil_twin`)만 꺼도 다음 주기부터 — 좁히는 방향이다(SPEC ASSUMED 5)."""
+        L = Live(self)
+        L.cycle()
+        cfg = configmod.load(L.path)
+        cfg.set_feature("detect.evil_twin", False)
+        cfg.save()
+        o, _ = L.cycle()
+        self.assertFalse(L.ctxs["wifi"]["allow_location"])
+        self.assertEqual(_wifi_ident(o.data["wifi"]), (None, None))
+
+
+class TestRevokingExternalProbesWhileRunning(unittest.TestCase):
+    """QA-2: 외부 점검 동의를 물리면 다음 주기부터 터널 엔드포인트로 보내지 않는다."""
+
+    def _armed(self):
+        L = Live(self)
+        L.cycle()          # 첫 주기 — 직전 VPN 관측이 없어 주소가 없다
+        L.cycle()          # 직전 주기의 사유에서 주소를 고른다
+        self.assertTrue(L.ctxs["link"]["allow_tunnel_probe"])
+        self.assertEqual(L.ctxs["link"]["tunnel_endpoint"], ENDPOINT)
+        return L
+
+    def test_the_next_cycle_after_revoking_sends_nothing_to_the_endpoint(self):
+        L = self._armed()
+        L.revoke("external_probes")
+        L.cycle()
+        ctx = L.ctxs["link"]
+        self.assertFalse(ctx["allow_tunnel_probe"])
+        self.assertFalse(ctx["allow_external"])
+        self.assertIsNone(ctx["tunnel_endpoint"])
+
+    def test_turning_off_only_the_feature_also_applies_next_cycle(self):
+        L = self._armed()
+        cfg = configmod.load(L.path)
+        cfg.set_feature("vpn.tunnel_probe", False)
+        cfg.save()
+        L.cycle()
+        self.assertFalse(L.ctxs["link"]["allow_tunnel_probe"])
+        self.assertIsNone(L.ctxs["link"]["tunnel_endpoint"])
+
+
+class TestTheCliLoopsPickItUp(unittest.TestCase):
+    """QA-3: 실제 `run`·`capture` 루프 — 두 주기 사이(잠드는 자리)에 실제 CLI 로 철회한다."""
+
+    def _loop(self, L, argv_tail):
+        revoked = []
+
+        def sleep(_s):
+            if not revoked:
+                L.revoke("location")
+                revoked.append(True)
+
+        with L.collectors(), mock.patch.object(climod.time, "sleep", side_effect=sleep), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = climod.main(["--config", L.path, "--log-dir", L.data] + argv_tail)
+        self.assertEqual(rc, 0)
+        self.assertTrue(revoked)
+
+    def test_capture(self):
+        L = Live(self)
+        out_path = os.path.join(L.dir, "cap.jsonl")
+        self._loop(L, ["capture", "3", "-o", out_path])
+        with open(out_path, encoding="utf-8") as fh:
+            rows = [json.loads(x) for x in fh.read().splitlines()]
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(_wifi_ident(rows[0]["data"]["wifi"])[0], SSID, "재료 확인 — 철회 전 주기는 SSID 가 있다")
+        for r in rows[1:]:
+            self.assertEqual(_wifi_ident(r["data"]["wifi"]), (None, None))
+            self.assertNotIn(SSID, json.dumps(r, ensure_ascii=False))
+
+    def test_run(self):
+        L = Live(self)
+        self._loop(L, ["run", "--count", "3"])
+        samples = [json.loads(x) for name, ls in L.lines().items() if name.startswith("samples-") for x in ls]
+        self.assertEqual(len(samples), 3)
+        self.assertEqual(_wifi_ident(samples[0]["data"]["wifi"])[0], SSID, "재료 확인")
+        for s in samples[1:]:
+            self.assertEqual(_wifi_ident(s["data"]["wifi"]), (None, None))
+            self.assertNotIn(SSID, json.dumps(s, ensure_ascii=False))
+
+
+class TestGrantingWhileRunningWaitsForARestart(unittest.TestCase):
+    """QA-4: 동의를 **주는** 것은 실행 중인 엔진에 반영되지 않는다(Q1)."""
+
+    def test_a_grant_on_disk_is_not_picked_up(self):
+        L = Live(self, grant=False)
+        L.cycle()
+        L.grant_on_disk()
+        L.cycle()
+        L.cycle()
+        self.assertFalse(L.ctxs["wifi"]["allow_location"])
+        self.assertFalse(L.ctxs["link"]["allow_tunnel_probe"])
+        self.assertIsNone(L.ctxs["link"]["tunnel_endpoint"])
+        for f in FIVE:
+            self.assertFalse(L.engine.cfg.effective(f), f)
+
+    def test_a_restart_picks_the_grant_up(self):
+        """재료 확인 — 같은 파일로 다시 시작하면 켜진다(위 단언이 "파일이 틀려서" 헛통과하지 않음)."""
+        L = Live(self, grant=False)
+        L.grant_on_disk()
+        L.restart()
+        L.cycle()
+        self.assertTrue(L.ctxs["wifi"]["allow_location"])
+
+
+class TestTheRevokingCycleIsJudgedLikeARestart(unittest.TestCase):
+    """QA-6: 철회로 넘어가는 주기의 판정은 "동의를 끄고 재시작" 경로와 같다(AC-3)."""
+
+    def _sig(self, findings):
+        return [(f.kind, f.severity, f.attribution) for f in findings]
+
+    def test_same_findings(self):
+        live = Live(self)
+        live.cycle()
+        live.revoke("location")
+        live.world = obs(ssid=SSID, bssid=BSSID, gw_mac=GW_MAC_ALT)
+        _, a = live.cycle()
+
+        rs = Live(self)
+        rs.cycle()
+        rs.revoke("location")
+        rs.restart()
+        rs.world = obs(ssid=SSID, bssid=BSSID, gw_mac=GW_MAC_ALT)
+        _, b = rs.cycle()
+
+        self.assertEqual(self._sig(a), self._sig(b))
+        gw = [f for f in a if f.kind == "GW_MAC_CHANGED"]
+        self.assertTrue(gw)
+        self.assertEqual({(f.severity, f.attribution) for f in gw}, {("low", "network_change")})
+
+
+class TestRestartPathIsUnchanged(unittest.TestCase):
+    """QA-10: 동의를 끄고 재시작하는 경로의 판정은 기준 커밋과 같다 — 귀속 `network_change`, 게이트웨이 MAC 변화 low, 기준선 초기화, 열린 조사 닫힘.
+    링크 없는 주기의 `network`(Q3 로 바뀌는 것)는 여기서 보지 않는다."""
+
+    def test_restarting_with_the_consent_off(self):
+        L = Live(self)
+        L.cycle()                       # 스냅샷 저장 — 앵커의 게이트웨이 MAC 은 GW_MAC
+        L.cycle()
+        L.world = obs(ssid=SSID, bssid=BSSID, gw_mac=GW_MAC_ALT)
+        _, f = L.cycle()                # 같은 네트워크의 MAC 변화 — high, 조사가 열린다
+        self.assertIn(("GW_MAC_CHANGED", "high", None), [(x.kind, x.severity, x.attribution) for x in f])
+        self.assertIn("INVESTIGATION_OPENED", [x.kind for x in f])
+        L.revoke("location")
+        L.restart()                     # 되살린 앵커는 GW_MAC(60초 저장이 아직 안 돌아옴)
+        _, f = L.cycle()
+        sig = [(x.kind, x.severity, x.attribution) for x in f]
+        self.assertIn(("GW_MAC_CHANGED", "low", "network_change"), sig)
+        self.assertIn("INVESTIGATION_ABANDONED", [x.kind for x in f])
+        self.assertEqual(L.engine.state.get("cycles_on_network"), 1, "기준선이 지워져 1 부터 센다")
+
+
+class TestKeepingConsentIsUnchanged(unittest.TestCase):
+    """QA-7: 철회가 없으면 지금과 같다 — 설정 파일을 그대로 두고 여러 주기를 돌아도 동의는 그대로다(기준 커밋에서도 통과)."""
+
+    def test_nothing_changes_without_a_revoke(self):
+        L = Live(self)
+        for _ in range(5):
+            o, _ = L.cycle()
+        self.assertEqual(_wifi_ident(o.data["wifi"]), (SSID, BSSID))
+        self.assertEqual(L.ctxs["link"]["tunnel_endpoint"], ENDPOINT)
+        for f in FIVE:
+            self.assertTrue(L.engine.cfg.effective(f), f)
+
+
+class TestUnreadableConfigFilesWhileRunning(unittest.TestCase):
+    """ADV-1(b): 실행 중에 설정 파일을 못 읽게 된 주기는 직전 값을 쓴다(Q2). 온전한 파일에서 항목이 없으면 철회다."""
+    def test_a_bad_file_while_running_keeps_the_previous_consent(self):
+        for name, content in UNREADABLE:
+            with self.subTest(name):
+                L = Live(self)
+                L.cycle()
+                L.write_raw(content)
+                o, _ = L.cycle()
+                o, _ = L.cycle()
+                self.assertTrue(L.ctxs["wifi"]["allow_location"])
+                self.assertEqual(_wifi_ident(o.data["wifi"]), (SSID, BSSID))
+                self.assertEqual(L.ctxs["link"]["tunnel_endpoint"], ENDPOINT)
+
+    def test_a_well_formed_file_without_the_consent_is_a_revoke(self):
+        """객체로 온전히 읽혔고 그 동의 항목이 없으면 철회다(SPEC AC-2)."""
+        for content in (b"{}", b'{"consents": {}}', b'{"consents": {"location": {"granted": false}}}'):
+            with self.subTest(content):
+                L = Live(self)
+                L.cycle()
+                L.write_raw(content)
+                o, _ = L.cycle()
+                self.assertFalse(L.ctxs["wifi"]["allow_location"])
+                self.assertEqual(_wifi_ident(o.data["wifi"]), (None, None))
+
+
+class TestInterleavings(unittest.TestCase):
+    """ADV-2: 철회·못 읽음·다시 동의가 엇갈려도 메모리의 동의는 "시작 값과 지금까지 온전히 읽은 값 모두의 최소" 다."""
+
+    def _apply(self, L, step):
+        if step in ("G", "R") and (os.path.isdir(L.path)
+                                   or (os.path.exists(L.path) and not os.access(L.path, os.R_OK))):
+            # CLI 는 디렉터리·읽을 수 없는 파일 위에 저장하지 못한다 — 사람이 그 자리를 치운 뒤 다시 쓴 것으로 본다.
+            L.write_raw(None)
+        if step == "G":
+            L.grant_on_disk()
+        elif step == "R":
+            L.revoke("location")
+        else:
+            L.write_raw(dict(UNREADABLE)[step])
+
+    def test_fixed_sequences(self):
+        for seq, expect in ((("R", "잘린 JSON", "G", "빈 파일"), False),
+                            (("잘린 JSON", "R"), False),
+                            (("G", "granted 문자열 true", "G"), True),
+                            (("granted 문자열 false",), True)):
+            with self.subTest(seq):
+                L = Live(self)
+                L.cycle()
+                for s in seq:
+                    self._apply(L, s)
+                    L.cycle()
+                self.assertEqual(L.ctxs["wifi"]["allow_location"], expect)
+
+    def test_random_sequences(self):
+        rng = random.Random(20261123)
+        names = [n for n, _ in UNREADABLE]
+        L = Live(self)
+        L.cycle()
+        mem = True
+        for i in range(200):
+            s = rng.choice(["G", "R"] + names)
+            self._apply(L, s)
+            if s == "R":
+                mem = False
+            o, _ = L.cycle()
+            self.assertEqual(L.ctxs["wifi"]["allow_location"], mem, (i, s))
+            self.assertEqual(_wifi_ident(o.data["wifi"])[0] is not None, mem, (i, s))
+
+
+class TestOneCycleOneView(unittest.TestCase):
+    """ADV-4: 한 주기 안에서는 수집과 판정이 같은 동의 값을 본다 — 주기 도중 파일이 바뀌어도 다음 주기부터."""
+
+    def test_a_revoke_during_observe_waits_for_the_next_cycle(self):
+        L = Live(self)
+        L.cycle()
+        L.during_observe = lambda: L.revoke("location")
+        o, _ = L.cycle()
+        self.assertTrue(L.ctxs["wifi"]["allow_location"])
+        self.assertEqual(_wifi_ident(o.data["wifi"])[0], SSID)
+        self.assertEqual(L.engine.identity_ssid, SSID, "같은 주기의 판정도 동의가 있던 값으로 — 수집과 판정이 엇갈리지 않음")
+        o, _ = L.cycle()
+        self.assertEqual(_wifi_ident(o.data["wifi"]), (None, None))
+        self.assertIsNone(L.engine.identity_ssid)
+
+
 if __name__ == "__main__":
     unittest.main()

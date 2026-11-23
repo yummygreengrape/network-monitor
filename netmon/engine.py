@@ -10,6 +10,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import baseline, investigate, liveness, messages, vpn
+from . import config as configmod
 from .collect import arp, dhcp, dns, iface, link, route, wifi
 from .config import Config
 from .detect import quality
@@ -551,10 +552,44 @@ class Engine:
         self.anchor = obs
         return findings
 
+    # --- 동의 철회 ---
+    def _refresh_consent(self) -> None:
+        """디스크의 설정 파일에서 **철회만** 읽어 반영한다 — 이 주기의 수집·판정이 쓰기 전에, 주기마다 한 번.
+
+        실행 중인 netmon 은 시작할 때 읽은 설정을 쓴다. 그런데 `netmon consent revoke` 는 파일만 고쳐서, 위치 동의를 물려도 재시작 전까지
+        SSID·BSSID 를 계속 기록하고 외부 점검 동의를 물려도 터널 엔드포인트로 계속 보냈다(작업 2026-09-28-consent-revoke-running-agent).
+
+        - **좁히기만 한다.** 메모리에서 켜진 동의가 디스크에서 꺼졌으면 메모리에서 철회하고(`Config.revoke` — 딸린 기능도 끔, 저장하지
+          않음), 동의가 걸린 기능이 디스크에서 꺼졌으면 메모리에서 끈다. 동의를 주거나 기능을 켜는 것은 재시작 뒤에 적용된다(SPEC Q1).
+        - **못 읽은 주기는 아무것도 바꾸지 않는다**(`read_consent_view` 가 None — SPEC Q2). 그래서 메모리의 값은 늘 "시작 때 값과 지금까지
+          온전히 읽은 값 모두의 최소" 다.
+        - 주기 **처음에** 한 번만 읽는다. 수집(`observe`)과 판정(`judge`)이 같은 주기 안에서 서로 다른 동의 값을 보지 않게 하려는 것이다.
+
+        이 갱신이 에이전트를 멈추게 하지 않는다 — 실패하면 직전 값을 그대로 쓴다.
+        """
+        cfg = getattr(self, "cfg", None)
+        path = getattr(cfg, "path", None)
+        if not path:
+            return
+        try:
+            view = configmod.read_consent_view(path)
+            if view is None:
+                return
+            for name in configmod.CONSENTS:
+                if cfg.consented(name) and not view.consented(name):
+                    cfg.revoke(name)
+            for feat in configmod.FEATURE_CONSENT:
+                if cfg.effective(feat) and not view.effective(feat):
+                    cfg.set_feature(feat, False)
+        except Exception:
+            return
+
     # --- 한 주기 ---
     def cycle(self, now: Optional[float] = None) -> Tuple[Observation, List[Finding]]:
         import time
         now = now if now is not None else time.time()
+        # 철회는 수집 **전에** 반영한다 — 이 주기의 수집 문맥(위치·외부 요청 허용)부터 철회된 값이어야 한다.
+        self._refresh_consent()
         elapsed = (now - self.prev_wall) if self.prev_wall else 0.0
         obs = self.observe()
         findings = self.judge(obs, elapsed)
