@@ -1179,5 +1179,91 @@ class TestOneCycleOneView(unittest.TestCase):
         self.assertIsNone(L.engine.identity_ssid)
 
 
+class TestLinklessCyclesAfterTheConsentIsOff(unittest.TestCase):
+    """QA-5: 동의가 꺼진 뒤 링크 없는 주기의 `network` 는 비운다(Q3) — 실행 중 철회, 재시작 경로 모두."""
+
+    def _check_blank(self, L, findings):
+        kinds = [f.kind for f in findings]
+        self.assertIn("LINK_ABSENT", kinds)
+        for f in findings:
+            self.assertIsNone(f.network, f.kind)
+        self.assertIsNone(L.state_on_disk().get("network"))
+
+    def test_revoking_then_losing_the_link(self):
+        L = Live(self)
+        L.vpn = vpn_state("connected", provider="macos")
+        L.cycle()
+        L.revoke("location")
+        L.link_up = False
+        # 링크가 없는 주기에 VPN 도 끊긴다 — 링크 없는 주기의 VPN 판정(`vpn_detect.without_link`)이 나야 그 `network` 를 본다.
+        L.vpn = vpn_state("disconnected", reason=ENDPOINT_REASON, provider="macos")
+        before = L.lines()
+        _, findings = L.cycle(step=60.0)   # 공백도 함께 — MEASUREMENT_GAP 의 network 도 본다
+        self.assertIn("MEASUREMENT_GAP", [f.kind for f in findings])
+        self.assertTrue(any(f.kind.startswith("VPN_") for f in findings), "링크 없는 주기의 VPN 판정도 본다")
+        self._check_blank(L, findings)
+        for line in L.new_lines(before):
+            self.assertNotIn(SSID, line)
+        L.link_up = True
+        L.cycle()
+        self.assertEqual(_ssid_part(L.state_on_disk().get("network")), "-", "다음 완전한 주기가 관측 키로 채운다")
+
+    def test_restarting_with_the_consent_off_then_losing_the_link(self):
+        L = Live(self)
+        L.cycle()
+        self.assertEqual(_ssid_part(L.state_on_disk().get("network")), SSID)
+        L.revoke("location")
+        L.restart()
+        L.link_up = False
+        _, findings = L.cycle()
+        self._check_blank(L, findings)
+
+    def test_an_install_that_never_consented_keeps_its_key(self):
+        """처음부터 동의가 없던 설치는 SSID 자리가 이미 "-" 다 — 지금처럼 그 키를 쓴다(기준 커밋에서도 통과)."""
+        L = Live(self, grant=False)
+        L.cycle()
+        key = L.state_on_disk().get("network")
+        self.assertEqual(_ssid_part(key), "-")
+        L.link_up = False
+        _, findings = L.cycle()
+        absent = [f for f in findings if f.kind == "LINK_ABSENT"]
+        self.assertEqual([f.network for f in absent], [key])
+        self.assertEqual(L.state_on_disk().get("network"), key)
+
+    def test_a_consented_install_keeps_its_key(self):
+        """동의가 켜진 채 링크가 끊기면 지금처럼 SSID 를 품은 키 그대로다(기준 커밋에서도 통과)."""
+        L = Live(self)
+        L.cycle()
+        key = L.state_on_disk().get("network")
+        L.link_up = False
+        _, findings = L.cycle()
+        self.assertEqual([f.network for f in findings if f.kind == "LINK_ABSENT"], [key])
+
+
+class TestKeyParsing(unittest.TestCase):
+    """ADV-3: SSID 자리를 읽는 규칙 — SSID 에 `|` 가 있어도, 상태 값이 문자열이 아니어도."""
+
+    def test_keys(self):
+        from netmon.detect import network_without_ssid
+        for key, keep in (("en0|-|192.0.2.0/24", True), ("en0|-|-", True),
+                          ("en0|ExampleNet|192.0.2.0/24", False), ("en0|a|b|192.0.2.0/24", False),
+                          ("en0|-|x|-", False), ("en0||192.0.2.0/24", False), ("en0|||-", False),
+                          ("en0|", False), ("garbage", False), (5, False), (["en0|-|-"], False),
+                          ({"k": 1}, False)):
+            with self.subTest(key):
+                self.assertEqual(network_without_ssid(key), key if keep else None)
+        self.assertIsNone(network_without_ssid(None))
+
+    def test_a_ssid_with_separators_is_still_blanked(self):
+        L = Live(self)
+        L.world = obs(ssid="a|-|b", bssid=BSSID)
+        L.cycle()
+        L.revoke("location")
+        L.link_up = False
+        _, findings = L.cycle()
+        for f in findings:
+            self.assertIsNone(f.network, f.kind)
+
+
 if __name__ == "__main__":
     unittest.main()

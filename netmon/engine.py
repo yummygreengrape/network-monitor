@@ -17,8 +17,8 @@ from .detect import quality
 # 수집기 `netmon.vpn` 과 이름이 겹쳐 별칭으로 부른다.
 from .detect import vpn as vpn_detect
 from .detect import (Context, associated_without_ipv4, attributions_for, gap_exceeded,
-                     is_complete, network_aliases, network_key, next_last_ssid, read_ssid,
-                     run_all)
+                     is_complete, network_aliases, network_key, network_without_ssid, next_last_ssid,
+                     read_ssid, run_all)
 from . import messages as msg
 from .model import CONFIRMED, INFO, INFO_SEV, Finding, Observation, unwrap
 from .store import Store
@@ -459,6 +459,11 @@ class Engine:
         # 기준선도 건드리지 않는다 — 링크가 없는 동안의 값은 기준이 될 수 없다.
         if not is_complete(obs):
             self.link_gap = True
+            # 위치 정보를 쓰지 않는 동안(동의 철회·기능 끔 — 재시작 경로 포함)에는 직전 상태의 키에 SSID 가 남아 있어도 이 주기의 판정과
+            # 상태에 싣지 않는다 — 비운다(작업 2026-09-28-consent-revoke-running-agent Q3). 다음 완전한 주기가 관측 키로 다시 채운다. 처음부터
+            # 동의가 없던 설치의 키는 SSID 자리가 이미 "-" 라 그대로 남는다.
+            if not self.cfg.effective("detect.evil_twin"):
+                self.state["network"] = network_without_ssid(self.state.get("network"))
             iface = obs.get("iface") or {}
             summary = (msg.LINK_ABSENT_NO_IPV4 if associated_without_ipv4(iface)
                        else msg.LINK_ABSENT)

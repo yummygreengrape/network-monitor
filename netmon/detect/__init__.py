@@ -121,6 +121,20 @@ def network_key_with(obs: Observation, ssid_part: str) -> str:
     return "|".join([str(obs.get("iface", "primary") or "-"), ssid_part, _subnet_part(obs)])
 
 
+def network_without_ssid(key: Any) -> Optional[str]:
+    """SSID 자리가 비어 있는("-") 키면 그대로, 아니면 None — 위치 정보를 쓰지 않는 동안 남겨도 되는 `network` 값.
+
+    위치 동의가 꺼진 뒤 링크 없는 주기는 새 관측 키를 만들지 못하고 직전 상태의 키를 이벤트에 싣는데, 그 키가 동의 중에 만든 것이면
+    SSID 를 품고 있다(작업 2026-09-28-consent-revoke-running-agent Q3 — 비운다). 키는 `인터페이스|SSID|서브넷` 이고(`network_key_with`)
+    인터페이스 이름과 서브넷에는 `|` 가 없으며 SSID 에는 있을 수 있으므로, SSID 자리는 첫 `|` 와 마지막 `|` 사이다 — 키를 `|` 로 쪼개지
+    않는다. 문자열이 아니거나 이 모양이 아니면 품은 것을 알 수 없으므로 None(남기지 않는 쪽).
+    한계: SSID 가 글자 그대로 "-" 인 네트워크는 비어 있는 자리와 구별되지 않아 남는다.
+    """
+    if not isinstance(key, str) or key.count("|") < 2:
+        return None
+    return key if key[key.index("|") + 1:key.rindex("|")] == "-" else None
+
+
 def _subnet_part(obs: Observation) -> str:
     addr = unwrap(obs.get("dhcp", "yiaddr")) or _first_inet(obs)
     mask = obs.get("dhcp", "subnet_mask") or obs.get("iface", "primary_netmask")
