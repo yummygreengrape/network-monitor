@@ -154,6 +154,15 @@ netmon location status                    current permission state
 netmon consent revoke location            revoke (the related features are turned off as well)
 ```
 
+A revoke reaches a netmon that is already running and reads the same configuration file (the always-on
+agent, `run`, `capture`) from its **next measurement cycle**: the SSID and BSSID stop being recorded and
+nothing more goes to the tunnel endpoint. Values already recorded are not deleted. Granting consent or
+turning a feature on takes effect only after a restart (`netmon service restart` for the agent). While
+location access is not in use, a cycle with no link leaves the `network` field of its events empty rather
+than repeating the last key, which may hold an SSID. If the consent part of the configuration file cannot
+be read (a hand edit that leaves `granted` as a string, a truncated file), a netmon that is starting treats
+every consent as not given, and one that is running keeps what it last read.
+
 ### Why location access goes through a separate app
 
 macOS grants location access **per app**. A script run from a terminal has no app to ask on its
@@ -376,7 +385,8 @@ Written in Korean.
   엔드포인트 측정을 켜면 VPN 이 연결돼 있지 않은 동안(끊김·재협상) 공급자가 사유에 적어 준 터널
   상대편(엔드포인트) 주소로 ICMP 를 보냅니다(ping_count 만큼, 기본 1발). 보낼지는 직전 주기의 상태로
   정하므로 다시 연결된 직후 첫 주기에도 나갈 수 있고, 공급자마다 한 끊김에 최대 12발까지만 보냅니다.
-  동의하기 전에는 SSID·BSSID를 기록조차 하지 않아요.
+  동의하기 전에는 SSID·BSSID를 기록조차 하지 않아요. 동의를 철회하면 이미 실행 중인 netmon 에도 다음 측정
+  주기부터 적용돼요(이미 기록된 값은 지우지 않아요). 동의를 주는 것은 다시 시작한 뒤에 적용돼요.
 - **로그에는 식별자 원문이 남고, 남에게 보낼 때 `--redact` 로 가립니다.** 보고서와 실시간 화면에는
   식별자가 나오지 않아요. 가리기는 로컬 솔트 HMAC 이라 같은 값이 같은 토큰이 되고, 자유 문자열에서
   가리지 못하는 모양은 위 [Privacy](#privacy) 절에 적어 두었어요.

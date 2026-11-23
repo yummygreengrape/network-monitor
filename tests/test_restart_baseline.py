@@ -303,8 +303,9 @@ class TestTheLastReadSsidSurvivesARestartWithItsAnchor(unittest.TestCase):
         self.assertTrue(g.data["wifi"]["helper_unavailable"])
 
     def test_turning_the_consent_off_and_restarting_drops_the_ssid_from_the_snapshot(self):
-        """설정은 에이전트가 시작할 때 읽는다 — 동의를 끄고 재시작하면 되살린 값은 쓰이지 않고, 첫 완전한 판정 주기에 지워지며 그 주기에
-        스냅샷이 다시 쓰인다(재시작 직후 첫 저장은 60초를 기다리지 않음)."""
+        """동의를 끄고 재시작하는 경로 — 되살린 값은 쓰이지 않고, 첫 완전한 판정 주기에 지워지며 그 주기에
+        스냅샷이 다시 쓰인다(재시작 직후 첫 저장은 60초를 기다리지 않음). 실행 중 철회는 다음 측정 주기부터 같은 규칙이다
+        (tests/test_privacy.py `TestRevokingLocationWhileRunning`)."""
         e = self.engine()
         a = obs(ts="2026-01-01T00:00:00Z", ssid=SSID)
         e.judge(a, 0.0)
