@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .util import ts_now
 
@@ -125,7 +125,12 @@ class Config:
 
     # --- 기능 ---
     def feature(self, name: str) -> bool:
-        return bool(self.data.get("features", {}).get(name, DEFAULTS["features"].get(name, False)))
+        # 모양이 틀린 값(`features` 가 객체가 아님)에서 예외를 내지 않는다 — 기본값으로 본다. `load` 가 이미 고쳐 두지만 메모리의 설정은
+        # 다른 경로(시험·replay)도 만든다.
+        feats = self.data.get("features")
+        if not isinstance(feats, dict):
+            feats = {}
+        return bool(feats.get(name, DEFAULTS["features"].get(name, False)))
 
     def set_feature(self, name: str, value: Any) -> None:
         self.data.setdefault("features", {})[name] = value
@@ -149,8 +154,11 @@ class Config:
     def consented(self, name: Optional[str]) -> bool:
         if not name:
             return True
-        rec = self.data.get("consents", {}).get(name)
-        return bool(rec and rec.get("granted"))
+        # **불리언 참만 동의다.** `"granted": "false"` 같은 문자열을 `bool()` 로 읽으면 동의로 뒤집힌다(작업
+        # 2026-09-28-consent-revoke-running-agent 재현). 모양이 틀린 값은 동의 없음이다.
+        consents = self.data.get("consents")
+        rec = consents.get(name) if isinstance(consents, dict) else None
+        return isinstance(rec, dict) and rec.get("granted") is True
 
     def grant(self, name: str, note: str = "") -> None:
         if name not in CONSENTS:
@@ -190,18 +198,90 @@ class Config:
         os.replace(tmp, self.path)
 
 
+def _read_json(path: str) -> Tuple[bool, Any]:
+    """(읽었는가, 값). **어떤 예외도 밖으로 내지 않는다.**
+
+    없는 파일·권한 없음·디렉터리(OSError), 깨진 JSON·UTF-8 이 아닌 바이트(ValueError)만이 아니다 — 깊게 중첩된 JSON 은
+    `RecursionError` 를 낸다(ValueError 가 아님, PLAN 검수 1회차 실측). 상시 실행 에이전트가 주기마다 이 파일을 읽으므로, 여기서 새는
+    예외는 에이전트를 멈추고 launchd 가 되살리면 또 멈춘다.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return True, json.load(fh)
+    except Exception:
+        return False, None
+
+
+@dataclass
+class ConsentView:
+    """디스크 설정 파일의 동의와 기능 스위치 — 실행 중인 netmon 이 주기마다 철회를 확인하는 데 쓴다(`read_consent_view`)."""
+    consents: Dict[str, bool]
+    features: Dict[str, Any]
+
+    def consented(self, name: Optional[str]) -> bool:
+        return True if not name else bool(self.consents.get(name, False))
+
+    def feature(self, name: str) -> bool:
+        return bool(self.features.get(name, DEFAULTS["features"].get(name, False)))
+
+    def effective(self, name: str) -> bool:
+        """`Config.effective` 와 같은 규칙 — 켜져 있고 필요한 동의도 있는가."""
+        return self.feature(name) and self.consented(FEATURE_CONSENT.get(name))
+
+
+def _consent_view_of(on_disk: Any) -> Optional[ConsentView]:
+    """읽은 JSON 값에서 동의·기능 스위치를 뽑는다. **못 읽음**이면 None.
+
+    못 읽음(작업 2026-09-28-consent-revoke-running-agent AC-2): 최상위가 객체가 아님, `consents` 가 객체가 아님, 알려진 동의(`CONSENTS`)의
+    값이 객체가 아님, 그 `granted` 가 불리언이 아님(문자열 `"false"`·숫자·null·키 없음 포함), `features` 가 객체가 아님.
+    온전히 읽혔는데 동의 항목이 없으면 그 동의는 없음(철회)이다 — `{}` 도 온전한 파일이다.
+    """
+    if not isinstance(on_disk, dict):
+        return None
+    consents = on_disk.get("consents", {})
+    if not isinstance(consents, dict):
+        return None
+    got: Dict[str, bool] = {}
+    for name in CONSENTS:
+        if name not in consents:
+            got[name] = False
+            continue
+        rec = consents[name]
+        if not isinstance(rec, dict) or not isinstance(rec.get("granted"), bool):
+            return None
+        got[name] = rec["granted"]
+    features = on_disk.get("features", {})
+    if not isinstance(features, dict):
+        return None
+    return ConsentView(consents=got, features=dict(features))
+
+
+def read_consent_view(path: str) -> Optional[ConsentView]:
+    """설정 파일의 동의·기능 스위치. 못 읽으면(파일 없음 포함) None — 부르는 쪽이 직전 값을 그대로 쓴다(SPEC Q2)."""
+    ok, on_disk = _read_json(path)
+    return _consent_view_of(on_disk) if ok else None
+
+
 def load(path: Optional[str] = None) -> Config:
+    """시작할 때 읽는 설정. **어떤 모양의 파일에서도 예외를 내지 않는다.**
+
+    동의·기능 스위치를 못 읽으면(`_consent_view_of` 가 None — 한 동의의 `granted` 만 틀려도) **동의 전부를 없음**으로 본다: 직전에 읽은
+    값이 없는 시작 때는 보내지 않는 쪽이다(작업 2026-09-28-consent-revoke-running-agent ASSUMED 1). `features` 가 객체가 아니면 기능
+    기본값. 동의와 무관한 키(`interval` 등)는 지금처럼 그대로 읽는다 — 그 키들의 모양 경화는 그 작업의 범위 밖이다.
+    """
     path = path or os.path.join(config_home(), "config.json")
     data = json.loads(json.dumps(DEFAULTS))  # 깊은 복사
     if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as fh:
-                on_disk = json.load(fh)
-        except (OSError, ValueError):
+        ok, on_disk = _read_json(path)
+        if not ok or not isinstance(on_disk, dict):
             on_disk = {}
         for k, v in on_disk.items():
             if isinstance(v, dict) and isinstance(data.get(k), dict):
                 data[k].update(v)
             else:
                 data[k] = v
+        if _consent_view_of(on_disk) is None:
+            data["consents"] = {}
+        if not isinstance(data.get("features"), dict):
+            data["features"] = json.loads(json.dumps(DEFAULTS["features"]))
     return Config(path=path, data=data)

@@ -5,22 +5,31 @@
 """
 from __future__ import annotations
 
+import contextlib
+import copy
+import io
 import json
 import os
+import random
 import shutil
 import tempfile
 import unittest
 from unittest import mock
 
+from netmon import __main__ as climod
 from netmon import config as configmod
 from netmon import engine as enginemod
 from netmon import redact as redactmod
 from netmon import util
+from netmon.collect import wifi as wificol
 from netmon.engine import Engine
-from netmon.model import ident
+from netmon.model import ident, unwrap
 from netmon.store import Store
-from tests.helpers import (ENDPOINT, ENDPOINT_REASON, GW, GW_MAC,
+from tests.helpers import (BSSID, ENDPOINT, ENDPOINT_REASON, GW, GW_MAC, GW_MAC_ALT, SSID,
                            endpoint_probe, obs, vpn_state)
+
+# 진짜 Wi-Fi 수집기. 시험이 엔진 쪽 `collect` 를 바꿔 끼운 뒤에도 이것을 부른다.
+_REAL_WIFI_COLLECT = wificol.collect
 
 
 class TestRedaction(unittest.TestCase):
@@ -632,6 +641,245 @@ class TestACollectorFailureCarriesNoPath(unittest.TestCase):
                           ensure_ascii=False)
         self.assertNotIn(self.bad, text)
         self.assertNotIn(self.dir, text)
+
+
+# ───────────────────────── 실행 중인 netmon 의 동의 철회 (작업 2026-09-28-consent-revoke-running-agent)
+#
+# 설정은 시작할 때 한 번 읽혔고 철회는 파일만 고쳤다 — 위치 동의를 물려도 재시작 전까지 SSID·BSSID 를 계속 기록하고, 외부 점검 동의를
+# 물려도 터널 엔드포인트 ICMP 를 계속 보냈다. 아래 시험은 실제 `Engine.cycle` 을 돌리고(수집기의 `collect` 만 바꿔 끼움), Wi-Fi 수집기는
+# 진짜 것을 쓴다 — 동의 게이트가 수집기 안(netmon/collect/wifi.py)에 있기 때문이다. 철회는 실제 CLI(`netmon consent revoke`)로 한다.
+
+# 동의가 걸린 기능 다섯 개(netmon/config.py FEATURE_CONSENT).
+FIVE = ("detect.evil_twin", "detect.public_ip", "detect.dns_intercept", "detect.tls_intercept", "vpn.tunnel_probe")
+# Wi-Fi 를 뺀 수집기. 이것들은 준비한 관측 블록을 그대로 돌려준다.
+FAKED = ("iface", "arp", "dhcp", "route", "dns", "link")
+
+# SPEC AC-2 의 "못 읽음" 모양. (이름, 파일 내용 바이트 또는 None = 파일 없음)
+UNREADABLE = [
+    ("파일 없음", None),
+    ("빈 파일", b""),
+    ("잘린 JSON", b'{"consents": {"location": {"granted": fal'),
+    ("최상위 목록", b"[]"),
+    ("최상위 null", b"null"),
+    ("최상위 숫자", b"5"),
+    ("최상위 문자열", b'"x"'),
+    ("consents null", b'{"consents": null}'),
+    ("consents 목록", b'{"consents": []}'),
+    ("동의 값 true", b'{"consents": {"location": true, "external_probes": true}}'),
+    ("동의 값 문자열", b'{"consents": {"location": "yes", "external_probes": "yes"}}'),
+    ("granted 문자열 false", b'{"consents": {"location": {"granted": "false"}, "external_probes": {"granted": "false"}}}'),
+    ("granted 문자열 true", b'{"consents": {"location": {"granted": "true"}, "external_probes": {"granted": "true"}}}'),
+    ("granted 0", b'{"consents": {"location": {"granted": 0}, "external_probes": {"granted": 0}}}'),
+    ("granted 1", b'{"consents": {"location": {"granted": 1}, "external_probes": {"granted": 1}}}'),
+    ("granted null", b'{"consents": {"location": {"granted": null}, "external_probes": {"granted": null}}}'),
+    ("features null", b'{"consents": {"location": {"granted": true}, "external_probes": {"granted": true}}, "features": null}'),
+    ("features 목록", b'{"consents": {"location": {"granted": true}, "external_probes": {"granted": true}}, "features": []}'),
+    # json 이 ValueError 가 아닌 RecursionError 를 낸다(PLAN 검수 1회차).
+    ("깊은 중첩", b"[" * 100000),
+    ("읽기 권한 없음", "NOPERM"),
+    ("경로가 디렉터리", "DIR"),
+]
+
+# 동의 게이트 기능이 켜진 파일에서만 드러나는 모양 — 기능이 꺼져 있으면 `effective` 가 동의를 읽기 전에 거짓을 돌려줘 예외도 동의도 가려진다.
+_ON = b'"features": {"detect.evil_twin": true, "detect.public_ip": true, "detect.dns_intercept": true, "detect.tls_intercept": true, "vpn.tunnel_probe": true, "vpn.enabled": true}'
+UNREADABLE += [
+    ("consents null·기능 켬", b'{"consents": null, ' + _ON + b"}"),
+    ("consents 목록·기능 켬", b'{"consents": [], ' + _ON + b"}"),
+    ("동의 값 true·기능 켬", b'{"consents": {"location": true, "external_probes": true}, ' + _ON + b"}"),
+    ("granted 문자열 false·기능 켬", b'{"consents": {"location": {"granted": "false"}, "external_probes": {"granted": "false"}}, ' + _ON + b"}"),
+    ("한 동의만 granted 문자열·기능 켬", b'{"consents": {"location": {"granted": true}, "external_probes": {"granted": "yes"}}, ' + _ON + b"}"),
+]
+
+
+def _ssid_part(key):
+    """판정·상태의 `network` 키에서 SSID 자리(첫 `|` 와 마지막 `|` 사이). 시험 쪽 독립 구현이다."""
+    if not isinstance(key, str) or key.count("|") < 2:
+        return None
+    return key[key.index("|") + 1:key.rindex("|")]
+
+
+def _cli(*argv):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = climod.main(list(argv))
+    return rc, out.getvalue()
+
+
+class Live:
+    """실행 중인 netmon 하나. 설정 파일·기록 폴더는 임시 폴더에 있다."""
+
+    def __init__(self, tc, grant=True):
+        self.tc = tc
+        self.dir = tempfile.mkdtemp()
+        tc.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "config.json")
+        cfg = configmod.load(self.path)
+        cfg.set_feature("vpn.enabled", True)
+        cfg.set_feature("vpn.providers", ["macos"])
+        if grant:
+            for c in ("location", "external_probes"):
+                cfg.grant(c)
+            for f in FIVE:
+                cfg.set_feature(f, True)
+        cfg.save()
+        self.data = os.path.join(self.dir, "data")
+        self.world = obs(ssid=SSID, bssid=BSSID)
+        # 끊긴 VPN — 사유에 공인 엔드포인트가 있다. 동의·기능이 켜져 있으면 다음 주기에 그 주소가 수집기로 넘어간다.
+        self.vpn = vpn_state("disconnected", reason=ENDPOINT_REASON, provider="macos")
+        self.link_up = True
+        self.wall = 1000.0
+        self.ctxs = {}
+        self.during_observe = None
+        self.engine = self.start()
+
+    # --- 프로세스 ---
+    def start(self):
+        """`cmd_run` 과 같은 순서 — 시작 때 설정을 읽어 엔진을 만든다."""
+        return Engine(configmod.load(self.path), Store(self.data))
+
+    def restart(self):
+        self.engine = self.start()
+        return self.engine
+
+    # --- 수집기 ---
+    def _fake(self, name):
+        def collect(ctx=None):
+            self.ctxs[name] = dict(ctx or {})
+            block = copy.deepcopy(self.world.data.get(name, {}))
+            if name == "iface" and not self.link_up:
+                block.update(primary=None, primary_kind="unknown", default4_iface=None,
+                             default4_gateway=None, scoped_gateway=None)
+            return block
+        return collect
+
+    def _wifi(self, ctx):
+        """진짜 Wi-Fi 수집기. 명령 실행과 파싱만 바꿔 끼운다 — 이 프로세스에 위치 권한이 있는 경우(가장 단순한 갈래)."""
+        self.ctxs["wifi"] = dict(ctx)
+        if self.during_observe:
+            hook, self.during_observe = self.during_observe, None
+            hook()
+        parsed = {"ssid": SSID, "bssid": BSSID, "security": "WPA2", "link_active": "TRUE"}
+        with mock.patch.object(wificol, "run", return_value=mock.Mock(out="")), \
+                mock.patch.object(wificol, "parse_wifi_summary", return_value=parsed), \
+                mock.patch.object(wificol, "location_state", return_value="granted"):
+            return _REAL_WIFI_COLLECT(ctx)
+
+    @contextlib.contextmanager
+    def collectors(self):
+        """수집기의 `collect` 만 바꿔 끼운다 — 모듈의 다른 함수(엔진이 쓰는 `link.packets_per_command` 등)는 진짜다."""
+        with contextlib.ExitStack() as stack:
+            for n in FAKED:
+                stack.enter_context(mock.patch.object(getattr(enginemod, n), "collect", side_effect=self._fake(n)))
+            stack.enter_context(mock.patch.object(enginemod.wifi, "collect", side_effect=self._wifi))
+            stack.enter_context(mock.patch.object(enginemod.vpn, "resolve", return_value=["macos"]))
+            stack.enter_context(mock.patch.object(enginemod.vpn, "collect",
+                                                  side_effect=lambda _p: copy.deepcopy(self.vpn)))
+            yield
+
+    def cycle(self, step=5.0):
+        self.wall += step
+        self.ctxs = {}
+        with self.collectors():
+            o, f = self.engine.cycle(now=self.wall)
+        self.engine.persist(o, f)
+        return o, f
+
+    # --- 설정 파일 ---
+    def revoke(self, item):
+        rc, out = _cli("--config", self.path, "consent", "revoke", item)
+        self.tc.assertEqual(rc, 0, out)
+        return out
+
+    def grant_on_disk(self):
+        cfg = configmod.load(self.path)
+        for c in ("location", "external_probes"):
+            cfg.grant(c)
+        for f in FIVE:
+            cfg.set_feature(f, True)
+        cfg.save()
+
+    def write_raw(self, content):
+        if os.path.isdir(self.path):
+            os.rmdir(self.path)
+        elif os.path.exists(self.path):
+            os.chmod(self.path, 0o600)
+            os.remove(self.path)
+        if content is None:
+            return
+        if content == "DIR":
+            os.mkdir(self.path)
+            return
+        if content == "NOPERM":
+            with open(self.path, "w", encoding="utf-8") as fh:
+                fh.write('{"consents": {}}')
+            os.chmod(self.path, 0)
+            self.tc.addCleanup(lambda: os.path.exists(self.path) and os.chmod(self.path, 0o600))
+            return
+        with open(self.path, "wb") as fh:
+            fh.write(content)
+
+    # --- 기록 ---
+    def lines(self):
+        """기록 폴더의 표본·이벤트 줄. {파일 이름: [줄]}"""
+        out = {}
+        if os.path.isdir(self.data):
+            for name in sorted(os.listdir(self.data)):
+                if name.endswith(".jsonl"):
+                    with open(os.path.join(self.data, name), encoding="utf-8") as fh:
+                        out[name] = fh.read().splitlines()
+        return out
+
+    def new_lines(self, before):
+        now = self.lines()
+        return [line for name, ls in now.items() for line in ls[len(before.get(name, [])):]]
+
+    def state_on_disk(self):
+        return Store(self.data).load_state()
+
+    def baseline_on_disk(self):
+        return Store(self.data).load_baseline()
+
+
+def _wifi_ident(sample_wifi):
+    """(SSID, BSSID) — 감싼 값(`ident`)이면 벗긴다. 표본에서 읽은 dict 도 같은 모양이다."""
+    w = sample_wifi or {}
+    return unwrap(w.get("ssid")), unwrap(w.get("bssid"))
+
+
+class TestUnreadableConfigFiles(unittest.TestCase):
+    """ADV-1: 설정 파일 경계 모양."""
+
+    def test_starting_on_a_bad_file_does_not_crash_and_means_no_consent(self):
+        for name, content in UNREADABLE:
+            with self.subTest(name):
+                L = Live(self, grant=False)
+                L.write_raw(content)
+                L.restart()
+                o, _ = L.cycle()
+                self.assertFalse(L.ctxs["wifi"]["allow_location"])
+                self.assertFalse(L.ctxs["link"]["allow_tunnel_probe"])
+                self.assertEqual(_wifi_ident(o.data["wifi"]), (None, None))
+                for f in FIVE:
+                    self.assertFalse(L.engine.cfg.effective(f), f)
+
+    def test_the_cycle_view_reads_nothing_from_a_bad_file(self):
+        for name, content in UNREADABLE:
+            with self.subTest(name):
+                L = Live(self, grant=False)
+                L.write_raw(content)
+                self.assertIsNone(configmod.read_consent_view(L.path))
+
+    def test_the_cycle_view_reads_a_good_file(self):
+        L = Live(self)
+        view = configmod.read_consent_view(L.path)
+        self.assertIsNotNone(view)
+        L.revoke("location")
+        view = configmod.read_consent_view(L.path)
+        self.assertFalse(view.consented("location"))
+        self.assertTrue(view.consented("external_probes"))
+        for good in (b"{}", b'{"consents": {}}', b'{"consents": {"location": {"granted": false}}}'):
+            L.write_raw(good)
+            self.assertIsNotNone(configmod.read_consent_view(L.path), good)
 
 
 if __name__ == "__main__":
